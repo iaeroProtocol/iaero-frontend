@@ -52,7 +52,7 @@ export const CONTRACTS: Record<SupportedChainId, NetworkAddresses> = {
     LIQ: "0x7ee8964160126081cebC443a42482E95e393e6A8",
     PermalockVault: "0x877398Aea8B5cCB0D482705c2D88dF768c953957",
     StakingDistributor: "0x5ae34974387DFE5B141770274aDC7ef5749FC7E1",
-    RewardsHarvester: "0x1dcDcc16167520256C3B13E18266615D504769FF",
+    RewardsHarvester: "0x1f935ebfEED8D68b901c154338223A33d044AcFa",
     VotingManager: "0x1702ddF00E4ff3Ed892e569A26E0f1f6858e6fbB",
     LIQStakingDistributor: "0x4b591F40c9E2A8E11495837386e1c03c8605Be16",
     LIQLinearVester: "0xF1d25F4ee64988Afad0f1612cc3d540725F319Db",
