@@ -1,0 +1,789 @@
+// ==============================================
+// src/components/protocol/RewardsSection.tsx
+// ==============================================
+import React, { useEffect, useMemo, useState, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { ethers } from "ethers";
+
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
+import {
+  Gift,
+  TrendingUp,
+  Loader2,
+  Clock,
+  DollarSign,
+  CheckCircle,
+  RefreshCw,
+  History,
+  Zap,
+  Info,
+} from "lucide-react";
+
+import { useProtocol } from "@/components/contexts/ProtocolContext";
+import { useStaking } from "../contracts/hooks/useStaking";
+import { getContractAddress } from "../contracts/addresses";
+import {
+  parseInputToBigNumber,
+  formatBigNumber,
+  calculateYield,
+} from "../lib/defi-utils";
+import { getProvider } from "../lib/ethereum";
+import { usePrices, PriceData } from "@/components/contexts/PriceContext";
+import { WalletTokensSection } from "@/components/wallet/WalletTokensSection";
+
+interface RewardsSectionProps {
+  showToast: (m: string, t: "success" | "error" | "info" | "warning") => void;
+  formatNumber: (v: string | number) => string;
+}
+
+interface RewardTokenRow {
+  address: string;
+  symbol: string;
+  decimals: number;
+  amountBN: bigint;
+  usdValue: number;
+  icon: string;
+  gradient: string;
+}
+
+interface TxHistory {
+  type: "claim" | "claimAll";
+  tokens: string[];
+  amounts: string[];
+  totalValue: number;
+  timestamp: number;
+  txHash?: string;
+}
+
+const TOKEN_DECIMALS: Record<string, number> = { AERO: 18, ETH: 18, USDC: 6, LIQ: 18 };
+const GAS_ESTIMATES = {
+  claimSingle: 120000n,
+  claimAll: 200000n,
+};
+
+const WETH      = "0x4200000000000000000000000000000000000006".toLowerCase();
+const USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".toLowerCase();
+
+const ERC20_META_ABI = [
+  "function symbol() view returns (string)",
+  "function decimals() view returns (uint8)",
+];
+
+const ZERO = "0x0000000000000000000000000000000000000000";
+
+const msgFromError = (e: any, fallback = "Transaction failed") => {
+  if (e?.code === 4001) return "Transaction rejected by user";
+  const m = String(e?.message || "").toLowerCase();
+  if (m.includes("insufficient funds")) return "Insufficient ETH for gas fees";
+  if (m.includes("no pending rewards")) return "No rewards available to claim";
+  return fallback;
+};
+
+const formatTimeAgo = (t: number) => {
+  const s = Math.floor((Date.now() - t) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+};
+
+export default function RewardsSection({ showToast, formatNumber }: RewardsSectionProps) {
+  const {
+    connected,
+    networkSupported,
+    chainId,
+    pendingRewards,
+    balances,
+    loading,
+    loadPendingRewards,
+  } = useProtocol();
+
+  const {
+    claimAllRewards,
+    claimReward,
+    loading: stakingLoading,
+    calculateStakingAPR,
+  } = useStaking();
+
+  const { prices, getPriceInUSD } = usePrices();
+
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [progressStep, setProgressStep] = useState("");
+  const [claimingSpecific, setClaimingSpecific] = useState<string | null>(null);
+  const [stakingAPR, setStakingAPR] = useState(0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showSuccess, setShowSuccess] = useState(false);
+  const [txHistory, setTxHistory] = useState<TxHistory[]>([]);
+  const [showGasEstimate, setShowGasEstimate] = useState(false);
+  const [estimatedGasCost, setEstimatedGasCost] = useState<string>("0");
+
+  const formatUSD = (v: number, max = 6) => {
+    if (!isFinite(v) || v === 0) return "$0";
+    const tiny = 1e-6;
+    if (v > 0 && v < tiny) {
+      // Format the threshold itself nicely: 0.000001 -> "0.000001"
+      const threshold = tiny.toLocaleString(undefined, { maximumFractionDigits: max });
+      return `< $${threshold}`;
+    }
+    return `$${v.toLocaleString(undefined, {
+      minimumFractionDigits: v < 1 ? Math.min(max, 6) : 2,  // finer granularity under $1
+      maximumFractionDigits: max,
+    })}`;
+  };
+
+  
+  type RewardMeta = { symbol: string; decimals: number; price: number };
+  const [rewardMeta, setRewardMeta] = useState<Record<string, RewardMeta>>({});
+
+  const txBaseUrl = useMemo(
+    () =>
+      chainId === 84532
+        ? "https://sepolia.basescan.org/tx/"
+        : chainId === 8453
+        ? "https://basescan.org/tx/"
+        : "https://etherscan.io/tx/",
+    [chainId]
+  );
+
+  const stakedIAeroBN = useMemo(
+    () => parseInputToBigNumber(balances?.stakedIAero || "0"),
+    [balances?.stakedIAero]
+  );
+
+  useEffect(() => {
+    if (!connected || !networkSupported) return;
+    (async () => {
+      try {
+        const apr = await calculateStakingAPR();
+        setStakingAPR(Number((apr as any)?.aero || 0));
+      } catch (e) {
+        console.error("calculateStakingAPR", e);
+      }
+    })();
+  }, [connected, networkSupported, calculateStakingAPR]);
+
+  const estimateGasCost = useCallback(async (action: "single" | "all") => {
+    try {
+      const provider = getProvider();
+      const fee = await provider.getFeeData();
+      const gasPrice =
+        fee.maxFeePerGas ?? fee.gasPrice ?? ethers.parseUnits("1", "gwei");
+      const gasLimit =
+        action === "all" ? GAS_ESTIMATES.claimAll : GAS_ESTIMATES.claimSingle;
+      const gasCost = gasPrice * gasLimit;
+      return formatBigNumber(gasCost, 18, 4);
+    } catch {
+      return "0.001";
+    }
+  }, []);
+
+  useEffect(() => {
+    if (connected && networkSupported) {
+      estimateGasCost("all").then(setEstimatedGasCost);
+    }
+  }, [connected, networkSupported, estimateGasCost, pendingRewards]);
+
+  // Resolve known token addresses on current chain
+  const aeroAddr = useMemo(() => {
+    try {
+      return (getContractAddress("AERO", chainId) || "").toLowerCase();
+    } catch {
+      return "";
+    }
+  }, [chainId]);
+
+  const liqAddr = useMemo(() => {
+    try {
+      return (getContractAddress("LIQ", chainId) || "").toLowerCase();
+    } catch {
+      return "";
+    }
+  }, [chainId]);
+
+  useEffect(() => {
+    if (!connected || !networkSupported) return;
+  
+    const tokens: string[] = Array.isArray((pendingRewards as any)?.tokens)
+      ? (pendingRewards as any).tokens
+      : [];
+  
+    if (!tokens.length) { setRewardMeta({}); return; }
+  
+    const provider = getProvider();
+  
+    (async () => {
+      // 1) read metadata in parallel
+      const metaEntries = await Promise.all(tokens.map(async (t) => {
+        const addr = (t || "").toString().toLowerCase();
+        if (!addr) return null;
+  
+        // Known quick paths (no RPC)
+        if (addr === WETH) return [addr, { symbol: "WETH", decimals: 18, price: 0 }] as const;
+        if (addr === USDC) return [addr, { symbol: "USDC", decimals: 6, price: 0 }] as const;
+  
+        try {
+          const c = new ethers.Contract(addr, ERC20_META_ABI, provider);
+          const [sym, dec] = await Promise.all([c.symbol(), c.decimals()]);
+          return [addr, { symbol: String(sym), decimals: Number(dec), price: 0 }] as const;
+        } catch {
+          return [addr, { symbol: "TOKEN", decimals: 18, price: 0 }] as const;
+        }
+      }));
+  
+      const baseMeta = Object.fromEntries((metaEntries.filter(Boolean) as [string, RewardMeta][]));
+  
+      // 2) batch price query
+      const q = new URLSearchParams({
+        chainId: String(chainId ?? 8453),
+        addresses: Object.keys(baseMeta).join(","),
+      });
+      let priceMap: Record<string, number> = {};
+      try {
+        const res = await fetch(`/api/prices/token?${q}`, { cache: "no-store" });
+        if (res.ok) {
+          const j = await res.json();
+          priceMap = j?.prices || {};
+        }
+      } catch {/* ignore */}
+  
+      // 3) merge prices, with client-side fallbacks if needed
+      const merged = Object.fromEntries(
+        Object.entries(baseMeta).map(([addr, m]) => {
+          let price = priceMap[addr.toLowerCase()] ?? 0;
+          if (!price && addr === WETH) price = Number(prices.ETH?.usd || 0);
+          if (!price && addr === USDC) price = Number(prices.USDC?.usd || 1);
+          return [addr, { ...m, price }];
+        })
+      ) as Record<string, RewardMeta>;
+  
+      setRewardMeta(merged);
+    })();
+  }, [connected, networkSupported, pendingRewards, chainId, prices]);
+  
+  
+  
+
+  
+
+  // Build reward rows from pending rewards (tokens/amounts arrays expected)
+  const rows: RewardTokenRow[] = useMemo(() => {
+    const tokens: string[] = Array.isArray((pendingRewards as any)?.tokens)
+      ? (pendingRewards as any).tokens
+      : [];
+    const amounts: (string | bigint)[] = Array.isArray((pendingRewards as any)?.amounts)
+      ? (pendingRewards as any).amounts
+      : [];
+  
+    const out: RewardTokenRow[] = [];
+  
+    for (let i = 0; i < tokens.length; i++) {
+      const addr = (tokens[i] || "").toString().toLowerCase();
+      const rawAmt = amounts[i] ?? "0";
+  
+      // metadata & fallbacks
+      const meta = rewardMeta[addr];
+      let symbol =
+        meta?.symbol ??
+        (addr === aeroAddr ? "AERO" : addr === liqAddr ? "LIQ" : addr === ZERO ? "ETH" : "TOKEN");
+      let decimals =
+        meta?.decimals ??
+        (addr === ZERO ? TOKEN_DECIMALS.ETH
+         : addr === aeroAddr ? TOKEN_DECIMALS.AERO
+         : addr === liqAddr ? TOKEN_DECIMALS.LIQ
+         : 18);
+  
+      let icon = "💰";
+      let gradient = "from-slate-600 to-slate-700";
+      if (addr === aeroAddr) { icon = "🚀"; gradient = "from-blue-500 to-cyan-500"; }
+      else if (addr === ZERO) { icon = "⚡"; gradient = "from-purple-500 to-indigo-500"; }
+      else if (addr === liqAddr) { icon = "🟣"; gradient = "from-fuchsia-500 to-purple-600"; }
+  
+      const amountBN =
+        typeof rawAmt === "bigint"
+          ? rawAmt
+          : parseInputToBigNumber(String(rawAmt), decimals);
+  
+      const tokenAmount = parseFloat(ethers.formatUnits(amountBN, decimals));
+      const price = meta?.price ?? 0;                // <-- price resolved by address (not symbol)
+      const usdValue = (isFinite(tokenAmount) ? tokenAmount : 0) * price;
+  
+      out.push({ address: addr, symbol, decimals, amountBN, usdValue, icon, gradient });
+    }
+  
+    return out;
+  }, [pendingRewards, rewardMeta, aeroAddr, liqAddr]);
+  
+
+  const hasRewards = useMemo(() => rows.some((r) => r.amountBN > 0n), [rows]);
+  const totalRewardsUSD = useMemo(
+    () => rows.reduce((s, r) => s + r.usdValue, 0),
+    [rows]
+  );
+
+  const dailyRewardsPretty = useMemo(() => {
+    if (stakedIAeroBN === 0n || stakingAPR === 0) return "0";
+    const dailyYieldBN = calculateYield(stakedIAeroBN, stakingAPR, 1, 18);
+    return formatBigNumber(dailyYieldBN, 18, 4);
+  }, [stakedIAeroBN, stakingAPR]);
+
+  const addToHistory = (
+    type: TxHistory["type"],
+    tokens: string[],
+    amounts: string[],
+    totalValue: number,
+    txHash?: string
+  ) =>
+    setTxHistory((prev) => [
+      { type, tokens, amounts, totalValue, timestamp: Date.now(), txHash },
+      ...prev.slice(0, 4),
+    ]);
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await loadPendingRewards();
+      showToast("Rewards refreshed", "info");
+    } catch (e) {
+      showToast("Failed to refresh rewards", "error");
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const checkGasBalance = async (): Promise<boolean> => {
+    try {
+      const provider = getProvider();
+      const fee = await provider.getFeeData();
+      const gasPrice =
+        fee.maxFeePerGas ?? fee.gasPrice ?? ethers.parseUnits("1", "gwei");
+      const gasLimit = GAS_ESTIMATES.claimAll;
+      const gasCost = gasPrice * gasLimit;
+      const ethBal = parseInputToBigNumber(balances.ethBalance || "0");
+      if (ethBal < gasCost) {
+        showToast(
+          `Insufficient ETH for gas. Need ~${formatBigNumber(gasCost, 18, 4)} ETH`,
+          "warning"
+        );
+        return false;
+      }
+      return true;
+    } catch {
+      return true;
+    }
+  };
+
+  const handleClaimAll = async () => {
+    if (!hasRewards) return showToast("No rewards to claim", "info");
+    if (!(await checkGasBalance())) return;
+
+    setIsProcessing(true);
+    setProgressStep("Claiming all rewards...");
+    try {
+      await claimAllRewards(
+        (receipt: any) => {
+          setShowSuccess(true);
+          setTimeout(() => setShowSuccess(false), 3000);
+          addToHistory(
+            "claimAll",
+            rows.map((r) => r.symbol),
+            rows.map((r) => formatBigNumber(r.amountBN, r.decimals, 4)),
+            totalRewardsUSD,
+            receipt?.transactionHash
+          );
+          showToast(
+            `Successfully claimed all rewards! Total value: ${formatUSD(
+              totalRewardsUSD, 6
+            )}`,
+            "success"
+          );
+        },
+        (e: any) => showToast(msgFromError(e, "Claim failed"), "error"),
+        (p: string) => setProgressStep(p)
+      );
+    } finally {
+      setIsProcessing(false);
+      setProgressStep("");
+    }
+  };
+
+  const handleClaimSpecific = async (
+    address: string,
+    symbol: string,
+    decimals: number,
+    amountBN: bigint,
+    usdValue: number
+  ) => {
+    if (!amountBN || amountBN === 0n)
+      return showToast(`No ${symbol} rewards to claim`, "info");
+
+    const gasEst = await estimateGasCost("single");
+    setEstimatedGasCost(gasEst);
+
+    setClaimingSpecific(address);
+    setProgressStep(`Claiming ${symbol} rewards...`);
+    try {
+      await claimReward(
+        address,
+        (receipt: any) => {
+          const pretty = formatBigNumber(amountBN, decimals, 4);
+          setShowSuccess(true);
+          setTimeout(() => setShowSuccess(false), 3000);
+          addToHistory("claim", [symbol], [pretty], usdValue, receipt?.transactionHash);
+          showToast(`Successfully claimed ${pretty} ${symbol}!`, "success");
+        },
+        (e: any) => showToast(msgFromError(e, `${symbol} claim failed`), "error"),
+        (p: string) => setProgressStep(p)
+      );
+    } finally {
+      setClaimingSpecific(null);
+      setProgressStep("");
+    }
+  };
+
+  if (!connected || !networkSupported) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: -20 }}
+        className="space-y-6"
+      >
+        <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50">
+          <CardContent className="p-8 text-center">
+            <Gift className="w-12 h-12 text-slate-400 mx-auto mb-4" />
+            <h3 className="text-xl font-semibold text-white mb-2">Connect Wallet</h3>
+            <p className="text-slate-400">
+              Connect your wallet and stake iAERO to start earning rewards
+            </p>
+          </CardContent>
+        </Card>
+
+      </motion.div>
+    );
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+      className="space-y-6"
+    >
+      <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-white flex items-center space-x-2">
+              <Gift className="w-6 h-6" />
+              <span>Your Rewards</span>
+              {loading?.balances && <Loader2 className="w-4 h-4 animate-spin ml-2" />}
+            </CardTitle>
+            <Button
+              onClick={handleRefresh}
+              disabled={isRefreshing || isProcessing}
+              variant="ghost"
+              size="sm"
+              className="text-slate-400 hover:text-white"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRefreshing ? "animate-spin" : ""}`} />
+            </Button>
+          </div>
+        </CardHeader>
+
+        <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-4 mb-4">
+          <div className="flex items-start space-x-3">
+            <Clock className="w-5 h-5 text-blue-400 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="text-base text-slate-300">
+                Rewards will be distributed and claimable after epoch ends sometime
+                after 11:59am UTC every Thursday
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <CardContent className="space-y-6">
+          {stakedIAeroBN === 0n && (
+            <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-4">
+              <div className="flex items-center space-x-3">
+                <Clock className="w-5 h-5 text-blue-400" />
+                <div>
+                  <p className="font-medium text-blue-400">Start Earning Rewards</p>
+                  <p className="text-sm text-slate-300 mt-1">
+                    Stake your iAERO tokens to start earning AERO and other rewards
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {rows.length > 0 && hasRewards && (
+            <div className="bg-gradient-to-r from-emerald-500/10 to-teal-500/10 rounded-xl p-6 border border-emerald-500/20">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <p className="text-slate-400 text-sm">Total Rewards Value</p>
+                  <p className="text-3xl font-bold text-emerald-400">
+                    {formatUSD(totalRewardsUSD, 6)}
+                  </p>
+                </div>
+                <div className="w-12 h-12 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-xl flex items-center justify-center">
+                  <DollarSign className="w-6 h-6 text-white" />
+                </div>
+              </div>
+              <div className="flex items-center justify-between pt-3 border-t border-emerald-500/10">
+                <div className="flex items-center space-x-2 text-sm">
+                  <Zap className="w-3 h-3 text-slate-400" />
+                  <span className="text-slate-400">Est. gas cost:</span>
+                  <span className="text-slate-300">~{estimatedGasCost} ETH</span>
+                </div>
+                <Button
+                  onClick={() => setShowGasEstimate((s) => !s)}
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs text-slate-400 hover:text-white"
+                >
+                  <Info className="w-3 h-3" />
+                </Button>
+              </div>
+              {showGasEstimate && (
+                <div className="mt-2 p-2 bg-slate-900/50 rounded text-xs text-slate-400">
+                  Gas estimates are based on current network conditions. Actual cost
+                  may vary.
+                </div>
+              )}
+            </div>
+          )}
+
+          {rows.length > 0 ? (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {rows.map((r, idx) => (
+                  <motion.div
+                    key={`${r.address}-${idx}`}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: idx * 0.05 }}
+                    className="bg-slate-900/50 rounded-xl p-6 border border-slate-700/30 relative overflow-hidden group"
+                  >
+                    <div
+                      className={`absolute top-0 right-0 w-16 h-16 bg-gradient-to-br ${r.gradient} opacity-10 rounded-full transform translate-x-6 -translate-y-6 group-hover:scale-110 transition-transform duration-300`}
+                    />
+                    <div className="relative">
+                      <div className="flex items-center justify-between mb-3">
+                        <span className="text-2xl">{r.icon}</span>
+                        <span className="text-slate-400 text-sm font-medium">
+                          {r.symbol}
+                        </span>
+                      </div>
+                      <div className="text-2xl font-bold text-white mb-1">
+                        {formatBigNumber(r.amountBN, r.decimals, 4)}
+                      </div>
+                      <div className="text-sm text-slate-400 mb-3">
+                        ≈ {formatUSD(r.usdValue, 6)}
+                      </div>
+                      {r.amountBN > 0n && (
+                        <Button
+                          onClick={() =>
+                            handleClaimSpecific(
+                              r.address,
+                              r.symbol,
+                              r.decimals,
+                              r.amountBN,
+                              r.usdValue
+                            )
+                          }
+                          disabled={
+                            r.amountBN === 0n || Boolean(claimingSpecific) || isProcessing
+                          }
+                          size="sm"
+                          variant="outline"
+                          className="w-full border-slate-600 text-slate-200 hover:bg-slate-700"
+                        >
+                          {claimingSpecific === r.address ? (
+                            <>
+                              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                              Claiming...
+                            </>
+                          ) : (
+                            `Claim ${r.symbol}`
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+
+              <Button
+                onClick={handleClaimAll}
+                disabled={!hasRewards || isProcessing || stakingLoading || Boolean(claimingSpecific)}
+                className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 disabled:opacity-50 py-3 text-lg"
+              >
+                {isProcessing ? (
+                  <div className="flex items-center justify-center space-x-2">
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <span>{progressStep || "Processing..."}</span>
+                  </div>
+                ) : (
+                  <>
+                    <Gift className="w-5 h-5 mr-2" />
+                    {hasRewards
+                      ? `Claim All Rewards (${formatUSD(totalRewardsUSD, 6)})`
+                      : "No Rewards to Claim"}
+                  </>
+                )}
+              </Button>
+
+              {isProcessing && (
+                <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-4">
+                  <Progress value={progressStep ? 75 : 25} className="mb-2" />
+                  <p className="text-sm text-slate-300">{progressStep}</p>
+                </div>
+              )}
+
+              <AnimatePresence>
+                {showSuccess && (
+                  <motion.div
+                    initial={{ scale: 0.8, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    exit={{ scale: 0.8, opacity: 0 }}
+                    className="flex items-center justify-center py-4"
+                  >
+                    <div className="bg-emerald-500/20 rounded-full p-4">
+                      <CheckCircle className="w-12 h-12 text-emerald-400" />
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </>
+          ) : (
+            <div className="bg-slate-900/30 rounded-xl p-8 border border-slate-700/20 text-center">
+              <Gift className="w-12 h-12 text-slate-500 mx-auto mb-4" />
+              <h3 className="text-lg font-medium text-slate-400 mb-2">No Rewards Yet</h3>
+              <p className="text-sm text-slate-500">
+                {stakedIAeroBN > 0n
+                  ? "Your rewards will appear here once they're distributed"
+                  : "Stake iAERO to start earning rewards"}
+              </p>
+            </div>
+          )}
+
+          {connected && stakedIAeroBN > 0n && (
+            <div className="bg-slate-900/30 rounded-xl p-4 border border-slate-700/20">
+              <h4 className="text-white font-medium mb-3 flex items-center">
+                <TrendingUp className="w-4 h-4 mr-2" />
+                Your Staking Position
+              </h4>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <p className="text-slate-400 text-sm">Staked Amount</p>
+                  <p className="text-white font-medium text-lg">
+                    {formatBigNumber(stakedIAeroBN, 18, 2)} iAERO
+                  </p>
+                </div>
+                <div>
+                  <p className="text-slate-400 text-sm">Est. Daily Rewards</p>
+                  <p className="text-emerald-400 font-medium text-lg">
+                    ~{dailyRewardsPretty} AERO
+                  </p>
+                </div>
+                <div>
+                  <p className="text-slate-400 text-sm">Current APR</p>
+                  <p className="text-purple-400 font-medium text-lg">
+                    {stakingAPR.toFixed(1)}%
+                  </p>
+                </div>
+                <div>
+                  <p className="text-slate-400 text-sm">Position Value</p>
+                  <p className="text-white font-medium text-lg">
+                    $
+                    {formatNumber(
+                      getPriceInUSD(
+                        "iAERO",
+                        parseFloat(formatBigNumber(stakedIAeroBN, 18, 6))
+                      )
+                    )}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {txHistory.length > 0 && (
+            <div className="bg-slate-900/30 rounded-xl p-4 border border-slate-700/20">
+              <h4 className="text-white font-medium mb-3 flex items-center">
+                <History className="w-4 h-4 mr-2" />
+                Recent Claims
+              </h4>
+              <div className="space-y-2">
+                {txHistory.map((tx, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center justify-between text-sm p-2 bg-slate-900/50 rounded"
+                  >
+                    <div className="flex items-center space-x-3">
+                      <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
+                      <div>
+                        <span className="text-slate-300">
+                          {tx.type === "claimAll"
+                            ? "Claimed All"
+                            : `Claimed ${tx.tokens.join(", ")}`}
+                        </span>
+                        <span className="text-slate-500 text-xs ml-2">
+                          {formatTimeAgo(tx.timestamp)}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      <span className="text-emerald-400 font-medium">
+                        {formatUSD(tx.totalValue, 6)}
+                      </span>
+                      {tx.txHash && (
+                        <a
+                          href={`${txBaseUrl}${tx.txHash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-400 hover:text-blue-300"
+                        >
+                          ↗
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {!txHistory.length && (
+            <div className="bg-slate-900/30 rounded-xl p-4 border border-slate-700/20">
+              <h4 className="text-white font-medium mb-3">Recent Activity</h4>
+              <div className="space-y-2 text-sm">
+                {hasRewards ? (
+                  <div className="text-slate-300">New rewards available for claiming</div>
+                ) : (
+                  <div className="text-slate-500 text-center py-4">No recent activity</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="text-xs text-slate-500 text-center">
+            <span>Press </span>
+            <kbd className="px-1.5 py-0.5 bg-slate-700 rounded">R</kbd>
+            <span> to refresh • </span>
+            <kbd className="px-1.5 py-0.5 bg-slate-700 rounded">⌘</kbd>
+            <span> + </span>
+            <kbd className="px-1.5 py-0.5 bg-slate-700 rounded">Enter</kbd>
+            <span> to claim all</span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Wallet assets (auto-detected) */}
+      <WalletTokensSection />
+
+    </motion.div>
+  );
+}
