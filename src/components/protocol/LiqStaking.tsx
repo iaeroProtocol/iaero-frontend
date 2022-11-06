@@ -159,6 +159,29 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
     }
   };
 
+  const getClaimableTokens = async (): Promise<string[]> => {
+    try {
+      const response = await fetch('https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json');
+      const data = await response.json();
+      
+      const currentEpoch = data.currentEpoch;
+      const previousEpoch = data.previousEpoch;
+      
+      const tokens = new Set<string>();
+      if (data.epochs[currentEpoch]?.tokens) {
+        data.epochs[currentEpoch].tokens.forEach((t: string) => tokens.add(t));
+      }
+      if (data.epochs[previousEpoch]?.tokens) {
+        data.epochs[previousEpoch].tokens.forEach((t: string) => tokens.add(t));
+      }
+      
+      return Array.from(tokens);
+    } catch (e) {
+      console.error('Failed to fetch token list:', e);
+      return [];
+    }
+  };
+
   // Check if approval is needed
   useEffect(() => {
     if (stakeAmount && parseFloat(stakeAmount) > 0) {
@@ -286,12 +309,22 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
     setLoading(true);
     
     try {
-      const contracts = await getContracts(true); // Get signer
+      const contracts = await getContracts(true);
       if (!contracts?.LIQStakingDistributor) throw new Error("LIQ Staking contract not initialized");
       
-      const tx = await contracts.LIQStakingDistributor.claimRewards();
+      const tokens = await getClaimableTokens();
       
-      showToast("Claiming rewards...", "info");
+      let tx;
+      if (tokens.length > 0 && contracts.LIQStakingDistributor.claimMany) {
+        // Use new batch claim if available
+        tx = await contracts.LIQStakingDistributor.claimMany(tokens);
+        showToast(`Claiming ${tokens.length} reward tokens...`, "info");
+      } else {
+        // Fallback to old method
+        tx = await contracts.LIQStakingDistributor.claimRewards();
+        showToast("Claiming rewards...", "info");
+      }
+      
       await tx.wait();
       showToast("Rewards claimed!", "success");
       
