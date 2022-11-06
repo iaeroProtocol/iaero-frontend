@@ -11,6 +11,7 @@ import {
 } from '../lib/ethereum';
 import { getContractAddress, type ContractName } from '../contracts/addresses';
 import { ABIS } from '../contracts/abis';
+import { fetchPricesWithCache } from '@/lib/client-prices';
 
 
 type ProtocolState = {
@@ -644,7 +645,8 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
       }
       
       // Calculate TVL based on AERO locked in vault (not iAERO supply)
-      const aeroPrice = 1.15;
+      const prices = await fetchPricesWithCache();
+      const aeroPrice = prices.aeroUsd || 0;
       const aeroLockedNum = parseFloat(totalAeroLockedFormatted);
       const totalValueLocked = aeroLockedNum * aeroPrice;
       
