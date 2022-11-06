@@ -558,7 +558,7 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
   }, [state.connected, state.account, state.networkSupported, state.chainId, getContracts]);
   
 
-  // Load protocol stats - FIXED VERSION
+  // Load protocol stats
   const loadStats = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', payload: { stats: true } });
     
@@ -632,8 +632,19 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
           // Fallback: assume all is circulating if we can't get vesting data
           totalVested = liqSupply;
         }
-
-      
+              
+        // Circulating supply is what has been vested
+        const circulating = totalVested;
+              
+        liqSupplyFormatted = ethers.formatEther(liqSupply);
+        liqCirculatingFormatted = ethers.formatEther(circulating);
+              
+        console.log('LIQ total supply:', liqSupplyFormatted);
+        console.log('LIQ circulating:', liqCirculatingFormatted);
+              
+      } catch (e: any) {
+        console.error('Failed to get LIQ supply:', e);
+      }
       // Get emission rate
       let emissionRateFormatted = '1';
       try {
