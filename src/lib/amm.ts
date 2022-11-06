@@ -7,6 +7,7 @@ const BASE_RPC_URL = process.env.BASE_RPC_URL || "https://mainnet.base.org";
 // Aerodrome pool addresses (double‑check these are the ones you expect)
 const IAERO_AERO_POOL = "0x08d49DA370ecfFBC4c6Fdd2aE82B2D6aE238Affd";
 const LIQ_USDC_POOL   = "0x8966379fCD16F7cB6c6EA61077B6c4fAfECa28f4";
+const USDC_AERO_POOL = "0x6cDcb1C4A4D1C3C6d054b27AC5B77e89eAFb971d";
 
 const BASE_USDC = (process.env.BASE_USDC ||
   "0x833589fCD6EDb6E08f4c7C32D4f71b54bdA02913").toLowerCase();
@@ -70,6 +71,11 @@ export async function getPegIAEROinAERO(): Promise<number> {
   const iaero = getContractAddress("iAERO", 8453);
   const aero  = getContractAddress("AERO", 8453);
   return priceFromPool(IAERO_AERO_POOL, iaero, aero);
+}
+
+export async function getAEROinUSDC(): Promise<number> {
+  const aero = getContractAddress("AERO", 8453);
+  return priceFromPool(USDC_AERO_POOL, aero, BASE_USDC);
 }
 
 /** LIQ in USDC (≈ USD) */
