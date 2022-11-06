@@ -62,7 +62,7 @@ export default function IaeroProtocolApp() {
                  <Sparkles className="w-6 h-6 text-white" />
                </div>
                <div>
-                 <h1 className="text-2xl font-bold text-white">iAERO Protocol</h1>
+                 <h1 className="text-xl md:text-2xl font-bold text-white">iAERO Protocol</h1>
                  <p className="text-xs text-slate-400">Liquid Staking on Base</p>
                </div>
              </div>
@@ -72,7 +72,7 @@ export default function IaeroProtocolApp() {
                  href="https://docs.iaero.finance" 
                  target="_blank" 
                  rel="noopener noreferrer"
-                 className="text-slate-300 hover:text-white transition-colors text-xl"
+                 className="text-slate-300 hover:text-white transition-colors text-base md:text-xl"
                >
                  Docs
                </a>
@@ -92,7 +92,7 @@ export default function IaeroProtocolApp() {
          animate={{ opacity: 1, y: 0 }}
          className="text-center mb-12"
        >
-         <h2 className="text-4xl md:text-5xl font-bold text-white mb-4">
+         <h2 className="text-2xl md:text-4xl lg:text-5xl font-bold text-white mb-4">
            Unlock Liquidity from Your AERO
          </h2>
          <p className="text-lg text-slate-300 max-w-3xl mx-auto">
@@ -114,23 +114,23 @@ export default function IaeroProtocolApp() {
        <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50 w-full max-w-7xl mx-auto">
          <CardContent className="p-8">
            <Tabs defaultValue="lock" className="w-full">
-             <TabsList className="grid grid-cols-4 w-full mb-8">
-               <TabsTrigger value="lock">
-                 <Lock className="w-4 h-4 mr-2" />
-                 Lock AERO
-               </TabsTrigger>
-               <TabsTrigger value="stake">
-                 <Zap className="w-4 h-4 mr-2" />
-                 Stake iAERO
-               </TabsTrigger>
-               <TabsTrigger value="rewards">
-                 <Gift className="w-4 h-4 mr-2" />
-                 Rewards
-               </TabsTrigger>
-               <TabsTrigger value="stake-liq">
-                 <Coins className="w-4 h-4 mr-2" />
-                 Stake LIQ
-               </TabsTrigger>
+             <TabsList className="flex flex-wrap w-full mb-8 gap-1">
+              <TabsTrigger value="lock" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
+                <Lock className="w-3 h-3 mr-1" />
+                Lock
+              </TabsTrigger>
+              <TabsTrigger value="stake" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
+                <Zap className="w-3 h-3 mr-1" />
+                Stake
+              </TabsTrigger>
+              <TabsTrigger value="rewards" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
+                <Gift className="w-3 h-3 mr-1" />
+                Rewards
+              </TabsTrigger>
+              <TabsTrigger value="stake-liq" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
+                <Coins className="w-3 h-3 mr-1" />
+                LIQ
+              </TabsTrigger>
              </TabsList>
 
              <TabsContent value="lock">
