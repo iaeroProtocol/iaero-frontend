@@ -2,7 +2,7 @@
 import { ethers } from "ethers";
 import { getContractAddress } from "@/components/contracts/addresses";
 
-const BASE_RPC_URL = process.env.BASE_RPC_URL || "https://mainnet.base.org";
+const BASE_RPC_URL = process.env.NEXT_PUBLIC_BASE_RPC_URL || "https://mainnet.base.org";
 
 // Aerodrome pool addresses (double‑check these are the ones you expect)
 const IAERO_AERO_POOL = "0x08d49DA370ecfFBC4c6Fdd2aE82B2D6aE238Affd";
