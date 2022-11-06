@@ -644,7 +644,7 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
       }
       
       // Calculate TVL based on AERO locked in vault (not iAERO supply)
-      const aeroPrice = 2.15;
+      const aeroPrice = 1.15;
       const aeroLockedNum = parseFloat(totalAeroLockedFormatted);
       const totalValueLocked = aeroLockedNum * aeroPrice;
       
