@@ -10,6 +10,7 @@ const inter = Inter({ subsets: ["latin"] });
 export const metadata: Metadata = {
   title: "iAERO Protocol - Liquid Staking",
   description: "Liquid staking protocol for AERO tokens on Base",
+  viewport: "width=device-width, initial-scale=1.0, maximum-scale=1.0",
 };
 
 export default function RootLayout({
