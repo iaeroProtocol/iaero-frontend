@@ -141,6 +141,53 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     [balances?.stakedIAero]
   );
 
+  const ZERO = "0x0000000000000000000000000000000000000000";
+  const DEFAULT_WETH_BASE = "0x4200000000000000000000000000000000000006"; // Base WETH
+
+  async function fetchPricesForAddrs(addrs: string[], chainId?: number): Promise<Record<string, number>> {
+    const unique = Array.from(new Set(addrs.map(a => a.toLowerCase()).filter(Boolean)));
+    if (unique.length === 0) return {};
+
+    // 1) Try your internal Next API
+    try {
+      const q = new URLSearchParams({
+        chainId: String(chainId ?? 8453),
+        addresses: unique.join(',')
+      });
+      const res = await fetch(`/api/prices/token?${q}`, { cache: 'no-store' });
+      if (res.ok) {
+        const j = await res.json();
+        const map = j?.prices || {};
+        const out: Record<string, number> = {};
+        for (const k of Object.keys(map)) out[k.toLowerCase()] = Number(map[k]) || 0;
+        if (Object.keys(out).length) return out;
+      }
+    } catch { /* fall through */ }
+
+    // 2) Fallback to DeFi Llama directly (works on Pages)
+    try {
+      // Map ZERO (native ETH) → WETH so we can price it
+      const baseWeth = DEFAULT_WETH_BASE.toLowerCase();
+      const forLlama = unique.map(a => (a === ZERO ? baseWeth : a));
+      const ids = forLlama.map(a => `base:${a}`).join(',');
+      const r = await fetch(`https://coins.llama.fi/prices/current/${ids}`);
+      if (!r.ok) return {};
+      const data = await r.json();
+
+      const out: Record<string, number> = {};
+      for (const [key, val] of Object.entries<any>(data.coins || {})) {
+        const addr = key.split(':')[1]?.toLowerCase();
+        const px = Number(val?.price);
+        if (addr && isFinite(px)) out[addr] = px;
+      }
+      // Put a price for ZERO by copying WETH (if present)
+      if (!out[ZERO] && out[baseWeth]) out[ZERO] = out[baseWeth];
+      return out;
+    } catch {
+      return {};
+    }
+  }
+
   useEffect(() => {
     if (!connected || !networkSupported) return;
     (async () => {
@@ -187,7 +234,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       }
     })();
     // re-run when account/network flips or after successful claim
-  }, [connected, networkSupported, chainId, getPendingRewards]);
+  }, [connected, networkSupported, chainId, account, getPendingRewards]);
   
 
   // Resolve known token addresses on current chain
@@ -208,33 +255,26 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
   }, [chainId]);
 
   // Build a price map keyed by lowercased addresses present in `pending`
+// replace your existing priceByAddr useEffect with this version
 const [priceByAddr, setPriceByAddr] = useState<Record<string, number>>({});
 
 useEffect(() => {
   if (!connected || !networkSupported) return;
-  const addrs = pending.map(p => (p.token || '').toLowerCase()).filter(Boolean);
-  if (!addrs.length) { setPriceByAddr({}); return; }
+
+  const list = pending.map(p => (p.token || '').toLowerCase()).filter(Boolean);
+  if (!list.length) { setPriceByAddr({}); return; }
 
   (async () => {
     try {
-      // call your existing API: /api/prices/token?addresses=0x...,0x...
-      const q = new URLSearchParams({
-        chainId: String(chainId ?? 8453),
-        addresses: Array.from(new Set(addrs)).join(',')
-      });
-      const res = await fetch(`/api/prices/token?${q}`, { cache: 'no-store' });
-      const j = res.ok ? await res.json() : { prices: {} };
-      const map = j?.prices || {};
-      // ensure lowercased keys
-      const normalized: Record<string, number> = {};
-      for (const k of Object.keys(map)) normalized[k.toLowerCase()] = Number(map[k]) || 0;
-      setPriceByAddr(normalized);
+      const map = await fetchPricesForAddrs(list, chainId ?? 8453);
+      setPriceByAddr(map);
     } catch (e) {
       console.error('price fetch failed', e);
       setPriceByAddr({});
     }
   })();
 }, [connected, networkSupported, chainId, pending]);
+
 
 
   // Build reward rows from pending rewards (tokens/amounts arrays expected)
@@ -245,8 +285,10 @@ useEffect(() => {
       const addr = (p.token || '').toLowerCase();
       if (!addr) continue;
   
-      const decimals = typeof p.decimals === 'number' ? p.decimals : 18;
-      const symbol = p.symbol || (addr === aeroAddr ? 'AERO' : addr === liqAddr ? 'LIQ' : 'TOKEN');
+      const isETH = addr === ZERO;
+      const decimals = typeof p.decimals === 'number' ? p.decimals : (isETH ? 18 : 18);
+      const symbol = p.symbol || (isETH ? 'ETH' : (addr === aeroAddr ? 'AERO' : addr === liqAddr ? 'LIQ' : 'TOKEN'));
+
   
       // p.amount is human units (string). Convert to BN for consistency with your UI types.
       // (This is only for formatting; claims use the address and epoch in the hook)
