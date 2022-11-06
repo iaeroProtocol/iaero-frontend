@@ -243,8 +243,8 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
       }
       const calcId = ++latestRewardCalc.current;
       try {
-        const liqAmount = await calculateLiqRewards(debouncedDepositAmount);
-        if (calcId === latestRewardCalc.current) setExpectedLiq(liqAmount);
+        const result = await calculateLiqRewards(debouncedDepositAmount);
+        if (calcId === latestRewardCalc.current) setExpectedLiq(result.liqToUser);
       } catch (e) {
         console.error("calculateLiqRewards", e);
         if (calcId === latestRewardCalc.current) setExpectedLiq("0");

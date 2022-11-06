@@ -17,6 +17,8 @@ import { useStaking } from "../contracts/hooks/useStaking";
 import { parseInputToBigNumber, formatBigNumber, sanitizeDecimalInput, useDebounce, validateTokenAmount, calculateYield } from "../lib/defi-utils";
 import { switchToBaseSepolia, getProvider } from "../lib/ethereum";
 import { usePrices } from "@/components/contexts/PriceContext";
+import { useRewardTokens } from '../contracts/hooks/useRewardTokens';
+
 
 interface StakeSectionProps {
   showToast: (message: string, type: 'success' | 'error' | 'info' | 'warning') => void;
@@ -26,6 +28,9 @@ interface StakeSectionProps {
 interface TxHistory { type: "stake" | "unstake"; amount: string; timestamp: number; txHash?: string; }
 const MIN_STAKE_AMOUNT = ethers.parseUnits("0.01", 18);
 
+const DEFAULT_STAKING_APR =
+  Number(process.env.NEXT_PUBLIC_DEFAULT_STAKING_APR ?? '30');
+  
 const msgFromError = (e: any, fallback = "Transaction failed") => {
   if (e?.code === 4001) return "Transaction rejected by user";
   const m = String(e?.message || "").toLowerCase();
@@ -322,8 +327,8 @@ export default function StakeSection({ showToast, formatNumber }: StakeSectionPr
               <div className="flex justify-between items-center mb-2"><span className="text-slate-400">Current APR</span><span className="text-emerald-400 font-semibold text-xl">{stakingAPR?.aero?.toFixed ? stakingAPR.aero.toFixed(1) : '0.0'}%</span></div>
               {showAPRBreakdown && (
                 <div className="mt-3 pt-3 border-t border-slate-700/50 text-xs space-y-1">
-                  <div className="flex justify-between"><span className="text-slate-500">Base APR:</span><span className="text-slate-400">10.0%</span></div>
-                  <div className="flex justify-between"><span className="text-slate-500">Boost:</span><span className="text-emerald-400">+{((stakingAPR?.aero ?? 0) - 10).toFixed(1)}%</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Base APR:</span><span className="text-slate-400">30.0%</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Boost:</span><span className="text-emerald-400">+{((stakingAPR?.aero ?? 0) - 30).toFixed(1)}%</span></div>
                   <div className="text-slate-500 mt-2 italic">Stake more to increase rewards</div>
                 </div>
               )}

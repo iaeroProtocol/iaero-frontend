@@ -21,10 +21,12 @@ interface StakingStats {
   rewardTokensCount: number;
 }
 interface PendingReward {
-  token: string;
-  amount: string;
-  symbol?: string;
+  token: string;       // address (lowercased in JSON loader)
+  amount: string;      // human units (formatted)
+  symbol?: string;     // optional symbol (resolved ERC20)
+  decimals?: number;   // 👈 add this
 }
+
 
 export type ProgressCallback = (message: string) => void;
 export type SuccessCallback = (receipt: ContractTransactionReceipt) => void;
@@ -412,53 +414,133 @@ export const useStaking = () => {
     }
   }, [getContracts]);
 
-  const getPendingRewards = useCallback(async (userAddress?: string, tokenFileUrl = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"): Promise<PendingReward[]> => {
-    try {
-      const contracts = await getContracts();
-      const sd = contracts?.stakingDistributor;
-      if (!sd) return [];
+  const getPendingRewards = useCallback(
+    async (
+      userAddress?: string,
+      tokenFileUrl = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"
+    ): Promise<PendingReward[]> => {
+      try {
+        const contracts = await getContracts();
+        const sd = contracts?.stakingDistributor;
+        if (!sd) return [];
+  
+        // Resolve the user address robustly (ethers v6)
+        let addr = userAddress || "";
+        if (!addr) {
+          // Try signer address first if sd was built with a signer
+          const r: any = sd.runner;
+          if (r && typeof r.getAddress === "function") {
+            try { addr = await r.getAddress(); } catch {}
+          }
+          // Fallback to whatever the caller placed in context
+          if (!addr) addr = (contracts as any).account || "";
+        }
+        if (!addr) return [];
+  
+        // This is an epoch distributor: we need current + previous epoch
+        if (typeof (sd as any).currentEpoch !== "function") return [];
+  
+        const nowEpoch: bigint = await sd.currentEpoch();
+        const prevEpoch: bigint = nowEpoch - WEEK;
+  
+        // Get token list (same source the keeper uses)
+        const tokens = await loadClaimTokensFromJson(tokenFileUrl);
+        if (!tokens.length) return [];
 
-      const addr = userAddress || sd.runner?.address;
-      if (!addr) return [];
-
-      const tokens = await loadClaimTokensFromJson(tokenFileUrl);
-      if (!tokens.length) return [];
-
-      const nowEpoch: bigint = await sd.currentEpoch();
-      const prevEpoch: bigint = nowEpoch - WEEK;
-
-      const out: PendingReward[] = [];
-      for (const t of tokens) {
-        const [aNow, aPrev] = await Promise.all([
-          sd.previewClaim(addr, t, nowEpoch).catch(() => 0n),
-          sd.previewClaim(addr, t, prevEpoch).catch(() => 0n),
-        ]);
-        const total = (aNow ?? 0n) + (aPrev ?? 0n);
-        if (total === 0n) continue;
-
-        let symbol = 'ETH';
-        let decimals = 18;
-        if (t !== ethers.ZeroAddress) {
+        console.debug('[getPendingRewards] addr=', addr, 'tokens=', tokens.length, 'nowEpoch=', nowEpoch.toString());
+  
+        const toLower = tokens.map(t => t.toLowerCase());
+  
+        // Try batch path (fast): previewClaimsForEpoch for prev and now
+        const hasBatch =
+          typeof (sd as any).previewClaimsForEpoch === "function";
+  
+        let prevAmounts: bigint[] = [];
+        let nowAmounts: bigint[] = [];
+  
+        if (hasBatch) {
           try {
-            const erc20 = new ethers.Contract(
-              t,
-              ['function symbol() view returns (string)', 'function decimals() view returns (uint8)'],
-              contracts.provider
+            // batch prev
+            const amountsPrev: bigint[] = await (sd as any).previewClaimsForEpoch(
+              addr,
+              toLower,
+              prevEpoch
             );
-            [symbol, decimals] = await Promise.all([erc20.symbol(), erc20.decimals()]);
-          } catch {
-            symbol = `${t.slice(0, 6)}...${t.slice(-4)}`;
-            decimals = 18;
+            prevAmounts = amountsPrev || [];
+            // batch now
+            const amountsNow: bigint[] = await (sd as any).previewClaimsForEpoch(
+              addr,
+              toLower,
+              nowEpoch
+            );
+            nowAmounts = amountsNow || [];
+          } catch (e) {
+            // fall back to per-token
+            prevAmounts = [];
+            nowAmounts = [];
           }
         }
-        out.push({ token: t, amount: ethers.formatUnits(total, decimals), symbol });
+  
+        // Fallback if batch failed or returned wrong length
+        const needPerToken =
+          prevAmounts.length !== toLower.length ||
+          nowAmounts.length !== toLower.length;
+  
+        if (needPerToken) {
+          prevAmounts = [];
+          nowAmounts = [];
+          for (const t of toLower) {
+            const [p, n] = await Promise.all([
+              sd.previewClaim(addr, t, prevEpoch).catch(() => 0n),
+              sd.previewClaim(addr, t, nowEpoch).catch(() => 0n),
+            ]);
+            prevAmounts.push(p ?? 0n);
+            nowAmounts.push(n ?? 0n);
+          }
+        }
+  
+        // Build output: include only tokens with > 0 total (prev + now)
+        const out: PendingReward[] = [];
+        for (let i = 0; i < toLower.length; i++) {
+          const total = (prevAmounts[i] ?? 0n) + (nowAmounts[i] ?? 0n);
+          if (total === 0n) continue;
+  
+          const tokenAddr = toLower[i];
+          let symbol = "ETH";
+          let decimals = 18;
+  
+          if (tokenAddr !== ethers.ZeroAddress) {
+            try {
+              const erc20 = new ethers.Contract(
+                tokenAddr,
+                ["function symbol() view returns (string)", "function decimals() view returns (uint8)"],
+                contracts.provider
+              );
+              const [sym, dec] = await Promise.all([erc20.symbol(), erc20.decimals()]);
+              symbol = String(sym);
+              decimals = Number(dec);
+            } catch {
+              symbol = `${tokenAddr.slice(0, 6)}...${tokenAddr.slice(-4)}`;
+              decimals = 18;
+            }
+          }
+  
+          out.push({
+            token: tokenAddr,
+            amount: ethers.formatUnits(total, decimals),
+            symbol,
+          });
+        }
+  
+        return out;
+      } catch (e) {
+        console.error("getPendingRewards failed:", e);
+        return [];
       }
-      return out;
-    } catch (e) {
-      console.error('getPendingRewards failed:', e);
-      return [];
-    }
-  }, [getContracts]);
+    },
+    [getContracts]
+  );
+  
 
   // -----------------------------
   // Exit
