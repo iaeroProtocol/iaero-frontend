@@ -15,6 +15,9 @@ const DEFAULT_CLAIM_TOKENS_BY_CHAIN: Record<number, string[]> = {
   ].filter(Boolean),
 };
 
+const DEFAULT_STAKING_APR =
+  Number(process.env.NEXT_PUBLIC_DEFAULT_STAKING_APR ?? '30'); // percent
+
 async function fetchEpochTokensViaRewardsSugar(contracts: any, chainId: number, limit = 200): Promise<string[]> {
   try {
     const rs = contracts.RewardsSugar;
@@ -428,42 +431,47 @@ export const useStaking = () => {
     try {
       const contracts = await getContracts();
       const sd = contracts?.stakingDistributor;
-      if (!sd) return { aero: 0, total: 0 };
   
-      // LEGACY streaming: your old logic can remain
-      if (typeof sd.rewardRate === 'function' || typeof sd.rewardsPerSecond === 'function') {
-        // Keep your existing implementation
-        return { aero: 10, total: 10 }; // fallback; or keep your calc
-      }
+      // If no distributor, return default APR
+      if (!sd) return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
   
-      // EPOCH: APR ~ (lastEpoch AERO / supplySnapshotAtStart) * 52 * 100
+      // EPOCH model: APR ≈ (last-epoch AERO / supplySnapshotAtStart) * 52 * 100
       if (typeof sd.currentEpoch === 'function') {
-        const aeroAddr = getContractAddress('AERO', contracts.provider?.network?.chainId ?? 8453);
-        if (!aeroAddr) return { aero: 0, total: 0 };
+        const chainId = contracts.provider?.network?.chainId ?? 8453;
+        const aeroAddr = getContractAddress('AERO', chainId);
   
         const WEEK = 7n * 24n * 60n * 60n;
         const nowEpoch: bigint = await sd.currentEpoch();
         const prev: bigint = nowEpoch - WEEK;
   
-        const totalAeroPrev: bigint = await sd.rewardsForEpoch(aeroAddr, prev).catch(() => 0n);
-        if (totalAeroPrev === 0n) return { aero: 0, total: 0 };
+        const totalAeroPrev: bigint = await sd
+          .rewardsForEpoch(aeroAddr, prev)
+          .catch(() => 0n);
   
-        let supplySnap: bigint = await sd.supplySnapshotAtEpochStart(prev).catch(() => 0n);
+        let supplySnap: bigint = await sd
+          .supplySnapshotAtEpochStart(prev)
+          .catch(() => 0n);
+  
         if (supplySnap === 0n && typeof sd.totalSupplyAtEpochStart === 'function') {
           supplySnap = await sd.totalSupplyAtEpochStart(prev).catch(() => 0n);
         }
-        if (supplySnap === 0n) return { aero: 0, total: 0 };
+  
+        if (totalAeroPrev === 0n || supplySnap === 0n) {
+          return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
+        }
   
         const apr = Number((totalAeroPrev * 52n * 100n) / supplySnap);
         return { aero: apr, total: apr };
       }
   
-      return { aero: 0, total: 0 };
+      // Fallback
+      return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
     } catch (e) {
       console.error('calculateStakingAPR failed:', e);
-      return { aero: 0, total: 0 };
+      return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
     }
   }, [getContracts]);
+  
   
 
   const getStakingStats = useCallback(async (): Promise<StakingStats> => {
@@ -503,42 +511,93 @@ export const useStaking = () => {
       const contracts = await getContracts();
       const sd = contracts?.stakingDistributor;
       if (!sd) return [];
-
+  
       const addr = userAddress || sd.runner?.address;
       if (!addr) return [];
-
-      // primary shape: [tokens[], amounts[]]
-      const data = await tryCalls<any>(sd, [
-        ['getPendingRewards', [addr]],
-        ['pendingRewards',    [addr]],
-      ], 'getPendingRewards');
-
+  
+      // ---- EPOCH CONTRACT PATH ----
+      if (typeof sd.currentEpoch === 'function' && typeof sd.previewClaim === 'function') {
+        const chainId = contracts.provider?.network?.chainId ?? 8453;
+        const tokens = await getEpochClaimTokenList(contracts, chainId);
+        if (!tokens.length) return [];
+  
+        const WEEK = 7n * 24n * 60n * 60n;
+        const nowEpoch: bigint = await sd.currentEpoch();
+        const prev = nowEpoch - WEEK;
+  
+        const out: PendingReward[] = [];
+  
+        await Promise.all(tokens.map(async (t) => {
+          const [pPrev, pNow] = await Promise.all([
+            sd.previewClaim(addr, t, prev).catch(() => 0n),
+            sd.previewClaim(addr, t, nowEpoch).catch(() => 0n),
+          ]);
+  
+          const total = (pPrev ?? 0n) + (pNow ?? 0n);
+          if (total === 0n) return;
+  
+          let symbol = 'ETH';
+          let decimals = 18;
+          if (t !== ethers.ZeroAddress) {
+            try {
+              const erc20 = new ethers.Contract(
+                t,
+                ['function symbol() view returns (string)', 'function decimals() view returns (uint8)'],
+                contracts.provider
+              );
+              [symbol, decimals] = await Promise.all([erc20.symbol(), erc20.decimals()]);
+            } catch {
+              symbol = `${t.slice(0, 6)}...${t.slice(-4)}`;
+              decimals = 18;
+            }
+          }
+          out.push({ token: t, amount: ethers.formatUnits(total, decimals), symbol });
+        }));
+  
+        return out;
+      }
+  
+      // ---- LEGACY CONTRACT PATH ----
+      const data = await tryCalls<any>(
+        sd,
+        [['getPendingRewards', [addr]], ['pendingRewards', [addr]]],
+        'getPendingRewards'
+      );
       if (!data) return [];
+  
       const tokens: string[] = Array.isArray(data[0]) ? data[0] : [];
       const amounts: any[] = Array.isArray(data[1]) ? data[1] : [];
-
+  
       const out: PendingReward[] = [];
       for (let i = 0; i < tokens.length; i++) {
         const t = tokens[i];
         const amt = toBigInt(amounts[i] ?? 0);
-        let symbol = 'UNKNOWN';
-        if (t === ethers.ZeroAddress) symbol = 'ETH';
-        else {
+  
+        let symbol = 'ETH';
+        let decimals = 18;
+        if (t !== ethers.ZeroAddress) {
           try {
-            const erc20 = new ethers.Contract(t, ['function symbol() view returns (string)'], contracts.provider);
-            symbol = await erc20.symbol();
+            const erc20 = new ethers.Contract(
+              t,
+              ['function symbol() view returns (string)', 'function decimals() view returns (uint8)'],
+              contracts.provider
+            );
+            [symbol, decimals] = await Promise.all([erc20.symbol(), erc20.decimals()]);
           } catch {
             symbol = `${t.slice(0, 6)}...${t.slice(-4)}`;
+            decimals = 18;
           }
         }
-        out.push({ token: t, amount: ethers.formatEther(amt), symbol });
+        out.push({ token: t, amount: ethers.formatUnits(amt, decimals), symbol });
       }
       return out;
+  
     } catch (e) {
       console.error('getPendingRewards failed:', e);
       return [];
     }
   }, [getContracts]);
+  
 
   // Exit = Unstake everything + claim
   const exit = useCallback(async (
