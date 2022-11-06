@@ -5,6 +5,8 @@ import { useState, useCallback } from 'react';
 import { ethers, ContractTransactionReceipt } from 'ethers';
 import { useProtocol } from '../../contexts/ProtocolContext';
 import { parseTokenAmount } from '../../lib/ethereum';
+import { get1559Overrides } from '@/components/lib/fees';
+
 
 const DEFAULT_STAKING_APR =
   Number(process.env.NEXT_PUBLIC_DEFAULT_STAKING_APR ?? '30'); // percent
@@ -144,7 +146,10 @@ export const useStaking = () => {
         return undefined;
       }
 
-      const tx = await contracts.iAERO.approve(spender, ethers.MaxUint256);
+      const provider = contracts.iAERO.runner?.provider as ethers.Provider;
+      const overrides = await get1559Overrides(provider);
+      const tx = await contracts.iAERO.approve(spender, ethers.MaxUint256, overrides);
+
       const receipt = await tx.wait();
       await loadAllowances();
       onSuccess?.(receipt);
@@ -185,7 +190,11 @@ export const useStaking = () => {
       }
 
       onProgress?.('Staking iAERO...');
-      const tx = await sd.stake(amountWei);
+      const provider = sd.runner?.provider as ethers.Provider;
+      const overrides = await get1559Overrides(provider);
+      const gas = await sd.stake.estimateGas(amountWei).catch(() => 180_000n);
+      const tx = await sd.stake(amountWei, { ...overrides, gasLimit: (gas * 120n) / 100n });
+
       const receipt = await tx.wait();
 
       onProgress?.('Updating balances...');
@@ -221,7 +230,11 @@ export const useStaking = () => {
       const amountWei = parseTokenAmount(amount);
 
       onProgress?.('Unstaking iAERO...');
-      const tx = await sd.unstake(amountWei);
+      const provider = sd.runner?.provider as ethers.Provider;
+      const overrides = await get1559Overrides(provider);
+      const gas = await sd.unstake.estimateGas(amountWei).catch(() => 150_000n);
+      const tx = await sd.unstake(amountWei, { ...overrides, gasLimit: (gas * 120n) / 100n });
+
       const receipt = await tx.wait();
 
       onProgress?.('Updating balances...');
@@ -306,17 +319,19 @@ export const useStaking = () => {
       let lastRc: ContractTransactionReceipt | undefined;
 
       onProgress?.(`Claiming ${claimables.length} tokens in ${batches.length} batch(es)…`);
+      const provider = sd.runner?.provider as ethers.Provider;
       for (let i = 0; i < batches.length; i++) {
         const batch = batches[i];
+        const overrides = await get1559Overrides(provider);  // <— HOISTED
+      
         try {
-          // conservative gas; tune to your typical batch size
-          const tx = await sd.claimLatest(batch, { gasLimit: 1_000_000n });
+          const tx = await sd.claimLatest(batch, { ...overrides, gasLimit: 1_000_000n });
           lastRc = await tx.wait();
         } catch (e) {
           console.warn(`[claimAllRewards] batch ${i + 1} failed, falling back per-token:`, e);
           for (const t of batch) {
             try {
-              const tx = await sd.claimLatest([t], { gasLimit: 400_000n });
+              const tx = await sd.claimLatest([t], { ...overrides, gasLimit: 400_000n });
               lastRc = await tx.wait();
             } catch (err) {
               console.warn(`[claimAllRewards] token ${t} failed, skipping`, err);
@@ -359,7 +374,13 @@ export const useStaking = () => {
       if (!sd) throw new Error('Staking contract not initialized');
 
       onProgress?.('Claiming reward…');
-      const tx = await sd.claim(tokenAddress, await sd.currentEpoch());
+      const provider = sd.runner?.provider as ethers.Provider;
+      const overrides = await get1559Overrides(provider);
+      const epoch = await sd.currentEpoch();
+      const gas = await sd.claim.estimateGas(tokenAddress, epoch).catch(() => 180_000n);
+      const tx = await sd.claim(tokenAddress, epoch, { ...overrides, gasLimit: (gas * 120n) / 100n });
+
+
       const receipt = await tx.wait();
 
       onProgress?.('Updating balances…');
@@ -402,7 +423,7 @@ export const useStaking = () => {
       const sd = contracts?.stakingDistributor;
       if (!sd) return { totalStaked: '0', rewardTokensCount: 0 };
 
-      const totalStakedRaw = await sd.totalStaked;
+      const totalStakedRaw = await sd.totalStaked();
       const tokens = await loadClaimTokensFromJson(tokenFileUrl);
       return {
         totalStaked: ethers.formatEther(totalStakedRaw ?? 0n),
@@ -559,8 +580,13 @@ export const useStaking = () => {
       if (!sd) throw new Error('Staking contract not initialized');
 
       onProgress?.('Exiting position...');
-      const tx = await sd.exit();
+      const provider = sd.runner?.provider as ethers.Provider;
+      const overrides = await get1559Overrides(provider);
+      // (optional) estimate gas
+      const gas = await sd.exit.estimateGas().catch(() => 180_000n);
+      const tx = await sd.exit({ ...overrides, gasLimit: (gas * 120n) / 100n });
       const receipt = await tx.wait();
+
 
       onProgress?.('Updating balances…');
       await Promise.all([loadBalances(), loadAllowances(), loadPendingRewards?.()].filter(Boolean) as Promise<any>[]);
