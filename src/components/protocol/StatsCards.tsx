@@ -25,7 +25,6 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
   // Get prices from context
   const { prices } = usePrices();
 
-
   const iAeroPrice = Number(prices?.iAERO?.usd ?? 0);
   const liqPrice = Number(prices?.LIQ?.usd ?? 0);
   const aeroPrice  = Number(prices?.AERO?.usd ?? 0);
@@ -74,15 +73,21 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
       {cards.map((card, index) => (
-        <motion.div key={card.title} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: index * 0.1 }}>
-          <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50 hover:bg-slate-800/70 transition-all duration-300 group relative overflow-hidden">
+        <motion.div 
+          key={card.title} 
+          initial={{ opacity: 0, y: 20 }} 
+          animate={{ opacity: 1, y: 0 }} 
+          transition={{ delay: index * 0.1 }}
+          className="min-w-0" // Add this to prevent expansion
+        >
+          <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50 hover:bg-slate-800/70 transition-all duration-300 group relative overflow-hidden h-full"> {/* Add h-full */}
             <CardContent className="p-6 relative">
               {/* Background Gradient */}
               <div className={`absolute top-0 right-0 w-20 h-20 bg-gradient-to-br ${card.gradient} opacity-10 rounded-full transform translate-x-6 -translate-y-6 group-hover:scale-110 transition-transform duration-300`} />
 
               <div className="flex items-start justify-between relative z-10">
-                <div className="space-y-2 flex-1">
-                  <p className="text-slate-400 text-sm font-medium">{card.title}</p>
+                <div className="space-y-2 flex-1 min-w-0"> {/* Add min-w-0 */}
+                  <p className="text-slate-400 text-sm font-medium truncate">{card.title}</p> {/* Add truncate */}
 
                   {card.loading ? (
                     <div className="flex items-center space-x-2">
@@ -90,15 +95,15 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
                       <span className="text-lg font-bold text-slate-400">Loading...</span>
                     </div>
                   ) : (
-                    <p className="text-2xl font-bold text-white">{card.value}</p>
+                    <p className="text-2xl font-bold text-white truncate">{card.value}</p> // Add truncate
                   )}
 
                   {card.subtitle && !card.loading && (
-                    <p className="text-slate-400 text-sm">{card.subtitle}</p>
+                    <p className="text-slate-400 text-sm break-words">{card.subtitle}</p> // Change to break-words
                   )}
                 </div>
 
-                <div className={`w-12 h-12 bg-gradient-to-br ${card.gradient} rounded-xl flex items-center justify-center opacity-80 group-hover:opacity-100 transition-opacity duration-300 ml-4`}>
+                <div className={`w-12 h-12 bg-gradient-to-br ${card.gradient} rounded-xl flex items-center justify-center opacity-80 group-hover:opacity-100 transition-opacity duration-300 ml-4 flex-shrink-0`}> {/* Add flex-shrink-0 */}
                   <card.icon className="w-6 h-6 text-white" />
                 </div>
               </div>
@@ -147,4 +152,4 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
       ))}
     </div>
   );
-}  
+}
