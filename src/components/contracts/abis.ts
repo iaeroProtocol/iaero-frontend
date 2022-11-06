@@ -12,6 +12,7 @@ import VOTERArtifact from "./abi-json/VOTER.sol/VOTER.json";
 import RouterArtifact from "./abi-json/Router.sol/Router.json";
 import TreasuryDistributorArtifact from "./abi-json/TreasuryDistributor.sol/TreasuryDistributor.json";
 import StiAEROArtifact from "./abi-json/StiAERO.sol/StiAERO.json";
+import EpochStakingDistributorArtifact from "./abi-json/EpochStakingDistributor.sol/EpochStakingDistributor.json";
 import PoolFactoryArtifact from "./abi-json/PoolFactory.sol/PoolFactory.json";
 
 // If you don't have a dedicated IERC20 artifact in out/, use the minimal ERC20 ABI below.
@@ -37,6 +38,7 @@ export const ABIS = {
   LIQStakingDistributor: LIQDistributorArtifact.abi,
   RewardsHarvester: HarvesterArtifact.abi,
   VotingManager: VotingManagerArtifact.abi,
+  EpochStakingDistributor: EpochStakingDistributorArtifact.abi,
 
   // Tokens
   iAERO: IAEROArtifact.abi,
