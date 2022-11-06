@@ -11,12 +11,9 @@ import VeAEROArtifact from "./abi-json/veAERO.sol/VeAERO.json";
 import VOTERArtifact from "./abi-json/VOTER.sol/VOTER.json";
 import RouterArtifact from "./abi-json/Router.sol/Router.json";
 import TreasuryDistributorArtifact from "./abi-json/TreasuryDistributor.sol/TreasuryDistributor.json";
+import PoolFactoryArtifact from "./abi-json/PoolFactory.sol/PoolFactory.json";
 import StiAEROArtifact from "./abi-json/StiAERO.sol/StiAERO.json";
 import EpochStakingDistributorArtifact from "./abi-json/EpochStakingDistributor.sol/EpochStakingDistributor.json";
-import PoolFactoryArtifact from "./abi-json/PoolFactory.sol/PoolFactory.json";
-
-// If you don't have a dedicated IERC20 artifact in out/, use the minimal ERC20 ABI below.
-// import IERC20Artifact from "../../../../out/IERC20.sol/IERC20.json";
 
 // Minimal ERC20 ABI (approve/allowance/balanceOf/decimals/symbol/name/transfer/transferFrom)
 export const ERC20_ABI = [
@@ -34,17 +31,19 @@ export const ERC20_ABI = [
 export const ABIS = {
   // Core protocol
   PermalockVault: VaultArtifact.abi,
-  StakingDistributor:  EpochStakingDistributorArtifact.abi,
+  StakingDistributor: EpochStakingDistributorArtifact.abi,
   LIQStakingDistributor: LIQDistributorArtifact.abi,
   RewardsHarvester: HarvesterArtifact.abi,
   VotingManager: VotingManagerArtifact.abi,
+
+  // New Epoch-based contracts
   EpochStakingDistributor: EpochStakingDistributorArtifact.abi,
+  stiAERO: StiAEROArtifact.abi,
 
   // Tokens
   iAERO: IAEROArtifact.abi,
   LIQ: LIQArtifact.abi,
   AERO: ERC20_ABI, // safer generic ERC20 (use a specific artifact only if you rely on custom funcs)
-  stiAERO: StiAEROArtifact.abi,
 
   // ve/Voter/DEX infra
   VeAERO: (VeAEROArtifact as any).abi ?? VeAEROArtifact,  // supports either {abi:[...]} or raw array
@@ -57,6 +56,45 @@ export const ABIS = {
 
   // Generic
   ERC20: ERC20_ABI,
+
+  RewardsSugar: [
+    {
+      "inputs": [
+        { "internalType": "uint256", "name": "limit",  "type": "uint256" },
+        { "internalType": "uint256", "name": "offset", "type": "uint256" }
+      ],
+      "name": "epochsLatest",
+      "outputs": [{
+        "components": [
+          { "internalType": "uint256", "name": "epochStart", "type": "uint256" },
+          { "internalType": "uint256", "name": "epochEnd",   "type": "uint256" },
+          {
+            "components": [
+              { "internalType": "address", "name": "token",  "type": "address" },
+              { "internalType": "uint256", "name": "amount", "type": "uint256" }
+            ],
+            "internalType": "struct TokenAmount[]",
+            "name": "bribes",
+            "type": "tuple[]"
+          },
+          {
+            "components": [
+              { "internalType": "address", "name": "token",  "type": "address" },
+              { "internalType": "uint256", "name": "amount", "type": "uint256" }
+            ],
+            "internalType": "struct TokenAmount[]",
+            "name": "fees",
+            "type": "tuple[]"
+          }
+        ],
+        "internalType": "struct EpochRow[]",
+        "name": "",
+        "type": "tuple[]"
+      }],
+      "stateMutability": "view",
+      "type": "function"
+    }
+  ],
 } as const;
 
 export type AbiMap = typeof ABIS;
