@@ -3,7 +3,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { useProtocol } from '../../contexts/ProtocolContext';
 import { usePrices } from '../../contexts/PriceContext';
-import { getContractAddress } from '../../contracts/addresses';
+import { getEpochClaimTokenList } from '../../contracts/rewards-helpers';
 
 interface RewardToken {
   address: string;
@@ -22,37 +22,6 @@ const ERC20_ABI = [
   "function balanceOf(address) view returns (uint256)"
 ];
 
-// Same default set you use in useStaking.ts
-const DEFAULT_CLAIM_TOKENS_BY_CHAIN: Record<number, string[]> = {
-  8453: [
-    getContractAddress('AERO', 8453)!,
-    getContractAddress('WETH', 8453) ?? "",
-    getContractAddress('USDC', 8453) ?? "",
-  ].filter(Boolean),
-};
-
-async function fetchEpochTokensViaRewardsSugar(contracts: any, limit = 200): Promise<string[]> {
-  try {
-    const rs = contracts.RewardsSugar;
-    if (!rs) return [];
-    const rows = await rs.epochsLatest(limit, 0);
-    const seen = new Set<string>();
-    for (const row of rows) {
-      const bribes = row.bribes ?? [];
-      const fees   = row.fees ?? [];
-      for (const b of bribes) if (b?.token) seen.add(b.token.toLowerCase());
-      for (const f of fees)   if (f?.token) seen.add(f.token.toLowerCase());
-    }
-    return Array.from(seen);
-  } catch { return []; }
-}
-
-async function getEpochClaimTokenList(contracts: any, chainId: number): Promise<string[]> {
-  const viaSugar = await fetchEpochTokensViaRewardsSugar(contracts);
-  if (viaSugar.length) return viaSugar;
-  return DEFAULT_CLAIM_TOKENS_BY_CHAIN[chainId] ?? [];
-}
-
 export const useRewardTokens = () => {
   const { getContracts, account, chainId } = useProtocol();
   const { prices } = usePrices();
@@ -67,13 +36,12 @@ export const useRewardTokens = () => {
       const contracts = await getContracts();
       const distributor = contracts.stakingDistributor;
       const provider = contracts.provider;
-      const resolvedChainId = chainId ?? provider?.network?.chainId ?? 8453;
 
       if (!distributor) { setRewardTokens([]); return; }
 
       // ---- EPOCH PATH ----
       if (typeof distributor.currentEpoch === 'function' && typeof distributor.previewClaim === 'function') {
-        const tokens = await getEpochClaimTokenList(contracts, resolvedChainId);
+        const tokens = await getEpochClaimTokenList(contracts);
 
         const WEEK = 7n * 24n * 60n * 60n;
         const nowEpoch: bigint = await distributor.currentEpoch();
