@@ -127,10 +127,10 @@ export default function IaeroProtocolApp() {
          className="text-center mb-12"
        >
          <h2 className="text-2xl md:text-4xl lg:text-5xl font-bold text-white mb-4">
-           Unlock Liquidity from Your AERO
+           Unlock Liquidity from Your veAERO
          </h2>
          <p className="text-lg text-slate-300 max-w-3xl mx-auto">
-           Lock AERO permanently and receive liquid iAERO tokens plus LIQ rewards. 
+           Deposit veAERO or AERO and receive liquid iAERO tokens plus LIQ rewards. 
            Stake iAERO to earn additional yield from protocol fees.
          </p>
          
