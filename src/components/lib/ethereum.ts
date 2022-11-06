@@ -89,6 +89,16 @@ export const switchToBase = () => switchToNetwork(8453);
 // ---- Wallet connection -----------------------------------------------------
 
 export const connectWallet = async () => {
+
+  const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+  
+  if (!window.ethereum && isMobile) {
+    // Redirect to MetaMask mobile browser
+    const currentUrl = window.location.href;
+    window.location.href = `https://metamask.app.link/dapp/${currentUrl.replace('https://', '')}`;
+    return;
+  }
+
   if (!window.ethereum) throw new Error('Please install MetaMask or another Web3 wallet');
 
   try {
