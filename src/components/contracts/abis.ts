@@ -11,6 +11,7 @@ import VeAEROArtifact from "./abi-json/veAERO.sol/VeAERO.json";
 import VOTERArtifact from "./abi-json/VOTER.sol/VOTER.json";
 import RouterArtifact from "./abi-json/Router.sol/Router.json";
 import TreasuryDistributorArtifact from "./abi-json/TreasuryDistributor.sol/TreasuryDistributor.json";
+import StiAEROArtifact from "./abi-json/StiAERO.sol/StiAERO.json";
 import PoolFactoryArtifact from "./abi-json/PoolFactory.sol/PoolFactory.json";
 
 // If you don't have a dedicated IERC20 artifact in out/, use the minimal ERC20 ABI below.
@@ -41,6 +42,7 @@ export const ABIS = {
   iAERO: IAEROArtifact.abi,
   LIQ: LIQArtifact.abi,
   AERO: ERC20_ABI, // safer generic ERC20 (use a specific artifact only if you rely on custom funcs)
+  stiAERO: StiAEROArtifact.abi,
 
   // ve/Voter/DEX infra
   VeAERO: (VeAEROArtifact as any).abi ?? VeAEROArtifact,  // supports either {abi:[...]} or raw array
