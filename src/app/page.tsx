@@ -93,7 +93,7 @@ export default function IaeroProtocolApp() {
                  <span>Docs</span>
                </a>
                <a 
-                 href="https://discord.gg/Tb9Z4Jvq" 
+                 href="https://discord.gg/YypP6DG3" 
                  target="_blank" 
                  rel="noopener noreferrer"
                  className="text-slate-300 hover:text-white transition-colors"
