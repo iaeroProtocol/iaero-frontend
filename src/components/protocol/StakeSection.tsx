@@ -17,7 +17,6 @@ import { useStaking } from "../contracts/hooks/useStaking";
 import { parseInputToBigNumber, formatBigNumber, sanitizeDecimalInput, useDebounce, validateTokenAmount, calculateYield } from "../lib/defi-utils";
 import { switchToBaseSepolia, getProvider } from "../lib/ethereum";
 import { usePrices } from "@/components/contexts/PriceContext";
-import { useRewardTokens } from '../contracts/hooks/useRewardTokens';
 
 
 interface StakeSectionProps {
