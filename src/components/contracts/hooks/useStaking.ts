@@ -4,16 +4,8 @@ import { ethers, ContractTransactionReceipt } from 'ethers';
 import { useProtocol } from '../../contexts/ProtocolContext';
 import { parseTokenAmount } from '../../lib/ethereum';
 import { getContractAddress } from '../../contracts/addresses';
-import { ABIS } from '../../contracts/abis';
+import { getEpochClaimTokenList } from '../../contracts/rewards-helpers';
 
-// Same defaults as in ProtocolContext:
-const DEFAULT_CLAIM_TOKENS_BY_CHAIN: Record<number, string[]> = {
-  8453: [
-    getContractAddress('AERO', 8453)!,
-    getContractAddress('WETH', 8453) ?? "",
-    getContractAddress('USDC', 8453) ?? "",
-  ].filter(Boolean),
-};
 
 const DEFAULT_STAKING_APR =
   Number(process.env.NEXT_PUBLIC_DEFAULT_STAKING_APR ?? '30'); // percent
@@ -32,12 +24,6 @@ async function fetchEpochTokensViaRewardsSugar(contracts: any, chainId: number, 
     }
     return Array.from(seen);
   } catch { return []; }
-}
-
-async function getEpochClaimTokenList(contracts: any, chainId: number): Promise<string[]> {
-  const viaSugar = await fetchEpochTokensViaRewardsSugar(contracts, chainId);
-  if (viaSugar.length) return viaSugar;
-  return DEFAULT_CLAIM_TOKENS_BY_CHAIN[chainId] ?? [];
 }
 
 // -----------------------------
@@ -330,7 +316,7 @@ export const useStaking = () => {
   
       // EPOCH
       if (typeof sd.claimLatest === 'function') {
-        const tokens = await getEpochClaimTokenList(contracts, contracts.provider?.network?.chainId ?? 8453);
+        const tokens = await getEpochClaimTokenList(contracts);
         if (!tokens.length) {
           onError?.(new Error('No tokens to claim'));
           return undefined;
@@ -419,7 +405,7 @@ export const useStaking = () => {
       }
   
       // EPOCH contract — return candidate list
-      return await getEpochClaimTokenList(contracts, contracts.provider?.network?.chainId ?? 8453);
+      return await getEpochClaimTokenList(contracts);
     } catch (e) {
       console.error('getRewardTokens failed:', e);
       return [];
@@ -491,7 +477,7 @@ export const useStaking = () => {
         } catch {}
       } else {
         // EPOCH
-        const tokens = await getEpochClaimTokenList(contracts, contracts.provider?.network?.chainId ?? 8453);
+        const tokens = await getEpochClaimTokenList(contracts);
         tokenCount = tokens.length;
       }
   
@@ -517,8 +503,7 @@ export const useStaking = () => {
   
       // ---- EPOCH CONTRACT PATH ----
       if (typeof sd.currentEpoch === 'function' && typeof sd.previewClaim === 'function') {
-        const chainId = contracts.provider?.network?.chainId ?? 8453;
-        const tokens = await getEpochClaimTokenList(contracts, chainId);
+        const tokens = await getEpochClaimTokenList(contracts);
         if (!tokens.length) return [];
   
         const WEEK = 7n * 24n * 60n * 60n;
