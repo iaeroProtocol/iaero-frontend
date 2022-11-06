@@ -51,9 +51,9 @@ export interface PriceContextValue {
 const DEFAULT_UPDATE_INTERVAL = 30000; // 30 seconds
 
 const MOCKS: PriceData = {
-  AERO: { usd: 2.0, lastUpdated: Date.now() },
-  iAERO: { usd: 2.0, lastUpdated: Date.now() },
-  LIQ: { usd: 0.1, lastUpdated: Date.now() },
+  AERO: { usd: 1.1, lastUpdated: Date.now() },
+  iAERO: { usd: 1.0, lastUpdated: Date.now() },
+  LIQ: { usd: 0.15, lastUpdated: Date.now() },
   ETH: { usd: 4000, lastUpdated: Date.now() },
   USDC: { usd: 1.0, lastUpdated: Date.now() },
 };
