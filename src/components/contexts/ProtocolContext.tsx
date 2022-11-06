@@ -600,14 +600,17 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
       } catch (e: any) {
         console.error('Failed to get iAERO supply:', e);
       }
+
       // Get LIQ total supply
       let liqSupplyFormatted = '0';
       let liqCirculatingFormatted = '0';
       try {
         const liqSupply: bigint = await contracts.LIQ?.totalSupply();
-              
-        // Calculate vested amount (what's already circulating)
+        
+        // Calculate vested amount from the vesting contract
         let totalVested: bigint = 0n;
+        const VESTING_TOTAL = ethers.parseEther('20000000'); // 20M tokens in vesting
+        
         try {
           const vesterAddr = getContractAddress('LIQLinearVester', state.chainId!);
           const vester = new ethers.Contract(
@@ -615,33 +618,37 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
             ['function vested(uint256 streamId, uint256 timestamp) view returns (uint256)'],
             contracts.provider
           );
-                
+          
           // Get current timestamp
           const currentBlock = await contracts.provider.getBlock('latest');
           const currentTimestamp = currentBlock ? currentBlock.timestamp : Math.floor(Date.now() / 1000);
-                
+          
           // Get vested amount for both streams (streamId 0 and 1)
           const vested0 = await vester.vested(0, currentTimestamp);
           const vested1 = await vester.vested(1, currentTimestamp);
-                
+          
           // Total vested is sum of both streams
           totalVested = vested0 + vested1;
-                
+          
         } catch (e: any) {
           console.debug('Failed to get vested amount:', e);
-          // Fallback: assume all is circulating if we can't get vesting data
-          totalVested = liqSupply;
+          // If we can't get vesting data, assume nothing is vested yet (conservative)
+          totalVested = 0n;
         }
-              
-        // Circulating supply is what has been vested
-        const circulating = totalVested;
-              
+        
+        // Calculate circulating supply:
+        // totalSupply - (20M - vestedAmount) = totalSupply - unvestedAmount
+        const unvested = VESTING_TOTAL - totalVested;
+        const circulating = liqSupply - unvested;
+        
         liqSupplyFormatted = ethers.formatEther(liqSupply);
         liqCirculatingFormatted = ethers.formatEther(circulating);
-              
+        
         console.log('LIQ total supply:', liqSupplyFormatted);
+        console.log('LIQ vested from 20M:', ethers.formatEther(totalVested));
+        console.log('LIQ unvested:', ethers.formatEther(unvested));
         console.log('LIQ circulating:', liqCirculatingFormatted);
-              
+        
       } catch (e: any) {
         console.error('Failed to get LIQ supply:', e);
       }
@@ -722,9 +729,9 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
         loadBalances();
         loadAllowances();
         loadPendingRewards();
-      }, 120000); // Every 2 minutes
+      }, 120000); // Every 30 seconds
       
-      const statsInterval = setInterval(loadStats, 300000); // Every 5 minutes
+      const statsInterval = setInterval(loadStats, 300000); // Every minute
       
       return () => {
         clearInterval(balanceInterval);
