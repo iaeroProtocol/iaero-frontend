@@ -64,7 +64,7 @@ export async function fetchPricesClient() {
         .catch(err => {
           console.error('Price proxy fetch failed:', err);
           return { 
-            'aerodrome-finance': { usd: 2.0, usd_24h_change: 0 }
+            'aerodrome-finance': { usd: 1.15, usd_24h_change: 0 }
           };
         }),
       
@@ -75,7 +75,7 @@ export async function fetchPricesClient() {
       getLIQPrice()
     ]);
 
-    const aeroUsd = cgResponse['aerodrome-finance']?.usd || 2.0;
+    const aeroUsd = cgResponse['aerodrome-finance']?.usd || 1.15;
     const aeroChange = cgResponse['aerodrome-finance']?.usd_24h_change || 0;
     
     // Calculate iAERO price
@@ -93,10 +93,10 @@ export async function fetchPricesClient() {
   } catch (error) {
     console.error('Price fetch failed:', error);
     return {
-      aeroUsd: 2.0,
+      aeroUsd: 1.15,
       aeroChange24h: 0,
-      iaeroUsd: 2.0,
-      liqUsd: 0.1,
+      iaeroUsd: 1.0,
+      liqUsd: 0.15,
       ethUsd: 4000,
       usdcUsd: 1.0,
       updatedAt: Date.now()
