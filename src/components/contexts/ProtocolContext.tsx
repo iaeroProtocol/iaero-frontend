@@ -111,7 +111,7 @@ const initialState = {
     aeroLocked: '0',
     emissionRate: '0',
     iAeroSupply: '0',
-    : '0'
+    liqSupply: '0'
   },
   
   // Loading states
