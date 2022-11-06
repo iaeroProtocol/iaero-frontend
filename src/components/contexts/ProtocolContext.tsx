@@ -349,6 +349,7 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
       MockVoter:             make('MockVoter', 'MockVoter'),
       Router:                make('Router', 'Router'),
       PoolFactory:           make('PoolFactory', 'PoolFactory'),
+      RewardsSugar:          make('RewardsSugar', 'RewardsSugar'),
 
       // keep a provider handy
       provider,
@@ -375,7 +376,14 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'CLEAR_ERROR' });
 
     try {
-      const { account, chainId } = await connectWalletUtil();
+      const result = await connectWalletUtil();
+      
+      // Add null check
+      if (!result) {
+        throw new Error('Failed to connect wallet');
+      }
+      
+      const { account, chainId } = result;
       const networkInfo = await getNetworkInfo();
       
       dispatch({
