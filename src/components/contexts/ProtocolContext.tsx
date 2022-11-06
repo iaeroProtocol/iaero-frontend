@@ -536,7 +536,7 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
         for (let i = 0; i < tks.length; i++) {
           if (tks[i].toLowerCase() === aeroAddr) {
             const amt = Number(amts[i] || '0');
-            const price = 2.15; // your PriceContext can replace this
+            const price = 1.1; // your PriceContext can replace this
             totalValue += amt * price;
           }
         }
