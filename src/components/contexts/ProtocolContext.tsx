@@ -111,7 +111,7 @@ const initialState = {
     aeroLocked: '0',
     emissionRate: '0',
     iAeroSupply: '0',
-    liqSupply: '0'
+    : '0'
   },
   
   // Loading states
@@ -600,31 +600,38 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
       } catch (e: any) {
         console.error('Failed to get iAERO supply:', e);
       }
-            // Get LIQ total supply
+      // Get LIQ total supply
       let liqSupplyFormatted = '0';
       let liqCirculatingFormatted = '0';
       try {
         const liqSupply: bigint = await contracts.LIQ?.totalSupply();
-        // remaining to vest = LIQ held by the vesting contract
-        let remainingToVest: bigint = 0n;
+              
+        // Calculate vested amount (what's already circulating)
+        let totalVested: bigint = 0n;
         try {
           const vesterAddr = getContractAddress('LIQLinearVester', state.chainId!);
-
-          remainingToVest = await contracts.LIQ?.balanceOf(vesterAddr) || 0n;
-
+          const vester = new ethers.Contract(
+            vesterAddr,
+            ['function vested(uint256 streamId, uint256 timestamp) view returns (uint256)'],
+            contracts.provider
+          );
+                
+          // Get current timestamp
+          const currentBlock = await contracts.provider.getBlock('latest');
+          const currentTimestamp = currentBlock.timestamp;
+                
+          // Get vested amount for both streams (streamId 0 and 1)
+          const vested0 = await vester.vested(0, currentTimestamp);
+          const vested1 = await vester.vested(1, currentTimestamp);
+                
+          // Total vested is sum of both streams
+          totalVested = vested0 + vested1;
+                
         } catch (e: any) {
-          console.debug('LIQLinearVester address/balance not available:', e);
+          console.debug('Failed to get vested amount:', e);
+          // Fallback: assume all is circulating if we can't get vesting data
+          totalVested = liqSupply;
         }
-
-        const circulating = liqSupply > remainingToVest ? liqSupply - remainingToVest : 0n;
-        liqSupplyFormatted       = ethers.formatEther(liqSupply);
-        console.log('LIQ total supply:', liqSupplyFormatted);
-        liqCirculatingFormatted  = ethers.formatEther(circulating);
-
-        console.log('LIQ total:', liqSupplyFormatted, 'circulating:', liqCirculatingFormatted);
-      } catch (e: any) {
-        console.error('Failed to get LIQ supply:', e);
-      }
 
       
       // Get emission rate
@@ -657,7 +664,7 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
         aeroLocked: totalAeroLockedFormatted,  // AERO locked in vault (from vaultStatus[0])
         emissionRate: emissionRateFormatted,   // LIQ emission rate
         iAeroSupply: iAeroSupplyFormatted,     // Total iAERO minted (includes test mints)
-        liqSupply: liqSupplyFormatted          // Total LIQ minted
+        liqSupply: liqCirculatingFormatted          // Total LIQ minted
       };
       
       console.log('Final formatted stats:', statsData);
