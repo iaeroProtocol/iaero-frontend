@@ -34,7 +34,7 @@ export const ERC20_ABI = [
 export const ABIS = {
   // Core protocol
   PermalockVault: VaultArtifact.abi,
-  StakingDistributor: DistributorArtifact.abi,
+  StakingDistributor:  EpochStakingDistributorArtifact.abi,
   LIQStakingDistributor: LIQDistributorArtifact.abi,
   RewardsHarvester: HarvesterArtifact.abi,
   VotingManager: VotingManagerArtifact.abi,
