@@ -234,6 +234,78 @@ function safeFormatEther(value: bigint | string | number | undefined) {
     return '0';
   }
 }
+
+// --- Helpers for epoch distributor ---
+
+// Reasonable defaults if RewardsSugar isn't wired yet:
+const DEFAULT_CLAIM_TOKENS_BY_CHAIN: Record<number, string[]> = {
+  8453: [
+    getContractAddress('AERO', 8453)!,       // AERO
+    getContractAddress('WETH', 8453) ?? "",  // WETH if in addresses.ts
+    getContractAddress('USDC', 8453) ?? "",  // USDC if in addresses.ts
+  ].filter(Boolean),
+};
+
+async function fetchEpochTokensViaRewardsSugar(contracts: any, chainId: number, limit = 200): Promise<string[]> {
+  try {
+    const rs = contracts.RewardsSugar;
+    if (!rs) return [];
+    // Pull latest epochs across pools, grab bribe+fee token addresses
+    const rows = await rs.epochsLatest(limit, 0);
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const bribes = row.bribes ?? [];
+      const fees   = row.fees ?? [];
+      for (const b of bribes) if (b?.token) seen.add(b.token.toLowerCase());
+      for (const f of fees)   if (f?.token) seen.add(f.token.toLowerCase());
+    }
+    return Array.from(seen);
+  } catch {
+    return [];
+  }
+}
+
+/** Final token candidate list: RewardsSugar (if available) else default config. */
+async function getEpochClaimTokenList(contracts: any, chainId: number): Promise<string[]> {
+  const viaSugar = await fetchEpochTokensViaRewardsSugar(contracts, chainId);
+  if (viaSugar.length) return viaSugar;
+  return DEFAULT_CLAIM_TOKENS_BY_CHAIN[chainId] ?? [];
+}
+
+/** Preview user pending (prev + current epoch) per token, with proper decimals. */
+async function previewEpochPendingAll(
+  sd: any,
+  provider: ethers.Provider,
+  account: string,
+  tokens: string[],
+) : Promise<{ tokens: string[]; amounts: string[] }> {
+  // currentEpoch() returns uint256
+  const nowEpoch: bigint = await sd.currentEpoch();
+  const WEEK = 7n * 24n * 60n * 60n;
+  const prevEpoch = nowEpoch - WEEK;
+
+  const outTokens: string[] = [];
+  const outAmounts: string[] = [];
+
+  for (const t of tokens) {
+    // previewClaim returns uint256
+    const aPrev: bigint = await sd.previewClaim(account, t, prevEpoch).catch(() => 0n);
+    const aNow:  bigint = await sd.previewClaim(account, t, nowEpoch).catch(() => 0n);
+    const total: bigint = aPrev + aNow;
+
+    if (total === 0n) continue;
+
+    const decimals = t === ethers.ZeroAddress
+      ? 18
+      : await new ethers.Contract(t, ["function decimals() view returns (uint8)"], provider)
+          .decimals()
+          .catch(() => 18);
+
+    outTokens.push(t);
+    outAmounts.push(ethers.formatUnits(total, decimals));
+  }
+  return { tokens: outTokens, amounts: outAmounts };
+}
     
 
 // Context Provider
@@ -373,10 +445,16 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
       
     } catch (error: any) {
       console.error('Failed to load balances:', error);
+      // Clear stale values so UI reflects “zero” when the new contract can’t be read yet
+      dispatch({
+        type: 'SET_BALANCES',
+        payload: { stakedIAero: '0' },
+      });
       dispatch({ type: 'SET_ERROR', payload: 'Failed to load balances' });
     } finally {
       dispatch({ type: 'SET_LOADING', payload: { balances: false } });
     }
+    
   }, [state.connected, state.account, state.networkSupported, getContracts]);
 
   // Load allowances
@@ -413,37 +491,63 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
   // Load pending rewards
   const loadPendingRewards = useCallback(async () => {
     if (!state.connected || !state.account || !state.networkSupported) return;
-    
+  
     try {
       const contracts = await getContracts();
-      
-      const [tokens, amounts] = await contracts.stakingDistributor?.getPendingRewards(state.account);
-      
-      // Calculate total value (mock prices for now)
-      let totalValue = 0;
-      const mockPrices = {
-        [getContractAddress('AERO', state.chainId!).toLowerCase()]: 2.15
-      };
-      
-      for (let i = 0; i < tokens.length; i++) {
-        const price = mockPrices[tokens[i].toLowerCase()] || 0;
-        const amount = parseFloat(safeFormatEther(amounts[i]));
-        totalValue += amount * price;
+      const sd = contracts?.stakingDistributor;
+      if (!sd) return;
+  
+      // LEGACY path (streaming distributor)
+      if (typeof sd.getPendingRewards === 'function') {
+        const [tokens, amounts] = await sd.getPendingRewards(state.account);
+        // optional: keep your value calc
+        dispatch({
+          type: 'SET_PENDING_REWARDS',
+          payload: {
+            tokens,
+            amounts: amounts.map((x: any) => safeFormatEther(x)),
+            totalValue: '0', // your price calc can stay here
+          },
+        });
+        return;
       }
-      
-      dispatch({
-        type: 'SET_PENDING_REWARDS',
-        payload: {
-          tokens,
-          amounts: amounts.map((amount: any) => safeFormatEther(amount)),
-          totalValue: totalValue.toFixed(2)
+  
+      // EPOCH path
+      if (typeof sd.currentEpoch === 'function' && typeof sd.previewClaim === 'function') {
+        const tokens = await getEpochClaimTokenList(contracts, state.chainId!);
+        if (!tokens.length) {
+          dispatch({ type: 'SET_PENDING_REWARDS', payload: { tokens: [], amounts: [], totalValue: '0' } });
+          return;
         }
-      });
-      
+  
+        const { tokens: tks, amounts: amts } = await previewEpochPendingAll(sd, contracts.provider, state.account, tokens);
+  
+        // Optional value calc (example: only AERO priced)
+        const aeroAddr = getContractAddress('AERO', state.chainId!)?.toLowerCase();
+        let totalValue = 0;
+        for (let i = 0; i < tks.length; i++) {
+          if (tks[i].toLowerCase() === aeroAddr) {
+            const amt = Number(amts[i] || '0');
+            const price = 2.15; // your PriceContext can replace this
+            totalValue += amt * price;
+          }
+        }
+  
+        dispatch({
+          type: 'SET_PENDING_REWARDS',
+          payload: {
+            tokens: tks,
+            amounts: amts,            // amounts properly formatted by each token's decimals
+            totalValue: totalValue.toFixed(2),
+          },
+        });
+      }
     } catch (error: any) {
       console.error('Failed to load rewards:', error);
+      // leave prior rewards but avoid throwing
     }
   }, [state.connected, state.account, state.networkSupported, state.chainId, getContracts]);
+  
 
   // Load protocol stats - FIXED VERSION
   const loadStats = useCallback(async () => {
