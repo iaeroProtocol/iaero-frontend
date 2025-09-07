@@ -21,9 +21,11 @@ export type ContractName =
   | "VeAERO"
   | "MockVoter"
   | "treasury"
-  | "stiAERO"
+  | "stiAERO"                  
+  | "EpochStakingDistributor"
   | "WETH"
-  | "USDC";
+  | "USDC"
+  | "RewardsSugar";
 
 export type Address = `0x${string}`;
 
@@ -43,6 +45,8 @@ export const CONTRACTS: Record<SupportedChainId, NetworkAddresses> = {
     MockVeAERO: "0xeE76a1030a36850d3b2B0A61D9124eFb04c9E5eC",
     MockVoter: "0xf7DD8d324ac01282721ef0d13a264e3683018F9a",
     treasury: "0x7cBF6aAaF0aB3E85FAA498f9CAad90fd859d9561",
+    WETH: "0x4200000000000000000000000000000000000006",
+    USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
   },
   8453: {
     AERO: "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
@@ -61,8 +65,10 @@ export const CONTRACTS: Record<SupportedChainId, NetworkAddresses> = {
     LIQLinearVester: "0xF1d25F4ee64988Afad0f1612cc3d540725F319Db",
     TreasuryDistributor: "0x7098c065578577926B3b34f4dD6f8172A8e541F9",
     stiAERO: "0x72C135B8eEBC57A3823f0920233e1A90FF4D683D",
+    EpochStakingDistributor: "0x781A80fA817b5a146C440F03EF8643f4aca6588A",
     WETH: "0x4200000000000000000000000000000000000006",
     USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    RewardsSugar: "0xD4aD2EeeB3314d54212A92f4cBBE684195dEfe3E",
 
     // Base mainnet — fill in during mainnet deployment
   },
