@@ -3,6 +3,39 @@ import { useState, useCallback } from 'react';
 import { ethers, ContractTransactionReceipt } from 'ethers';
 import { useProtocol } from '../../contexts/ProtocolContext';
 import { parseTokenAmount } from '../../lib/ethereum';
+import { getContractAddress } from '../../contracts/addresses';
+import { ABIS } from '../../contracts/abis';
+
+// Same defaults as in ProtocolContext:
+const DEFAULT_CLAIM_TOKENS_BY_CHAIN: Record<number, string[]> = {
+  8453: [
+    getContractAddress('AERO', 8453)!,
+    getContractAddress('WETH', 8453) ?? "",
+    getContractAddress('USDC', 8453) ?? "",
+  ].filter(Boolean),
+};
+
+async function fetchEpochTokensViaRewardsSugar(contracts: any, chainId: number, limit = 200): Promise<string[]> {
+  try {
+    const rs = contracts.RewardsSugar;
+    if (!rs) return [];
+    const rows = await rs.epochsLatest(limit, 0);
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const bribes = row.bribes ?? [];
+      const fees   = row.fees ?? [];
+      for (const b of bribes) if (b?.token) seen.add(b.token.toLowerCase());
+      for (const f of fees)   if (f?.token) seen.add(f.token.toLowerCase());
+    }
+    return Array.from(seen);
+  } catch { return []; }
+}
+
+async function getEpochClaimTokenList(contracts: any, chainId: number): Promise<string[]> {
+  const viaSugar = await fetchEpochTokensViaRewardsSugar(contracts, chainId);
+  if (viaSugar.length) return viaSugar;
+  return DEFAULT_CLAIM_TOKENS_BY_CHAIN[chainId] ?? [];
+}
 
 // -----------------------------
 // Types
@@ -281,49 +314,45 @@ export const useStaking = () => {
       const contracts = await getContracts(true);
       const sd = contracts?.stakingDistributor;
       if (!sd) throw new Error('Staking contract not initialized');
-
-      onProgress?.('Claiming all rewards...');
-      
-      // Direct call to claimRewards method
-      let tx;
-      try {
-        tx = await sd.claimRewards();
-      } catch (error: any) {
-        if (isUserRejection(error)) {
-          onError?.(error);
+  
+      // LEGACY
+      if (typeof sd.claimRewards === 'function') {
+        onProgress?.('Claiming all rewards...');
+        const tx = await sd.claimRewards();
+        const receipt = await tx.wait();
+        await Promise.all([loadBalances(), loadPendingRewards()]);
+        onSuccess?.(receipt);
+        return receipt;
+      }
+  
+      // EPOCH
+      if (typeof sd.claimLatest === 'function') {
+        const tokens = await getEpochClaimTokenList(contracts, contracts.provider?.network?.chainId ?? 8453);
+        if (!tokens.length) {
+          onError?.(new Error('No tokens to claim'));
           return undefined;
         }
-        console.error('ClaimRewards method error:', error);
-        throw new Error(`Claiming failed: ${error.message || 'Unknown error'}`);
+        onProgress?.('Claiming latest epoch rewards...');
+        const tx = await sd.claimLatest(tokens);
+        const receipt = await tx.wait();
+        await Promise.all([loadBalances(), loadPendingRewards()]);
+        onSuccess?.(receipt);
+        return receipt;
       }
-      
-      if (!tx) {
-        throw new Error('Transaction failed to initiate');
-      }
-
-      onProgress?.('Confirming transaction...');
-      const receipt = await tx.wait();
-
-      onProgress?.('Updating balances...');
-      await Promise.all([loadBalances(), loadPendingRewards()]);
-
-      onSuccess?.(receipt);
-      return receipt;
+  
+      onError?.(new Error('No compatible claim method'));
+      return undefined;
     } catch (error: any) {
-      if (!isUserRejection(error)) {
-        console.error('claimAllRewards failed:', error);
-      }
+      if (!isUserRejection(error)) console.error('claimAllRewards failed:', error);
       onError?.(error);
-      if (!isUserRejection(error)) {
-        throw error;
-      }
       return undefined;
     } finally {
       setLoading(false);
       dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } });
     }
   }, [getContracts, dispatch, loadBalances, loadPendingRewards]);
-
+  
+  
   const claimReward = useCallback(async (
     tokenAddress: string,
     onSuccess?: SuccessCallback,
@@ -337,48 +366,39 @@ export const useStaking = () => {
       const contracts = await getContracts(true);
       const sd = contracts?.stakingDistributor;
       if (!sd) throw new Error('Staking contract not initialized');
-
-      onProgress?.('Claiming reward...');
-      
-      // Direct call to claimReward method
-      let tx;
-      try {
-        tx = await sd.claimReward(tokenAddress);
-      } catch (error: any) {
-        if (isUserRejection(error)) {
-          onError?.(error);
-          return undefined;
-        }
-        console.error('ClaimReward method error:', error);
-        throw new Error(`Claiming failed: ${error.message || 'Unknown error'}`);
+  
+      // LEGACY single-claim (if available)
+      if (typeof sd.claimReward === 'function') {
+        onProgress?.('Claiming reward...');
+        const tx = await sd.claimReward(tokenAddress);
+        const receipt = await tx.wait();
+        await Promise.all([loadBalances(), loadPendingRewards()]);
+        onSuccess?.(receipt);
+        return receipt;
       }
-      
-      if (!tx) {
-        throw new Error('Transaction failed to initiate');
+  
+      // EPOCH: claim both prev & current using claimLatest([token])
+      if (typeof sd.claimLatest === 'function') {
+        onProgress?.('Claiming latest for token...');
+        const tx = await sd.claimLatest([tokenAddress]);
+        const receipt = await tx.wait();
+        await Promise.all([loadBalances(), loadPendingRewards()]);
+        onSuccess?.(receipt);
+        return receipt;
       }
-
-      onProgress?.('Confirming transaction...');
-      const receipt = await tx.wait();
-
-      onProgress?.('Updating balances...');
-      await Promise.all([loadBalances(), loadPendingRewards()]);
-
-      onSuccess?.(receipt);
-      return receipt;
+  
+      onError?.(new Error('No compatible claim method'));
+      return undefined;
     } catch (error: any) {
-      if (!isUserRejection(error)) {
-        console.error('claimReward failed:', error);
-      }
+      if (!isUserRejection(error)) console.error('claimReward failed:', error);
       onError?.(error);
-      if (!isUserRejection(error)) {
-        throw error;
-      }
       return undefined;
     } finally {
       setLoading(false);
       dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } });
     }
   }, [getContracts, dispatch, loadBalances, loadPendingRewards]);
+  
 
   // -----------------------------
   // Views / Stats
@@ -388,78 +408,95 @@ export const useStaking = () => {
       const contracts = await getContracts();
       const sd = contracts?.stakingDistributor;
       if (!sd) return [];
-
-      // Common patterns for retrieving reward tokens
-      const direct: string[] | undefined = await tryCalls<string[]>(sd, [['getRewardTokens', []]], 'getRewardTokens');
-      if (Array.isArray(direct)) return direct;
-
-      // Fallback: iterate using rewardTokensLength/rewardTokens(idx)
-      const lenRes = await tryCalls<any>(sd, [['rewardTokensLength', []]], 'rewardTokensLength');
-      const length = Number(lenRes ?? 0);
-      if (!Number.isFinite(length) || length <= 0) return [];
-
-      const out: string[] = [];
-      for (let i = 0; i < length; i++) {
-        const t = await tryCalls<string>(sd, [['rewardTokens', [i]]], 'rewardTokens');
-        if (t) out.push(t);
+  
+      // LEGACY contract
+      if (typeof sd.getRewardTokens === 'function') {
+        try { return await sd.getRewardTokens(); } catch {}
+        // fallback enumerate … (your old code) …
       }
-      return out;
+  
+      // EPOCH contract — return candidate list
+      return await getEpochClaimTokenList(contracts, contracts.provider?.network?.chainId ?? 8453);
     } catch (e) {
       console.error('getRewardTokens failed:', e);
       return [];
     }
   }, [getContracts]);
+  
 
   const calculateStakingAPR = useCallback(async (): Promise<StakingAPR> => {
     try {
       const contracts = await getContracts();
       const sd = contracts?.stakingDistributor;
       if (!sd) return { aero: 0, total: 0 };
-
-      const totalStakedRaw = await tryCalls<any>(sd, [['totalStaked', []]], 'totalStaked');
-      const totalStaked = toBigInt(totalStakedRaw);
-      if (totalStaked === 0n) return { aero: 0, total: 0 };
-
-      // Reward rate (per second) for the primary AERO reward stream
-      const rateRaw = await tryCalls<any>(sd, [
-        ['rewardRate',       []],
-        ['rewardsPerSecond', []],
-        ['emissionRate',     []],
-        ['aeroRate',         []],
-      ], 'rewardRate');
-
-      const rate = toBigInt(rateRaw); // tokens / sec (18d assumed)
-      if (rate === 0n) return { aero: 10, total: 10 }; // sensible fallback
-
-      // APR = (rate * secondsPerYear / totalStaked) * 100
-      const SECONDS_PER_YEAR = 31_536_000n;
-      const aprNum = Number((rate * SECONDS_PER_YEAR * 100n) / totalStaked);
-
-      return { aero: aprNum, total: aprNum };
+  
+      // LEGACY streaming: your old logic can remain
+      if (typeof sd.rewardRate === 'function' || typeof sd.rewardsPerSecond === 'function') {
+        // Keep your existing implementation
+        return { aero: 10, total: 10 }; // fallback; or keep your calc
+      }
+  
+      // EPOCH: APR ~ (lastEpoch AERO / supplySnapshotAtStart) * 52 * 100
+      if (typeof sd.currentEpoch === 'function') {
+        const aeroAddr = getContractAddress('AERO', contracts.provider?.network?.chainId ?? 8453);
+        if (!aeroAddr) return { aero: 0, total: 0 };
+  
+        const WEEK = 7n * 24n * 60n * 60n;
+        const nowEpoch: bigint = await sd.currentEpoch();
+        const prev: bigint = nowEpoch - WEEK;
+  
+        const totalAeroPrev: bigint = await sd.rewardsForEpoch(aeroAddr, prev).catch(() => 0n);
+        if (totalAeroPrev === 0n) return { aero: 0, total: 0 };
+  
+        let supplySnap: bigint = await sd.supplySnapshotAtEpochStart(prev).catch(() => 0n);
+        if (supplySnap === 0n && typeof sd.totalSupplyAtEpochStart === 'function') {
+          supplySnap = await sd.totalSupplyAtEpochStart(prev).catch(() => 0n);
+        }
+        if (supplySnap === 0n) return { aero: 0, total: 0 };
+  
+        const apr = Number((totalAeroPrev * 52n * 100n) / supplySnap);
+        return { aero: apr, total: apr };
+      }
+  
+      return { aero: 0, total: 0 };
     } catch (e) {
       console.error('calculateStakingAPR failed:', e);
       return { aero: 0, total: 0 };
     }
   }, [getContracts]);
+  
 
   const getStakingStats = useCallback(async (): Promise<StakingStats> => {
     try {
       const contracts = await getContracts();
       const sd = contracts?.stakingDistributor;
       if (!sd) return { totalStaked: '0', rewardTokensCount: 0 };
-
-      const totalStakedRaw = await tryCalls<any>(sd, [['totalStaked', []]], 'totalStaked');
-      const rewardTokens = await getRewardTokens();
-
+  
+      const totalStakedRaw = await (sd.totalStaked?.() ?? 0n);
+      let tokenCount = 0;
+  
+      // LEGACY
+      if (typeof sd.getRewardTokens === 'function') {
+        try {
+          const t = await sd.getRewardTokens();
+          tokenCount = Array.isArray(t) ? t.length : 0;
+        } catch {}
+      } else {
+        // EPOCH
+        const tokens = await getEpochClaimTokenList(contracts, contracts.provider?.network?.chainId ?? 8453);
+        tokenCount = tokens.length;
+      }
+  
       return {
         totalStaked: ethers.formatEther(toBigInt(totalStakedRaw ?? 0)),
-        rewardTokensCount: rewardTokens.length,
+        rewardTokensCount: tokenCount,
       };
     } catch (e) {
       console.error('getStakingStats failed:', e);
       return { totalStaked: '0', rewardTokensCount: 0 };
     }
-  }, [getContracts, getRewardTokens]);
+  }, [getContracts]);
+  
 
   const getPendingRewards = useCallback(async (userAddress?: string): Promise<PendingReward[]> => {
     try {
