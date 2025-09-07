@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
- Lock, Zap, Gift, Shield, Sparkles, TrendingUp, Coins
+ Lock, Zap, Gift, Shield, Sparkles, TrendingUp, Coins, Banknote
 } from 'lucide-react';
 
 // Import your real components
@@ -17,6 +17,7 @@ import RewardsSection from '@/components/protocol/RewardsSection';
 import ToastNotification from '@/components/protocol/ToastNotification';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+
 
 // Utility function
 const formatNumber = (num: string | number) => {
@@ -153,37 +154,47 @@ export default function IaeroProtocolApp() {
        </Card>
 
        {/* Info Cards */}
-       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-12 w-full max-w-7xl mx-auto">
-         <Card className="bg-slate-800/30 backdrop-blur border-slate-700/50">
-           <CardContent className="p-6">
-             <Shield className="w-8 h-8 text-indigo-400 mb-4" />
-             <h3 className="text-lg font-semibold text-white mb-2">Secure & Audited</h3>
-             <p className="text-sm text-slate-400">
-               Smart contracts audited by leading security firms
-             </p>
-           </CardContent>
-         </Card>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mt-12 w-full max-w-7xl mx-auto">
+          <Card className="bg-slate-800/30 backdrop-blur border-slate-700/50">
+            <CardContent className="p-6">
+              <Shield className="w-8 h-8 text-indigo-400 mb-4" />
+              <h3 className="text-lg font-semibold text-white mb-2">Secure & Audited</h3>
+              <p className="text-sm text-slate-400">
+                Smart contracts audited extensively
+              </p>
+            </CardContent>
+          </Card>
 
-         <Card className="bg-slate-800/30 backdrop-blur border-slate-700/50">
-           <CardContent className="p-6">
-             <TrendingUp className="w-8 h-8 text-emerald-400 mb-4" />
-             <h3 className="text-lg font-semibold text-white mb-2">Earn Yield</h3>
-             <p className="text-sm text-slate-400">
-               Stake iAERO to earn protocol fees and rewards
-             </p>
-           </CardContent>
-         </Card>
+          <Card className="bg-slate-800/30 backdrop-blur border-slate-700/50">
+            <CardContent className="p-6">
+              <TrendingUp className="w-8 h-8 text-emerald-400 mb-4" />
+              <h3 className="text-lg font-semibold text-white mb-2">Earn Yield</h3>
+              <p className="text-sm text-slate-400">
+                Stake iAERO and LIQ to earn veAERO rewards & protocol fees
+              </p>
+            </CardContent>
+          </Card>
 
-         <Card className="bg-slate-800/30 backdrop-blur border-slate-700/50">
-           <CardContent className="p-6">
-             <Coins className="w-8 h-8 text-purple-400 mb-4" />
-             <h3 className="text-lg font-semibold text-white mb-2">Liquid Staking</h3>
-             <p className="text-sm text-slate-400">
-               Trade iAERO on DEXs while earning staking rewards
-             </p>
-           </CardContent>
-         </Card>
-       </div>
+          <Card className="bg-slate-800/30 backdrop-blur border-slate-700/50">
+            <CardContent className="p-6">
+              <Coins className="w-8 h-8 text-purple-400 mb-4" />
+              <h3 className="text-lg font-semibold text-white mb-2">Liquid Staking</h3>
+              <p className="text-sm text-slate-400">
+                Earn veAERO yield on iAero or sell partial or full positions anytime on DEXes
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-slate-800/30 backdrop-blur border-slate-700/50">
+            <CardContent className="p-6">
+              <Banknote className="w-8 h-8 text-yellow-400 mb-4" />
+              <h3 className="text-lg font-semibold text-white mb-2">Collateral & Lending</h3>
+              <p className="text-sm text-slate-400">
+                Use stiAERO as collateral to borrow assets while earning staking rewards
+              </p>
+            </CardContent>
+          </Card>
+        </div>
      </main>
 
      {/* Toast Container */}
