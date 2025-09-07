@@ -115,24 +115,32 @@ export default function IaeroProtocolApp() {
        <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50 w-full max-w-7xl mx-auto">
          <CardContent className="p-8">
            <Tabs defaultValue="lock" className="w-full">
-             <TabsList className="flex flex-wrap w-full mb-8 gap-1">
-              <TabsTrigger value="lock" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-                <Lock className="w-3 h-3 mr-1" />
-                Lock
-              </TabsTrigger>
-              <TabsTrigger value="stake" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-                <Zap className="w-3 h-3 mr-1" />
-                Stake
-              </TabsTrigger>
-              <TabsTrigger value="rewards" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-                <Gift className="w-3 h-3 mr-1" />
-                Rewards
-              </TabsTrigger>
-              <TabsTrigger value="stake-liq" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-                <Coins className="w-3 h-3 mr-1" />
-                LIQ
-              </TabsTrigger>
-             </TabsList>
+           <TabsList className="flex flex-wrap w-full mb-8 gap-1">
+            <TabsTrigger value="lock" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
+              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
+                <Lock className="w-4 h-4 mb-0.5 md:mb-0" />
+                <span>Lock</span>
+              </div>
+            </TabsTrigger>
+            <TabsTrigger value="stake" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
+              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
+                <Zap className="w-4 h-4 mb-0.5 md:mb-0" />
+                <span>Stake</span>
+              </div>
+            </TabsTrigger>
+            <TabsTrigger value="rewards" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
+              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
+                <Gift className="w-4 h-4 mb-0.5 md:mb-0" />
+                <span>Rewards</span>
+              </div>
+            </TabsTrigger>
+            <TabsTrigger value="stake-liq" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
+              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
+                <Coins className="w-4 h-4 mb-0.5 md:mb-0" />
+                <span>LIQ</span>
+              </div>
+            </TabsTrigger>
+          </TabsList>
 
              <TabsContent value="lock">
                <LockSection showToast={showToast} formatNumber={formatNumber} />
