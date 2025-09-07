@@ -20,7 +20,8 @@ export type ContractName =
   | "Router"
   | "VeAERO"
   | "MockVoter"
-  | "treasury";
+  | "treasury"
+  | "stiAERO";
 
 export type Address = `0x${string}`;
 
@@ -51,12 +52,13 @@ export const CONTRACTS: Record<SupportedChainId, NetworkAddresses> = {
     MultiSig: "0x1039CB48254a3150fC604d4B9ea08F66f4739D37",
     LIQ: "0x7ee8964160126081cebC443a42482E95e393e6A8",
     PermalockVault: "0x877398Aea8B5cCB0D482705c2D88dF768c953957",
-    StakingDistributor: "0x5ae34974387DFE5B141770274aDC7ef5749FC7E1",
+    StakingDistributor: "0x781A80fA817b5a146C440F03EF8643f4aca6588A",
     RewardsHarvester: "0x1f935ebfEED8D68b901c154338223A33d044AcFa",
     VotingManager: "0x1702ddF00E4ff3Ed892e569A26E0f1f6858e6fbB",
     LIQStakingDistributor: "0x4b591F40c9E2A8E11495837386e1c03c8605Be16",
     LIQLinearVester: "0xF1d25F4ee64988Afad0f1612cc3d540725F319Db",
     TreasuryDistributor: "0x7098c065578577926B3b34f4dD6f8172A8e541F9",
+    stiAERO: "0x72C135B8eEBC57A3823f0920233e1A90FF4D683D",
 
     // Base mainnet — fill in during mainnet deployment
   },
