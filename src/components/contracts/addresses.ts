@@ -21,7 +21,9 @@ export type ContractName =
   | "VeAERO"
   | "MockVoter"
   | "treasury"
-  | "stiAERO";
+  | "stiAERO"
+  | "WETH"
+  | "USDC";
 
 export type Address = `0x${string}`;
 
@@ -59,6 +61,8 @@ export const CONTRACTS: Record<SupportedChainId, NetworkAddresses> = {
     LIQLinearVester: "0xF1d25F4ee64988Afad0f1612cc3d540725F319Db",
     TreasuryDistributor: "0x7098c065578577926B3b34f4dD6f8172A8e541F9",
     stiAERO: "0x72C135B8eEBC57A3823f0920233e1A90FF4D683D",
+    WETH: "0x4200000000000000000000000000000000000006",
+    USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
 
     // Base mainnet — fill in during mainnet deployment
   },
