@@ -618,6 +618,9 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
                 
           // Get current timestamp
           const currentBlock = await contracts.provider.getBlock('latest');
+          if (!currentBlock) {
+            throw new Error('Failed to get current block');
+          }
           const currentTimestamp = currentBlock.timestamp;
                 
           // Get vested amount for both streams (streamId 0 and 1)
