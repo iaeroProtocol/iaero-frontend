@@ -48,7 +48,7 @@ export interface PriceContextValue {
 }
 
 // ---------- Defaults ----------
-const DEFAULT_UPDATE_INTERVAL = 300000; // 30 seconds
+const DEFAULT_UPDATE_INTERVAL = 300000; // 5 minutes
 
 const MOCKS: PriceData = {
   AERO: { usd: 1.1, lastUpdated: Date.now() },
