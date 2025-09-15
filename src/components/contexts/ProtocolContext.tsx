@@ -722,9 +722,9 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
         loadBalances();
         loadAllowances();
         loadPendingRewards();
-      }, 30000); // Every 30 seconds
+      }, 120000); // Every 2 minutes
       
-      const statsInterval = setInterval(loadStats, 60000); // Every minute
+      const statsInterval = setInterval(loadStats, 300000); // Every 5 minutes
       
       return () => {
         clearInterval(balanceInterval);
