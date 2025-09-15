@@ -1,58 +1,79 @@
+// =============================
 // src/contracts/hooks/useStaking.ts
+// =============================
 import { useState, useCallback } from 'react';
 import { ethers, ContractTransactionReceipt } from 'ethers';
 import { useProtocol } from '../../contexts/ProtocolContext';
 import { parseTokenAmount } from '../../lib/ethereum';
-import { getContractAddress } from '../../contracts/addresses';
-import { getEpochClaimTokenList } from '../../contracts/rewards-helpers';
-
 
 const DEFAULT_STAKING_APR =
   Number(process.env.NEXT_PUBLIC_DEFAULT_STAKING_APR ?? '30'); // percent
-
-async function fetchEpochTokensViaRewardsSugar(contracts: any, chainId: number, limit = 200): Promise<string[]> {
-  try {
-    const rs = contracts.RewardsSugar;
-    if (!rs) return [];
-    const rows = await rs.epochsLatest(limit, 0);
-    const seen = new Set<string>();
-    for (const row of rows) {
-      const bribes = row.bribes ?? [];
-      const fees   = row.fees ?? [];
-      for (const b of bribes) if (b?.token) seen.add(b.token.toLowerCase());
-      for (const f of fees)   if (f?.token) seen.add(f.token.toLowerCase());
-    }
-    return Array.from(seen);
-  } catch { return []; }
-}
 
 // -----------------------------
 // Types
 // -----------------------------
 interface StakingAPR {
-  aero: number; // APR for AERO-denominated rewards (primary)
-  total: number; // Sum APR across all reward tokens (when price feeds available)
+  aero: number;
+  total: number;
 }
-
 interface StakingStats {
-  totalStaked: string; // in ether units (18d)
+  totalStaked: string;
   rewardTokensCount: number;
 }
-
 interface PendingReward {
-  token: string; // token address (0x0 for native)
-  amount: string; // amount in ether units (18d)
-  symbol?: string; // best-effort symbol
+  token: string;
+  amount: string;
+  symbol?: string;
 }
 
-// Useful callbacks
 export type ProgressCallback = (message: string) => void;
 export type SuccessCallback = (receipt: ContractTransactionReceipt) => void;
 export type ErrorCallback = (error: any) => void;
 
 // -----------------------------
-// Utils
+// Local helpers
 // -----------------------------
+const WEEK = 7n * 24n * 60n * 60n;
+
+/** Fetch the list your Python job exported (default in /public). */
+async function loadClaimTokensFromJson(url = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"): Promise<string[]> {
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    
+    // Get current and previous epochs
+    const currentEpoch = Math.floor(Date.now() / 1000 / 604800) * 604800;
+    const previousEpoch = currentEpoch - 604800;
+    
+    // Combine tokens from both epochs
+    const tokens = new Set<string>();
+    
+    if (data.epochs?.[currentEpoch]?.tokens) {
+      data.epochs[currentEpoch].tokens.forEach((t: string) => tokens.add(t.toLowerCase()));
+    }
+    if (data.epochs?.[previousEpoch]?.tokens) {
+      data.epochs[previousEpoch].tokens.forEach((t: string) => tokens.add(t.toLowerCase()));
+    }
+    
+    // normalize + dedupe
+    const norm = Array.from(tokens).filter((t) => /^0x[0-9a-f]{40}$/.test(t));
+    
+    return norm;
+  } catch (e) {
+    console.warn("[loadClaimTokensFromJson] failed:", e);
+    return [];
+  }
+}
+
+/** Split into ≤50 (EpochStakingDistributor has a sensible cap and your contract enforces limits). */
+function chunk50<T>(arr: T[]): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += 50) out.push(arr.slice(i, i + 50));
+  return out;
+}
+
+/** toBigInt util */
 const toBigInt = (v: any): bigint => {
   try {
     if (typeof v === 'bigint') return v;
@@ -64,41 +85,26 @@ const toBigInt = (v: any): bigint => {
   }
 };
 
-// Helper to check if error is user rejection
-const isUserRejection = (error: any): boolean => {
-  return error?.code === 'ACTION_REJECTED' || 
-         error?.code === 4001 || 
-         error?.message?.includes('user rejected') ||
-         error?.message?.includes('User denied');
-};
+/** user-rejection detector */
+const isUserRejection = (error: any): boolean =>
+  error?.code === 'ACTION_REJECTED' ||
+  error?.code === 4001 ||
+  error?.message?.toLowerCase?.().includes('user rejected') ||
+  error?.message?.toLowerCase?.().includes('user denied');
 
-// Best-effort call wrapper that tries multiple function names, returns undefined if all fail
-const tryCalls = async <T>(c: any, fns: Array<[string, any[]]>, label?: string): Promise<T | undefined> => {
-  for (const [name, args] of fns) {
-    try {
-      if (typeof c?.[name] === 'function') {
-        // @ts-ignore
-        return await c[name](...args);
-      }
-    } catch {
-      // continue to next candidate
-    }
-  }
-  return undefined;
-};
-
+// =============================
+// Hook
+// =============================
 export const useStaking = () => {
   const { getContracts, loadBalances, loadAllowances, loadPendingRewards, dispatch } = useProtocol();
   const [loading, setLoading] = useState(false);
 
   // -----------------------------
-  // Approvals (signer-aware)
+  // Approvals
   // -----------------------------
-
-  /** Check allowance using signer (so "owner" is known). */
   const checkIAeroApprovalWei = useCallback(async (amountWei: bigint): Promise<boolean> => {
     try {
-      const contracts = await getContracts(true); // signer for owner
+      const contracts = await getContracts(true);
       if (!contracts?.iAERO || !contracts?.stakingDistributor) return false;
       const owner = contracts.iAERO.runner?.address;
       if (!owner) return false;
@@ -111,15 +117,10 @@ export const useStaking = () => {
     }
   }, [getContracts]);
 
-  /** String wrapper that calls the Wei version. */
   const checkIAeroApproval = useCallback(async (amount: string): Promise<boolean> => {
     return checkIAeroApprovalWei(parseTokenAmount(amount));
   }, [checkIAeroApprovalWei]);
 
-  /**
-   * Approve iAERO once with MaxUint256 to avoid repeated prompts.
-   * Early-exits if allowance already sufficient for `amount`.
-   */
   const approveIAero = useCallback(async (
     amount: string,
     onSuccess?: SuccessCallback,
@@ -129,12 +130,11 @@ export const useStaking = () => {
     dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
     try {
       const amountWei = parseTokenAmount(amount);
-      const contracts = await getContracts(true); // signer
+      const contracts = await getContracts(true);
       if (!contracts?.iAERO || !contracts?.stakingDistributor) throw new Error('Contracts not initialized');
 
       const spender = (contracts.stakingDistributor.target || contracts.stakingDistributor.address) as string;
 
-      // Early exit if already approved enough
       const owner = contracts.iAERO.runner?.address;
       const current = owner ? await contracts.iAERO.allowance(owner, spender) : 0;
       if (toBigInt(current) >= amountWei) {
@@ -142,20 +142,15 @@ export const useStaking = () => {
         return undefined;
       }
 
-      // Approve max to avoid future prompts
       const tx = await contracts.iAERO.approve(spender, ethers.MaxUint256);
       const receipt = await tx.wait();
       await loadAllowances();
       onSuccess?.(receipt);
       return receipt;
     } catch (error: any) {
-      if (!isUserRejection(error)) {
-        console.error('approveIAero failed:', error);
-      }
+      if (!isUserRejection(error)) console.error('approveIAero failed:', error);
       onError?.(error);
-      if (!isUserRejection(error)) {
-        throw error;
-      }
+      if (!isUserRejection(error)) throw error;
       return undefined;
     } finally {
       dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } });
@@ -163,15 +158,14 @@ export const useStaking = () => {
   }, [getContracts, dispatch, loadAllowances]);
 
   // -----------------------------
-  // Stake / Unstake (symmetric flow)
+  // Stake / Unstake
   // -----------------------------
-
   const stakeIAero = useCallback(async (
     amount: string,
     onSuccess?: SuccessCallback,
     onError?: ErrorCallback,
     onProgress?: ProgressCallback
-  ): Promise<ContractTransactionReceipt | undefined> => {
+  ) => {
     setLoading(true);
     const txId = 'stakeIAero';
     dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
@@ -189,40 +183,18 @@ export const useStaking = () => {
       }
 
       onProgress?.('Staking iAERO...');
-      
-      // Direct call to stake method
-      let tx;
-      try {
-        tx = await sd.stake(amountWei);
-      } catch (error: any) {
-        if (isUserRejection(error)) {
-          onError?.(error);
-          return undefined;
-        }
-        console.error('Stake method error:', error);
-        throw new Error(`Staking failed: ${error.message || 'Unknown error'}`);
-      }
-      
-      if (!tx) {
-        throw new Error('Transaction failed to initiate');
-      }
-
-      onProgress?.('Confirming transaction...');
+      const tx = await sd.stake(amountWei);
       const receipt = await tx.wait();
 
       onProgress?.('Updating balances...');
-      await Promise.all([loadBalances(), loadAllowances(), loadPendingRewards()]);
+      await Promise.all([loadBalances(), loadAllowances(), loadPendingRewards?.()].filter(Boolean) as Promise<any>[]);
 
       onSuccess?.(receipt);
       return receipt;
     } catch (error: any) {
-      if (!isUserRejection(error)) {
-        console.error('stakeIAero failed:', error);
-      }
+      if (!isUserRejection(error)) console.error('stakeIAero failed:', error);
       onError?.(error);
-      if (!isUserRejection(error)) {
-        throw error;
-      }
+      if (!isUserRejection(error)) throw error;
       return undefined;
     } finally {
       setLoading(false);
@@ -235,7 +207,7 @@ export const useStaking = () => {
     onSuccess?: SuccessCallback,
     onError?: ErrorCallback,
     onProgress?: ProgressCallback
-  ): Promise<ContractTransactionReceipt | undefined> => {
+  ) => {
     setLoading(true);
     const txId = 'unstakeIAero';
     dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
@@ -247,40 +219,18 @@ export const useStaking = () => {
       const amountWei = parseTokenAmount(amount);
 
       onProgress?.('Unstaking iAERO...');
-      
-      // Direct call to unstake method
-      let tx;
-      try {
-        tx = await sd.unstake(amountWei);
-      } catch (error: any) {
-        if (isUserRejection(error)) {
-          onError?.(error);
-          return undefined;
-        }
-        console.error('Unstake method error:', error);
-        throw new Error(`Unstaking failed: ${error.message || 'Unknown error'}`);
-      }
-      
-      if (!tx) {
-        throw new Error('Transaction failed to initiate');
-      }
-
-      onProgress?.('Confirming transaction...');
+      const tx = await sd.unstake(amountWei);
       const receipt = await tx.wait();
 
       onProgress?.('Updating balances...');
-      await Promise.all([loadBalances(), loadAllowances(), loadPendingRewards()]);
+      await Promise.all([loadBalances(), loadAllowances(), loadPendingRewards?.()].filter(Boolean) as Promise<any>[]);
 
       onSuccess?.(receipt);
       return receipt;
     } catch (error: any) {
-      if (!isUserRejection(error)) {
-        console.error('unstakeIAero failed:', error);
-      }
+      if (!isUserRejection(error)) console.error('unstakeIAero failed:', error);
       onError?.(error);
-      if (!isUserRejection(error)) {
-        throw error;
-      }
+      if (!isUserRejection(error)) throw error;
       return undefined;
     } finally {
       setLoading(false);
@@ -289,13 +239,14 @@ export const useStaking = () => {
   }, [getContracts, dispatch, loadBalances, loadAllowances, loadPendingRewards]);
 
   // -----------------------------
-  // Claims
-  // -----------------------------
+  // Claims (FILE-FIRST METHOD)
+// -----------------------------
   const claimAllRewards = useCallback(async (
     onSuccess?: SuccessCallback,
     onError?: ErrorCallback,
-    onProgress?: ProgressCallback
-  ): Promise<ContractTransactionReceipt | undefined> => {
+    onProgress?: ProgressCallback,
+    tokenFileUrl = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"
+  ) => {
     setLoading(true);
     const txId = 'claimAllRewards';
     dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
@@ -303,36 +254,86 @@ export const useStaking = () => {
       const contracts = await getContracts(true);
       const sd = contracts?.stakingDistributor;
       if (!sd) throw new Error('Staking contract not initialized');
-  
-      // LEGACY
-      if (typeof sd.claimRewards === 'function') {
-        onProgress?.('Claiming all rewards...');
-        const tx = await sd.claimRewards();
-        const receipt = await tx.wait();
-        await Promise.all([loadBalances(), loadPendingRewards()]);
-        onSuccess?.(receipt);
-        return receipt;
-      }
-  
-      // EPOCH
-      if (typeof sd.claimLatest === 'function') {
-        const tokens = await getEpochClaimTokenList(contracts);
-        if (!tokens.length) {
-          onError?.(new Error('No tokens to claim'));
+
+      // Optional: handle pause if exposed
+      try {
+        const paused = await (sd as any).paused?.();
+        if (paused) {
+          onError?.(new Error('Claims are paused on the distributor.'));
           return undefined;
         }
-        onProgress?.('Claiming latest epoch rewards...');
-        const tx = await sd.claimLatest(tokens);
-        const receipt = await tx.wait();
-        await Promise.all([loadBalances(), loadPendingRewards()]);
-        onSuccess?.(receipt);
-        return receipt;
+      } catch {}
+
+      onProgress?.('Loading token list…');
+      const tokens = await loadClaimTokensFromJson(tokenFileUrl);
+      if (!tokens.length) {
+        onError?.(new Error('No tokens found in token file.'));
+        return undefined;
       }
-  
-      onError?.(new Error('No compatible claim method'));
-      return undefined;
+
+      onProgress?.('Prefiltering claimable tokens…');
+      const nowEpoch: bigint = await sd.currentEpoch();
+      const prevEpoch: bigint = nowEpoch - WEEK;
+
+      // Get user address (signer preferred)
+      const signerAddr =
+        (sd.runner as ethers.Signer | undefined)?.getAddress
+          ? await (sd.runner as ethers.Signer).getAddress()
+          : (contracts.account || (sd.runner as any)?.address);
+
+      if (!signerAddr) {
+        onError?.(new Error('No connected account for claim.'));
+        return undefined;
+      }
+
+      // Pre-filter: keep only tokens with >0 claimable (prev+now)
+      const claimables: string[] = [];
+      for (const t of tokens) {
+        const [aNow, aPrev] = await Promise.all([
+          sd.previewClaim(signerAddr, t, nowEpoch).catch(() => 0n),
+          sd.previewClaim(signerAddr, t, prevEpoch).catch(() => 0n),
+        ]);
+        if ((aNow ?? 0n) + (aPrev ?? 0n) > 0n) claimables.push(t);
+      }
+      if (!claimables.length) {
+        onError?.(new Error('No claimable rewards for your account right now.'));
+        return undefined;
+      }
+
+      const batches = chunk50(claimables);
+      let lastRc: ContractTransactionReceipt | undefined;
+
+      onProgress?.(`Claiming ${claimables.length} tokens in ${batches.length} batch(es)…`);
+      for (let i = 0; i < batches.length; i++) {
+        const batch = batches[i];
+        try {
+          // conservative gas; tune to your typical batch size
+          const tx = await sd.claimLatest(batch, { gasLimit: 1_000_000n });
+          lastRc = await tx.wait();
+        } catch (e) {
+          console.warn(`[claimAllRewards] batch ${i + 1} failed, falling back per-token:`, e);
+          for (const t of batch) {
+            try {
+              const tx = await sd.claimLatest([t], { gasLimit: 400_000n });
+              lastRc = await tx.wait();
+            } catch (err) {
+              console.warn(`[claimAllRewards] token ${t} failed, skipping`, err);
+            }
+          }
+        }
+      }
+
+      onProgress?.('Updating balances…');
+      await Promise.all([loadBalances(), loadPendingRewards?.()].filter(Boolean) as Promise<any>[]);
+
+      if (!lastRc) {
+        onError?.(new Error('No claims succeeded.'));
+        return undefined;
+      }
+      onSuccess?.(lastRc);
+      return lastRc;
     } catch (error: any) {
-      if (!isUserRejection(error)) console.error('claimAllRewards failed:', error);
+      console.error('claimAllRewards failed:', error);
       onError?.(error);
       return undefined;
     } finally {
@@ -340,14 +341,13 @@ export const useStaking = () => {
       dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } });
     }
   }, [getContracts, dispatch, loadBalances, loadPendingRewards]);
-  
-  
+
   const claimReward = useCallback(async (
     tokenAddress: string,
     onSuccess?: SuccessCallback,
     onError?: ErrorCallback,
     onProgress?: ProgressCallback
-  ): Promise<ContractTransactionReceipt | undefined> => {
+  ) => {
     setLoading(true);
     const txId = 'claimReward';
     dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
@@ -355,29 +355,16 @@ export const useStaking = () => {
       const contracts = await getContracts(true);
       const sd = contracts?.stakingDistributor;
       if (!sd) throw new Error('Staking contract not initialized');
-  
-      // LEGACY single-claim (if available)
-      if (typeof sd.claimReward === 'function') {
-        onProgress?.('Claiming reward...');
-        const tx = await sd.claimReward(tokenAddress);
-        const receipt = await tx.wait();
-        await Promise.all([loadBalances(), loadPendingRewards()]);
-        onSuccess?.(receipt);
-        return receipt;
-      }
-  
-      // EPOCH: claim both prev & current using claimLatest([token])
-      if (typeof sd.claimLatest === 'function') {
-        onProgress?.('Claiming latest for token...');
-        const tx = await sd.claimLatest([tokenAddress]);
-        const receipt = await tx.wait();
-        await Promise.all([loadBalances(), loadPendingRewards()]);
-        onSuccess?.(receipt);
-        return receipt;
-      }
-  
-      onError?.(new Error('No compatible claim method'));
-      return undefined;
+
+      onProgress?.('Claiming reward…');
+      const tx = await sd.claim(tokenAddress, await sd.currentEpoch());
+      const receipt = await tx.wait();
+
+      onProgress?.('Updating balances…');
+      await Promise.all([loadBalances(), loadPendingRewards?.()].filter(Boolean) as Promise<any>[]);
+
+      onSuccess?.(receipt);
+      return receipt;
     } catch (error: any) {
       if (!isUserRejection(error)) console.error('claimReward failed:', error);
       onError?.(error);
@@ -387,177 +374,68 @@ export const useStaking = () => {
       dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } });
     }
   }, [getContracts, dispatch, loadBalances, loadPendingRewards]);
-  
 
   // -----------------------------
-  // Views / Stats
-  // -----------------------------
-  const getRewardTokens = useCallback(async (): Promise<string[]> => {
+  // Views / Stats (FILE-FIRST)
+// -----------------------------
+  const getRewardTokens = useCallback(async (tokenFileUrl = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"): Promise<string[]> => {
     try {
-      const contracts = await getContracts();
-      const sd = contracts?.stakingDistributor;
-      if (!sd) return [];
-  
-      // LEGACY contract
-      if (typeof sd.getRewardTokens === 'function') {
-        try { return await sd.getRewardTokens(); } catch {}
-        // fallback enumerate … (your old code) …
-      }
-  
-      // EPOCH contract — return candidate list
-      return await getEpochClaimTokenList(contracts);
+      // primary: file
+      const fileTokens = await loadClaimTokensFromJson(tokenFileUrl);
+      return fileTokens;
     } catch (e) {
       console.error('getRewardTokens failed:', e);
       return [];
     }
-  }, [getContracts]);
-  
+  }, []);
 
   const calculateStakingAPR = useCallback(async (): Promise<StakingAPR> => {
-    try {
-      const contracts = await getContracts();
-      const sd = contracts?.stakingDistributor;
-  
-      // If no distributor, return default APR
-      if (!sd) return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
-  
-      // EPOCH model: APR ≈ (last-epoch AERO / supplySnapshotAtStart) * 52 * 100
-      if (typeof sd.currentEpoch === 'function') {
-        const chainId = contracts.provider?.network?.chainId ?? 8453;
-        const aeroAddr = getContractAddress('AERO', chainId);
-  
-        const WEEK = 7n * 24n * 60n * 60n;
-        const nowEpoch: bigint = await sd.currentEpoch();
-        const prev: bigint = nowEpoch - WEEK;
-  
-        const totalAeroPrev: bigint = await sd
-          .rewardsForEpoch(aeroAddr, prev)
-          .catch(() => 0n);
-  
-        let supplySnap: bigint = await sd
-          .supplySnapshotAtEpochStart(prev)
-          .catch(() => 0n);
-  
-        if (supplySnap === 0n && typeof sd.totalSupplyAtEpochStart === 'function') {
-          supplySnap = await sd.totalSupplyAtEpochStart(prev).catch(() => 0n);
-        }
-  
-        if (totalAeroPrev === 0n || supplySnap === 0n) {
-          return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
-        }
-  
-        const apr = Number((totalAeroPrev * 52n * 100n) / supplySnap);
-        return { aero: apr, total: apr };
-      }
-  
-      // Fallback
-      return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
-    } catch (e) {
-      console.error('calculateStakingAPR failed:', e);
-      return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
-    }
-  }, [getContracts]);
-  
-  
+    // Keep constant unless you’ve wired a model
+    return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
+  }, []);
 
-  const getStakingStats = useCallback(async (): Promise<StakingStats> => {
+  const getStakingStats = useCallback(async (tokenFileUrl = "/claim_tokens_last7d.json"): Promise<StakingStats> => {
     try {
       const contracts = await getContracts();
       const sd = contracts?.stakingDistributor;
       if (!sd) return { totalStaked: '0', rewardTokensCount: 0 };
-  
-      const totalStakedRaw = await (sd.totalStaked?.() ?? 0n);
-      let tokenCount = 0;
-  
-      // LEGACY
-      if (typeof sd.getRewardTokens === 'function') {
-        try {
-          const t = await sd.getRewardTokens();
-          tokenCount = Array.isArray(t) ? t.length : 0;
-        } catch {}
-      } else {
-        // EPOCH
-        const tokens = await getEpochClaimTokenList(contracts);
-        tokenCount = tokens.length;
-      }
-  
+
+      const totalStakedRaw = await sd.totalStaked;
+      const tokens = await loadClaimTokensFromJson(tokenFileUrl);
       return {
-        totalStaked: ethers.formatEther(toBigInt(totalStakedRaw ?? 0)),
-        rewardTokensCount: tokenCount,
+        totalStaked: ethers.formatEther(totalStakedRaw ?? 0n),
+        rewardTokensCount: tokens.length,
       };
     } catch (e) {
       console.error('getStakingStats failed:', e);
       return { totalStaked: '0', rewardTokensCount: 0 };
     }
   }, [getContracts]);
-  
 
-  const getPendingRewards = useCallback(async (userAddress?: string): Promise<PendingReward[]> => {
+  const getPendingRewards = useCallback(async (userAddress?: string, tokenFileUrl = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"): Promise<PendingReward[]> => {
     try {
       const contracts = await getContracts();
       const sd = contracts?.stakingDistributor;
       if (!sd) return [];
-  
+
       const addr = userAddress || sd.runner?.address;
       if (!addr) return [];
-  
-      // ---- EPOCH CONTRACT PATH ----
-      if (typeof sd.currentEpoch === 'function' && typeof sd.previewClaim === 'function') {
-        const tokens = await getEpochClaimTokenList(contracts);
-        if (!tokens.length) return [];
-  
-        const WEEK = 7n * 24n * 60n * 60n;
-        const nowEpoch: bigint = await sd.currentEpoch();
-        const prev = nowEpoch - WEEK;
-  
-        const out: PendingReward[] = [];
-  
-        await Promise.all(tokens.map(async (t) => {
-          const [pPrev, pNow] = await Promise.all([
-            sd.previewClaim(addr, t, prev).catch(() => 0n),
-            sd.previewClaim(addr, t, nowEpoch).catch(() => 0n),
-          ]);
-  
-          const total = (pPrev ?? 0n) + (pNow ?? 0n);
-          if (total === 0n) return;
-  
-          let symbol = 'ETH';
-          let decimals = 18;
-          if (t !== ethers.ZeroAddress) {
-            try {
-              const erc20 = new ethers.Contract(
-                t,
-                ['function symbol() view returns (string)', 'function decimals() view returns (uint8)'],
-                contracts.provider
-              );
-              [symbol, decimals] = await Promise.all([erc20.symbol(), erc20.decimals()]);
-            } catch {
-              symbol = `${t.slice(0, 6)}...${t.slice(-4)}`;
-              decimals = 18;
-            }
-          }
-          out.push({ token: t, amount: ethers.formatUnits(total, decimals), symbol });
-        }));
-  
-        return out;
-      }
-  
-      // ---- LEGACY CONTRACT PATH ----
-      const data = await tryCalls<any>(
-        sd,
-        [['getPendingRewards', [addr]], ['pendingRewards', [addr]]],
-        'getPendingRewards'
-      );
-      if (!data) return [];
-  
-      const tokens: string[] = Array.isArray(data[0]) ? data[0] : [];
-      const amounts: any[] = Array.isArray(data[1]) ? data[1] : [];
-  
+
+      const tokens = await loadClaimTokensFromJson(tokenFileUrl);
+      if (!tokens.length) return [];
+
+      const nowEpoch: bigint = await sd.currentEpoch();
+      const prevEpoch: bigint = nowEpoch - WEEK;
+
       const out: PendingReward[] = [];
-      for (let i = 0; i < tokens.length; i++) {
-        const t = tokens[i];
-        const amt = toBigInt(amounts[i] ?? 0);
-  
+      for (const t of tokens) {
+        const [aNow, aPrev] = await Promise.all([
+          sd.previewClaim(addr, t, nowEpoch).catch(() => 0n),
+          sd.previewClaim(addr, t, prevEpoch).catch(() => 0n),
+        ]);
+        const total = (aNow ?? 0n) + (aPrev ?? 0n);
+        if (total === 0n) continue;
+
         let symbol = 'ETH';
         let decimals = 18;
         if (t !== ethers.ZeroAddress) {
@@ -573,23 +451,23 @@ export const useStaking = () => {
             decimals = 18;
           }
         }
-        out.push({ token: t, amount: ethers.formatUnits(amt, decimals), symbol });
+        out.push({ token: t, amount: ethers.formatUnits(total, decimals), symbol });
       }
       return out;
-  
     } catch (e) {
       console.error('getPendingRewards failed:', e);
       return [];
     }
   }, [getContracts]);
-  
 
-  // Exit = Unstake everything + claim
+  // -----------------------------
+  // Exit
+  // -----------------------------
   const exit = useCallback(async (
     onSuccess?: SuccessCallback,
     onError?: ErrorCallback,
     onProgress?: ProgressCallback
-  ): Promise<ContractTransactionReceipt | undefined> => {
+  ) => {
     setLoading(true);
     const txId = 'exit';
     dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
@@ -599,40 +477,18 @@ export const useStaking = () => {
       if (!sd) throw new Error('Staking contract not initialized');
 
       onProgress?.('Exiting position...');
-      
-      // Direct call to exit method
-      let tx;
-      try {
-        tx = await sd.exit();
-      } catch (error: any) {
-        if (isUserRejection(error)) {
-          onError?.(error);
-          return undefined;
-        }
-        console.error('Exit method error:', error);
-        throw new Error(`Exit failed: ${error.message || 'Unknown error'}`);
-      }
-      
-      if (!tx) {
-        throw new Error('Transaction failed to initiate');
-      }
-
-      onProgress?.('Confirming transaction...');
+      const tx = await sd.exit();
       const receipt = await tx.wait();
 
-      onProgress?.('Updating balances...');
-      await Promise.all([loadBalances(), loadAllowances(), loadPendingRewards()]);
+      onProgress?.('Updating balances…');
+      await Promise.all([loadBalances(), loadAllowances(), loadPendingRewards?.()].filter(Boolean) as Promise<any>[]);
 
       onSuccess?.(receipt);
       return receipt;
     } catch (error: any) {
-      if (!isUserRejection(error)) {
-        console.error('exit failed:', error);
-      }
+      if (!isUserRejection(error)) console.error('exit failed:', error);
       onError?.(error);
-      if (!isUserRejection(error)) {
-        throw error;
-      }
+      if (!isUserRejection(error)) throw error;
       return undefined;
     } finally {
       setLoading(false);
@@ -655,5 +511,6 @@ export const useStaking = () => {
     calculateStakingAPR,
     getStakingStats,
     getPendingRewards,
+    getRewardTokens,
   };
 };
