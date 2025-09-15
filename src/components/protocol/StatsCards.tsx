@@ -147,4 +147,4 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
       ))}
     </div>
   );
-}
+}  
