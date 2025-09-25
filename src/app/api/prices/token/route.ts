@@ -35,7 +35,7 @@ async function fetchLlamaPrices(chainPrefix: string, addrs: string[]) {
   const ids = addrs.map(a => `${chainPrefix}:${a}`).join(',');
   const url = `https://coins.llama.fi/prices/current/${ids}`;
   try {
-    const r = await fetch(url, { cf: { cacheTtl: 30, cacheEverything: true } });
+    const r = await fetch(url, { next: { revalidate: 300 } });
     if (!r.ok) return {};
     const j = await r.json();
     const out: Record<string, number> = {};
@@ -120,7 +120,7 @@ export async function GET(req: Request) {
     const AERO = NET.AERO!.toLowerCase() as `0x${string}`;
 
     // Public client (Edge-friendly)
-    const rpcUrl = process.env.RPC_URL || 'https://mainnet.base.org';
+    const rpcUrl = process.env.RPC_URL || 'https://base-mainnet.g.alchemy.com/v2/OOO0w6ZDwoB2-08TOnNvN';
     const client = createPublicClient({ chain: base, transport: http(rpcUrl) });
 
     // 1) Llama batch
