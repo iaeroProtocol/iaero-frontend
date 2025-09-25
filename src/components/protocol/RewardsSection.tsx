@@ -30,7 +30,7 @@ import {
   calculateYield,
 } from "../lib/defi-utils";
 import { getProvider } from "../lib/ethereum";
-import { usePrices, PriceData } from "@/components/contexts/PriceContext";
+import { usePrices } from "@/components/contexts/PriceContext";
 import { WalletTokensSection } from "@/components/wallet/WalletTokensSection";
 
 interface RewardsSectionProps {
@@ -57,21 +57,10 @@ interface TxHistory {
   txHash?: string;
 }
 
-const TOKEN_DECIMALS: Record<string, number> = { AERO: 18, ETH: 18, USDC: 6, LIQ: 18 };
 const GAS_ESTIMATES = {
   claimSingle: 120000n,
   claimAll: 200000n,
 };
-
-const WETH      = "0x4200000000000000000000000000000000000006".toLowerCase();
-const USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".toLowerCase();
-
-const ERC20_META_ABI = [
-  "function symbol() view returns (string)",
-  "function decimals() view returns (uint8)",
-];
-
-const ZERO = "0x0000000000000000000000000000000000000000";
 
 const msgFromError = (e: any, fallback = "Transaction failed") => {
   if (e?.code === 4001) return "Transaction rejected by user";
@@ -94,6 +83,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     connected,
     networkSupported,
     chainId,
+    account,
     pendingRewards,
     balances,
     loading,
@@ -105,9 +95,12 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     claimReward,
     loading: stakingLoading,
     calculateStakingAPR,
+    getPendingRewards,
   } = useStaking();
 
   const { prices, getPriceInUSD } = usePrices();
+
+  const [pending, setPending] = useState<Array<{ token: string; amount: string; symbol?: string; decimals?: number }>>([]);
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressStep, setProgressStep] = useState("");
@@ -132,10 +125,6 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       maximumFractionDigits: max,
     })}`;
   };
-
-  
-  type RewardMeta = { symbol: string; decimals: number; price: number };
-  const [rewardMeta, setRewardMeta] = useState<Record<string, RewardMeta>>({});
 
   const txBaseUrl = useMemo(
     () =>
@@ -185,6 +174,22 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     }
   }, [connected, networkSupported, estimateGasCost, pendingRewards]);
 
+  useEffect(() => {
+    if (!connected || !networkSupported) return;
+    (async () => {
+      try {
+        // Pull the *same* list your claim path uses (JSON + previewClaim prev+now)
+        const list = await getPendingRewards(account);   // from useStaking()
+        setPending(list);
+      } catch (e) {
+        console.error('load canonical pending rewards failed', e);
+        setPending([]);
+      }
+    })();
+    // re-run when account/network flips or after successful claim
+  }, [connected, networkSupported, chainId, getPendingRewards]);
+  
+
   // Resolve known token addresses on current chain
   const aeroAddr = useMemo(() => {
     try {
@@ -202,118 +207,75 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     }
   }, [chainId]);
 
-  useEffect(() => {
-    if (!connected || !networkSupported) return;
-  
-    const tokens: string[] = Array.isArray((pendingRewards as any)?.tokens)
-      ? (pendingRewards as any).tokens
-      : [];
-  
-    if (!tokens.length) { setRewardMeta({}); return; }
-  
-    const provider = getProvider();
-  
-    (async () => {
-      // 1) read metadata in parallel
-      const metaEntries = await Promise.all(tokens.map(async (t) => {
-        const addr = (t || "").toString().toLowerCase();
-        if (!addr) return null;
-  
-        // Known quick paths (no RPC)
-        if (addr === WETH) return [addr, { symbol: "WETH", decimals: 18, price: 0 }] as const;
-        if (addr === USDC) return [addr, { symbol: "USDC", decimals: 6, price: 0 }] as const;
-  
-        try {
-          const c = new ethers.Contract(addr, ERC20_META_ABI, provider);
-          const [sym, dec] = await Promise.all([c.symbol(), c.decimals()]);
-          return [addr, { symbol: String(sym), decimals: Number(dec), price: 0 }] as const;
-        } catch {
-          return [addr, { symbol: "TOKEN", decimals: 18, price: 0 }] as const;
-        }
-      }));
-  
-      const baseMeta = Object.fromEntries((metaEntries.filter(Boolean) as [string, RewardMeta][]));
-  
-      // 2) batch price query
+  // Build a price map keyed by lowercased addresses present in `pending`
+const [priceByAddr, setPriceByAddr] = useState<Record<string, number>>({});
+
+useEffect(() => {
+  if (!connected || !networkSupported) return;
+  const addrs = pending.map(p => (p.token || '').toLowerCase()).filter(Boolean);
+  if (!addrs.length) { setPriceByAddr({}); return; }
+
+  (async () => {
+    try {
+      // call your existing API: /api/prices/token?addresses=0x...,0x...
       const q = new URLSearchParams({
         chainId: String(chainId ?? 8453),
-        addresses: Object.keys(baseMeta).join(","),
+        addresses: Array.from(new Set(addrs)).join(',')
       });
-      let priceMap: Record<string, number> = {};
-      try {
-        const res = await fetch(`/api/prices/token?${q}`, { cache: "no-store" });
-        if (res.ok) {
-          const j = await res.json();
-          priceMap = j?.prices || {};
-        }
-      } catch {/* ignore */}
-  
-      // 3) merge prices, with client-side fallbacks if needed
-      const merged = Object.fromEntries(
-        Object.entries(baseMeta).map(([addr, m]) => {
-          let price = priceMap[addr.toLowerCase()] ?? 0;
-          if (!price && addr === WETH) price = Number(prices.ETH?.usd || 0);
-          if (!price && addr === USDC) price = Number(prices.USDC?.usd || 1);
-          return [addr, { ...m, price }];
-        })
-      ) as Record<string, RewardMeta>;
-  
-      setRewardMeta(merged);
-    })();
-  }, [connected, networkSupported, pendingRewards, chainId, prices]);
-  
-  
-  
+      const res = await fetch(`/api/prices/token?${q}`, { cache: 'no-store' });
+      const j = res.ok ? await res.json() : { prices: {} };
+      const map = j?.prices || {};
+      // ensure lowercased keys
+      const normalized: Record<string, number> = {};
+      for (const k of Object.keys(map)) normalized[k.toLowerCase()] = Number(map[k]) || 0;
+      setPriceByAddr(normalized);
+    } catch (e) {
+      console.error('price fetch failed', e);
+      setPriceByAddr({});
+    }
+  })();
+}, [connected, networkSupported, chainId, pending]);
 
-  
 
   // Build reward rows from pending rewards (tokens/amounts arrays expected)
   const rows: RewardTokenRow[] = useMemo(() => {
-    const tokens: string[] = Array.isArray((pendingRewards as any)?.tokens)
-      ? (pendingRewards as any).tokens
-      : [];
-    const amounts: (string | bigint)[] = Array.isArray((pendingRewards as any)?.amounts)
-      ? (pendingRewards as any).amounts
-      : [];
-  
     const out: RewardTokenRow[] = [];
   
-    for (let i = 0; i < tokens.length; i++) {
-      const addr = (tokens[i] || "").toString().toLowerCase();
-      const rawAmt = amounts[i] ?? "0";
+    for (const p of pending) {
+      const addr = (p.token || '').toLowerCase();
+      if (!addr) continue;
   
-      // metadata & fallbacks
-      const meta = rewardMeta[addr];
-      let symbol =
-        meta?.symbol ??
-        (addr === aeroAddr ? "AERO" : addr === liqAddr ? "LIQ" : addr === ZERO ? "ETH" : "TOKEN");
-      let decimals =
-        meta?.decimals ??
-        (addr === ZERO ? TOKEN_DECIMALS.ETH
-         : addr === aeroAddr ? TOKEN_DECIMALS.AERO
-         : addr === liqAddr ? TOKEN_DECIMALS.LIQ
-         : 18);
+      const decimals = typeof p.decimals === 'number' ? p.decimals : 18;
+      const symbol = p.symbol || (addr === aeroAddr ? 'AERO' : addr === liqAddr ? 'LIQ' : 'TOKEN');
   
-      let icon = "💰";
-      let gradient = "from-slate-600 to-slate-700";
-      if (addr === aeroAddr) { icon = "🚀"; gradient = "from-blue-500 to-cyan-500"; }
-      else if (addr === ZERO) { icon = "⚡"; gradient = "from-purple-500 to-indigo-500"; }
-      else if (addr === liqAddr) { icon = "🟣"; gradient = "from-fuchsia-500 to-purple-600"; }
+      // p.amount is human units (string). Convert to BN for consistency with your UI types.
+      // (This is only for formatting; claims use the address and epoch in the hook)
+      let amountBN: bigint = 0n;
+      try {
+        const human = p.amount || '0';
+        // convert human -> wei-ish bigint
+        const parts = human.split('.');
+        const whole = parts[0] || '0';
+        const frac = (parts[1] || '').padEnd(decimals, '0').slice(0, decimals);
+        amountBN = BigInt(whole + (decimals ? frac : ''));
+      } catch {}
   
-      const amountBN =
-        typeof rawAmt === "bigint"
-          ? rawAmt
-          : parseInputToBigNumber(String(rawAmt), decimals);
+      const humanFloat = Number(p.amount || '0') || 0;
+      const price = priceByAddr[addr] ?? 0;
+      const usdValue = humanFloat * price;
   
-      const tokenAmount = parseFloat(ethers.formatUnits(amountBN, decimals));
-      const price = meta?.price ?? 0;                // <-- price resolved by address (not symbol)
-      const usdValue = (isFinite(tokenAmount) ? tokenAmount : 0) * price;
+      // simple icon/gradient as before
+      let icon = '💰', gradient = 'from-slate-600 to-slate-700';
+      if (symbol === 'AERO') { icon = '🚀'; gradient = 'from-blue-500 to-cyan-500'; }
+      else if (symbol === 'ETH') { icon = '⚡'; gradient = 'from-purple-500 to-indigo-500'; }
+      else if (symbol === 'LIQ') { icon = '🟣'; gradient = 'from-fuchsia-500 to-purple-600'; }
   
       out.push({ address: addr, symbol, decimals, amountBN, usdValue, icon, gradient });
     }
   
     return out;
-  }, [pendingRewards, rewardMeta, aeroAddr, liqAddr]);
+  }, [pending, priceByAddr, aeroAddr, liqAddr]);
+  
   
 
   const hasRewards = useMemo(() => rows.some((r) => r.amountBN > 0n), [rows]);
@@ -343,7 +305,9 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
-      await loadPendingRewards();
+      await loadPendingRewards?.();
+      const list = await getPendingRewards(account);
+      setPending(list);
       showToast("Rewards refreshed", "info");
     } catch (e) {
       showToast("Failed to refresh rewards", "error");
@@ -557,33 +521,46 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
           {rows.length > 0 ? (
             <>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="rounded-xl overflow-hidden border border-slate-700/40">
+                <div className="grid grid-cols-12 bg-slate-900/70 px-4 py-3 text-slate-400 text-xs">
+                  <div className="col-span-4">Token</div>
+                  <div className="col-span-4 text-right">Amount</div>
+                  <div className="col-span-3 text-right">Value</div>
+                  <div className="col-span-1"></div>
+                </div>
+
                 {rows.map((r, idx) => (
-                  <motion.div
+                  <div
                     key={`${r.address}-${idx}`}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: idx * 0.05 }}
-                    className="bg-slate-900/50 rounded-xl p-6 border border-slate-700/30 relative overflow-hidden group"
+                    className="grid grid-cols-12 items-center px-4 py-3 border-t border-slate-800/50 hover:bg-slate-900/60 transition"
                   >
-                    <div
-                      className={`absolute top-0 right-0 w-16 h-16 bg-gradient-to-br ${r.gradient} opacity-10 rounded-full transform translate-x-6 -translate-y-6 group-hover:scale-110 transition-transform duration-300`}
-                    />
-                    <div className="relative">
-                      <div className="flex items-center justify-between mb-3">
-                        <span className="text-2xl">{r.icon}</span>
-                        <span className="text-slate-400 text-sm font-medium">
-                          {r.symbol}
-                        </span>
+                    <div className="col-span-4 flex items-center gap-2 truncate">
+                      <span className="text-xl">{r.icon}</span>
+                      <div className="min-w-0">
+                        <div className="text-white font-medium truncate">{r.symbol}</div>
+                        <div className="text-[11px] text-slate-400 truncate">{r.address}</div>
                       </div>
-                      <div className="text-2xl font-bold text-white mb-1">
-                        {formatBigNumber(r.amountBN, r.decimals, 4)}
-                      </div>
-                      <div className="text-sm text-slate-400 mb-3">
-                        ≈ {formatUSD(r.usdValue, 6)}
-                      </div>
+                    </div>
+
+                    <div className="col-span-4 text-right text-white">
+                      {formatBigNumber(r.amountBN, r.decimals, 6)}
+                    </div>
+
+                    <div className="col-span-3 text-right">
+                      <span className="text-emerald-400 font-medium">
+                        {r.usdValue
+                          ? `$${r.usdValue.toLocaleString(undefined, { maximumFractionDigits: 6 })}`
+                          : '$0'}
+                      </span>
+                    </div>
+
+                    <div className="col-span-1 flex justify-end">
                       {r.amountBN > 0n && (
                         <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 px-2 border-slate-600 text-slate-200 hover:bg-slate-700"
+                          disabled={Boolean(claimingSpecific) || isProcessing}
                           onClick={() =>
                             handleClaimSpecific(
                               r.address,
@@ -593,27 +570,22 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
                               r.usdValue
                             )
                           }
-                          disabled={
-                            r.amountBN === 0n || Boolean(claimingSpecific) || isProcessing
-                          }
-                          size="sm"
-                          variant="outline"
-                          className="w-full border-slate-600 text-slate-200 hover:bg-slate-700"
                         >
                           {claimingSpecific === r.address ? (
                             <>
                               <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                              Claiming...
+                              Claiming…
                             </>
                           ) : (
-                            `Claim ${r.symbol}`
+                            'Claim'
                           )}
                         </Button>
                       )}
                     </div>
-                  </motion.div>
+                  </div>
                 ))}
               </div>
+
 
               <Button
                 onClick={handleClaimAll}

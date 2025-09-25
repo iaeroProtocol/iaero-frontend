@@ -99,7 +99,8 @@ const VAULT_MIN_ABI = [
   "function depositVeNFT(uint256 tokenId) external",
   "function previewDeposit(uint256 amount) external view returns (uint256,uint256,uint256)",
   "function vaultStatus() external view returns (uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,bool,bool)",
-  "function MAXTIME() external view returns (uint256)"
+  "function MAXTIME() external view returns (uint256)",
+  "function totalLIQMinted() external view returns (uint256)"
 ];
 
 const VAULT_IFACE = new ethers.Interface([
@@ -294,20 +295,61 @@ export const useVault = () => {
       const c = await getContracts();
       const wei = parseTokenAmount(aeroAmount);
       if (!c?.vault) throw new Error("Vault not initialized");
+      
       const hasPreview = typeof (c.vault as any).previewDeposit === "function";
       if (!hasPreview) {
         console.warn("[calculateLiqRewards] vault.previewDeposit not exposed by ABI");
-        return "0.0";
+        return {
+          liqToUser: "0.0",
+          effectiveRate: "0.0",
+          nextHalvingIn: "0.0"
+        };
       }
+      
       if (DEBUG) console.debug("[calculateLiqRewards] amount:", aeroAmount, "wei:", wei.toString());
       const res = await (c.vault as any).previewDeposit(wei);
-      const liq = ethers.formatEther(res?.[2] ?? 0n);
+      
+      // Extract the values from the contract response
+      const iAeroToUser = ethers.formatEther(res?.[0] ?? 0n);
+      const liqToUser = ethers.formatEther(res?.[2] ?? 0n);
+      
+      // Calculate effective rate (LIQ per iAERO, not per AERO)
+      const iAeroNum = parseFloat(iAeroToUser);
+      const liqNum = parseFloat(liqToUser);
+      const effectiveRate = iAeroNum > 0 
+        ? (liqNum / iAeroNum).toFixed(4) 
+        : "0.0";
+      
+      // Calculate nextHalvingIn by getting totalLIQMinted from contract
+      let nextHalvingIn = "0.0";
+      try {
+        // Add these view functions to your vault ABI if not present:
+        const totalMinted = await (c.vault as any).totalLIQMinted?.();
+        const halvingStep = 5_000_000n * 10n**18n; // HALVING_STEP constant from contract
+        
+        if (totalMinted !== undefined) {
+          const currentHalvingIndex = totalMinted / halvingStep;
+          const nextHalvingThreshold = (currentHalvingIndex + 1n) * halvingStep;
+          const untilNextHalving = nextHalvingThreshold - totalMinted;
+          nextHalvingIn = ethers.formatEther(untilNextHalving);
+        }
+      } catch (e) {
+        console.debug("[calculateLiqRewards] Could not fetch halving info:", e);
+      }
+      
       if (DEBUG) console.debug("[calculateLiqRewards] preview:", {
         iAeroToUser: res?.[0]?.toString?.(),
         iAeroToTreasury: res?.[1]?.toString?.(),
-        liqToUser: res?.[2]?.toString?.()
+        liqToUser: res?.[2]?.toString?.(),
+        effectiveRate,
+        nextHalvingIn
       });
-      return liq;
+      
+      return {
+        liqToUser,
+        effectiveRate,
+        nextHalvingIn
+      };
     },
     [getContracts]
   );
