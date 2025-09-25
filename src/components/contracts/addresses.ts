@@ -25,6 +25,9 @@ export type ContractName =
   | "EpochStakingDistributor"
   | "WETH"
   | "USDC"
+  | "USDbC" 
+  | "cbETH"   
+  | "cbBTC" 
   | "RewardsSugar";
 
 export type Address = `0x${string}`;
