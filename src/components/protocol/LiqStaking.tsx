@@ -8,20 +8,22 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Coins, TrendingUp, Clock, Gift, AlertCircle, Loader2 } from "lucide-react";
-import { useProtocol } from '@/components/contexts/ProtocolContext';
-import { parseTokenAmount } from '@/components/lib/ethereum';
-import { usePrices } from '@/components/contexts/PriceContext';
+import { useProtocol } from "@/components/contexts/ProtocolContext";
+import { parseTokenAmount } from "@/components/lib/ethereum";
+import { usePrices } from "@/components/contexts/PriceContext";
+import { get1559Overrides } from "@/components/lib/fees";
 
-const ZERO = ethers.ZeroAddress; // native ETH
+const ZERO = ethers.ZeroAddress; // native ETH (address(0))
 const DEFAULT_WETH_BASE = "0x4200000000000000000000000000000000000006"; // Base WETH
 
 async function fetchPricesForAddrs(addrs: string[], chainId = 8453): Promise<Record<string, number>> {
-  const unique = Array.from(new Set(addrs.map(a => a.toLowerCase()).filter(Boolean)));
+  const unique = Array.from(new Set(addrs.map((a) => a.toLowerCase()).filter(Boolean)));
   if (!unique.length) return {};
+
   // 1) Internal API
   try {
-    const q = new URLSearchParams({ chainId: String(chainId), addresses: unique.join(',') });
-    const res = await fetch(`/api/prices/token?${q}`, { cache: 'no-store' });
+    const q = new URLSearchParams({ chainId: String(chainId), addresses: unique.join(",") });
+    const res = await fetch(`/api/prices/token?${q}`, { cache: "no-store" });
     if (res.ok) {
       const j = await res.json();
       const out: Record<string, number> = {};
@@ -29,17 +31,18 @@ async function fetchPricesForAddrs(addrs: string[], chainId = 8453): Promise<Rec
       if (Object.keys(out).length) return out;
     }
   } catch {}
+
   // 2) DeFi Llama fallback
   try {
     const baseWeth = DEFAULT_WETH_BASE.toLowerCase();
-    const forLlama = unique.map(a => (a === ZERO ? baseWeth : a));
-    const ids = forLlama.map(a => `base:${a}`).join(',');
+    const forLlama = unique.map((a) => (a === ZERO ? baseWeth : a));
+    const ids = forLlama.map((a) => `base:${a}`).join(",");
     const r = await fetch(`https://coins.llama.fi/prices/current/${ids}`);
     if (!r.ok) return {};
     const data = await r.json();
     const out: Record<string, number> = {};
     for (const [key, val] of Object.entries<any>(data.coins || {})) {
-      const addr = key.split(':')[1]?.toLowerCase();
+      const addr = key.split(":")[1]?.toLowerCase();
       const px = Number(val?.price);
       if (addr && isFinite(px)) out[addr] = px;
     }
@@ -82,7 +85,11 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   const [unstakeAmount, setUnstakeAmount] = useState("");
   const [loading, setLoading] = useState(false);
   const [stakingStats, setStakingStats] = useState<StakingStats>({
-    totalStaked: "0", apy: 25.5, userStaked: "0", canUnstake: false, timeUntilUnlock: 0
+    totalStaked: "0",
+    apy: 25.5,
+    userStaked: "0",
+    canUnstake: false,
+    timeUntilUnlock: 0,
   });
   const [liqBalance, setLiqBalance] = useState("0");
   const [allowance, setAllowance] = useState("0");
@@ -105,24 +112,43 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       const contracts = await getContracts();
       if (!contracts?.LIQStakingDistributor) return;
       let totalSupply: bigint = 0n;
-      try { totalSupply = await contracts.LIQStakingDistributor.totalLIQStaked(); }
-      catch { try { totalSupply = await (contracts.LIQStakingDistributor as any).totalLIQStaked; } catch {} }
+      try {
+        totalSupply = await contracts.LIQStakingDistributor.totalLIQStaked();
+      } catch {
+        try {
+          // legacy property read fallback (some ABIs export as public var)
+          totalSupply = await (contracts.LIQStakingDistributor as any).totalLIQStaked;
+        } catch {}
+      }
       const userBalance: bigint = await contracts.LIQStakingDistributor.balanceOf(account);
-      let canUnstake = false, timeUntilUnlock = 0;
+
+      let canUnstake = false,
+        timeUntilUnlock = 0;
       try {
         const unlockTimestamp: bigint = await contracts.LIQStakingDistributor.unlockTime(account);
         const now = Math.floor(Date.now() / 1000);
         const unlockN = Number(unlockTimestamp);
-        if (unlockN > now) { timeUntilUnlock = unlockN - now; canUnstake = false; } else { canUnstake = true; }
-      } catch { canUnstake = false; timeUntilUnlock = 7 * 24 * 60 * 60; }
+        if (unlockN > now) {
+          timeUntilUnlock = unlockN - now;
+          canUnstake = false;
+        } else {
+          canUnstake = true;
+        }
+      } catch {
+        canUnstake = false;
+        timeUntilUnlock = 7 * 24 * 60 * 60;
+      }
+
       setStakingStats({
         totalStaked: ethers.formatEther(totalSupply ?? 0n),
         apy: 25.5,
         userStaked: ethers.formatEther(userBalance ?? 0n),
         canUnstake,
-        timeUntilUnlock
+        timeUntilUnlock,
       });
-    } catch (e) { console.error("Error loading staking stats:", e); }
+    } catch (e) {
+      console.error("Error loading staking stats:", e);
+    }
   };
 
   const loadLiqBalance = async () => {
@@ -135,7 +161,9 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       const stakingAddr = await contracts.LIQStakingDistributor.getAddress();
       const allow = await contracts.LIQ.allowance(account, stakingAddr);
       setAllowance(ethers.formatEther(allow));
-    } catch (e) { console.error("Error loading LIQ balance:", e); }
+    } catch (e) {
+      console.error("Error loading LIQ balance:", e);
+    }
   };
 
   useEffect(() => {
@@ -147,7 +175,10 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
     if (connected && networkSupported) {
       loadStakingStats();
       loadLiqBalance();
-      const t = setInterval(() => { loadStakingStats(); loadLiqBalance(); }, 30000);
+      const t = setInterval(() => {
+        loadStakingStats();
+        loadLiqBalance();
+      }, 30000);
       return () => clearInterval(t);
     }
   }, [connected, networkSupported, account]);
@@ -156,33 +187,50 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   // 1) Pull contract-native pending (tokens + amounts) -> baseRows
   useEffect(() => {
     (async () => {
-      if (!connected || !networkSupported || !account) { setBaseRows([]); return; }
+      if (!connected || !networkSupported || !account) {
+        setBaseRows([]);
+        return;
+      }
       setRewardsLoading(true);
       try {
         const { LIQStakingDistributor, provider } = await getContracts();
-        if (!LIQStakingDistributor) { setBaseRows([]); return; }
+        if (!LIQStakingDistributor) {
+          setBaseRows([]);
+          return;
+        }
         const res = await LIQStakingDistributor.getPendingRewards(account);
         const tokens: string[] = Array.isArray(res?.[0]) ? res[0] : [];
         const amounts: bigint[] = Array.isArray(res?.[1]) ? res[1] : [];
+
         const out: BaseRow[] = [];
         for (let i = 0; i < tokens.length; i++) {
-          const raw = tokens[i] || '';
+          const raw = tokens[i] || "";
           const addr = raw.toLowerCase();
           const amt = amounts[i] ?? 0n;
           if (!addr || amt === 0n) continue;
-          let symbol = 'ETH', decimals = 18;
+
+          let symbol = "ETH",
+            decimals = 18;
           if (addr !== ZERO) {
             try {
-              const erc = new ethers.Contract(raw, ['function symbol() view returns (string)', 'function decimals() view returns (uint8)'], provider);
+              const erc = new ethers.Contract(
+                raw,
+                ["function symbol() view returns (string)", "function decimals() view returns (uint8)"],
+                provider
+              );
               const [sym, dec] = await Promise.all([erc.symbol(), erc.decimals()]);
-              symbol = String(sym); decimals = Number(dec);
-            } catch { symbol = `${raw.slice(0,6)}...${raw.slice(-4)}`; decimals = 18; }
+              symbol = String(sym);
+              decimals = Number(dec);
+            } catch {
+              symbol = `${raw.slice(0, 6)}...${raw.slice(-4)}`;
+              decimals = 18;
+            }
           }
           out.push({ address: addr, symbol, decimals, amountBN: amt });
         }
         setBaseRows(out);
       } catch (e) {
-        console.error('load LIQ pending rows failed', e);
+        console.error("load LIQ pending rows failed", e);
         setBaseRows([]);
       } finally {
         setRewardsLoading(false);
@@ -193,8 +241,11 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   // 2) Fetch prices for addresses in baseRows
   useEffect(() => {
     (async () => {
-      const addrs = baseRows.map(r => r.address);
-      if (!addrs.length) { setPriceByAddr({}); return; }
+      const addrs = baseRows.map((r) => r.address);
+      if (!addrs.length) {
+        setPriceByAddr({});
+        return;
+      }
       setPricesLoading(true);
       try {
         const map = await fetchPricesForAddrs(addrs, 8453);
@@ -207,7 +258,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
 
   // 3) Derive display rows with USD (no state write here -> no loops)
   const rows: RowWithUsd[] = useMemo(() => {
-    return baseRows.map(r => {
+    return baseRows.map((r) => {
       const price = priceByAddr[r.address] ?? 0;
       const human = Number(ethers.formatUnits(r.amountBN, r.decimals)) || 0;
       return { ...r, usd: human * price };
@@ -219,78 +270,168 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   // ---- Actions ----
   const handleApprove = async () => {
     if (!connected || !account) return;
-    const txId = 'approveLiq';
-    dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
+    const txId = "approveLiq";
+    dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: true } });
     setLoading(true);
     try {
       const contracts = await getContracts(true);
       if (!contracts?.LIQ || !contracts?.LIQStakingDistributor) throw new Error("Contracts not initialized");
       const stakingAddr = await contracts.LIQStakingDistributor.getAddress();
-      const tx = await contracts.LIQ.approve(stakingAddr, ethers.MaxUint256);
-      showToast("Approving LIQ...", "info"); await tx.wait(); showToast("LIQ approved!", "success");
+
+      const provider = contracts.LIQ.runner?.provider as ethers.Provider;
+      const overrides = await get1559Overrides(provider);
+      // (optional) estimate gas for approve
+      const gas = await contracts.LIQ.approve.estimateGas(stakingAddr, ethers.MaxUint256).catch(() => 120_000n);
+      const tx = await contracts.LIQ.approve(stakingAddr, ethers.MaxUint256, { ...overrides, gasLimit: gas });
+
+      showToast("Approving LIQ...", "info");
+      await tx.wait();
+      showToast("LIQ approved!", "success");
       await loadLiqBalance();
     } catch (e: any) {
       console.error("Approval error:", e);
       showToast(e.message || "Approval failed", "error");
-    } finally { setLoading(false); dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } }); }
+    } finally {
+      setLoading(false);
+      dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: false } });
+    }
   };
 
   const handleStake = async () => {
     if (!connected || !account || !stakeAmount) return;
-    const txId = 'stakeLiq';
-    dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
+    const txId = "stakeLiq";
+    dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: true } });
     setLoading(true);
     try {
       const contracts = await getContracts(true);
       if (!contracts?.LIQStakingDistributor) throw new Error("LIQ Staking contract not initialized");
+
       if (needsApproval) await handleApprove();
+
       const amount = parseTokenAmount(stakeAmount);
-      const tx = await contracts.LIQStakingDistributor.stake(amount);
-      showToast("Staking LIQ...", "info"); await tx.wait(); showToast(`Staked ${stakeAmount} LIQ!`, "success");
-      setStakeAmount(""); await loadStakingStats(); await loadLiqBalance(); await loadBalances();
+      const provider = contracts.LIQStakingDistributor.runner?.provider as ethers.Provider;
+      const overrides = await get1559Overrides(provider);
+      const gasStake = await contracts.LIQStakingDistributor.stake.estimateGas(amount).catch(() => 150_000n);
+      const tx = await contracts.LIQStakingDistributor.stake(amount, { ...overrides, gasLimit: (gasStake * 115n) / 100n });
+
+      showToast("Staking LIQ...", "info");
+      await tx.wait();
+      showToast(`Staked ${stakeAmount} LIQ!`, "success");
+      setStakeAmount("");
+      await loadStakingStats();
+      await loadLiqBalance();
+      await loadBalances();
     } catch (e: any) {
-      console.error("Staking error:", e); showToast(e.message || "Staking failed", "error");
-    } finally { setLoading(false); dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } }); }
+      console.error("Staking error:", e);
+      showToast(e.message || "Staking failed", "error");
+    } finally {
+      setLoading(false);
+      dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: false } });
+    }
   };
 
   const handleUnstake = async () => {
     if (!connected || !account || !unstakeAmount) return;
-    const txId = 'unstakeLiq';
-    dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
+    const txId = "unstakeLiq";
+    dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: true } });
     setLoading(true);
     try {
       const contracts = await getContracts(true);
       if (!contracts?.LIQStakingDistributor) throw new Error("LIQ Staking contract not initialized");
+
       const amount = parseTokenAmount(unstakeAmount);
-      const tx = await contracts.LIQStakingDistributor.unstake(amount);
-      showToast("Unstaking LIQ...", "info"); await tx.wait(); showToast(`Unstaked ${unstakeAmount} LIQ!`, "success");
-      setUnstakeAmount(""); await loadStakingStats(); await loadLiqBalance(); await loadBalances();
-    } catch (e: any) { console.error("Unstaking error:", e); showToast(e.message || "Unstaking failed", "error"); }
-    finally { setLoading(false); dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } }); }
+      const provider = contracts.LIQStakingDistributor.runner?.provider as ethers.Provider;
+      const overrides = await get1559Overrides(provider);
+      const gasUnstake = await contracts.LIQStakingDistributor.unstake.estimateGas(amount).catch(() => 150_000n);
+      const tx = await contracts.LIQStakingDistributor.unstake(amount, { ...overrides, gasLimit: (gasUnstake * 115n) / 100n });
+
+      showToast("Unstaking LIQ...", "info");
+      await tx.wait();
+      showToast(`Unstaked ${unstakeAmount} LIQ!`, "success");
+      setUnstakeAmount("");
+      await loadStakingStats();
+      await loadLiqBalance();
+      await loadBalances();
+    } catch (e: any) {
+      console.error("Unstaking error:", e);
+      showToast(e.message || "Unstaking failed", "error");
+    } finally {
+      setLoading(false);
+      dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: false } });
+    }
   };
 
   const handleClaimRewards = async () => {
     if (!connected || !account) return;
-    const txId = 'claimLiqRewards';
-    dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
+    const txId = "claimLiqRewards";
+    dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: true } });
     setLoading(true);
     try {
       const contracts = await getContracts(true);
       if (!contracts?.LIQStakingDistributor) throw new Error("LIQ Staking contract not initialized");
-      const claimTokens = rows.filter(r => r.amountBN > 0n).map(r => r.address);
+
+      const claimTokens = rows.filter((r) => r.amountBN > 0n).map((r) => r.address);
+      const provider = contracts.LIQStakingDistributor.runner?.provider as ethers.Provider;
+      const overrides = await get1559Overrides(provider);
+
       let tx;
-      if (claimTokens.length > 0 && (contracts.LIQStakingDistributor as any).claimMany) {
-        tx = await contracts.LIQStakingDistributor.claimMany(claimTokens);
+      if (claimTokens.length && (contracts.LIQStakingDistributor as any).claimMany) {
+        const gas = await (contracts.LIQStakingDistributor as any).claimMany.estimateGas(claimTokens).catch(() => 700_000n);
+        tx = await (contracts.LIQStakingDistributor as any).claimMany(claimTokens, { ...overrides, gasLimit: gas });
         showToast(`Claiming ${claimTokens.length} reward tokens...`, "info");
       } else {
-        tx = await contracts.LIQStakingDistributor.claimRewards();
+        const gas = await (contracts.LIQStakingDistributor as any).claimRewards.estimateGas().catch(() => 350_000n);
+        tx = await (contracts.LIQStakingDistributor as any).claimRewards({ ...overrides, gasLimit: gas });
         showToast("Claiming rewards...", "info");
       }
-      await tx.wait(); showToast("Rewards claimed!", "success");
-      await loadStakingStats(); await loadBalances();
+
+      await tx.wait();
+      showToast("Rewards claimed!", "success");
+
+      // refresh pending after claim to clear rows
+      try {
+        // force a quick re-pull of pending rows
+        const { LIQStakingDistributor, provider } = await getContracts();
+        const res = await LIQStakingDistributor.getPendingRewards(account);
+        const tokens: string[] = Array.isArray(res?.[0]) ? res[0] : [];
+        const amounts: bigint[] = Array.isArray(res?.[1]) ? res[1] : [];
+        const out: BaseRow[] = [];
+        for (let i = 0; i < tokens.length; i++) {
+          const raw = tokens[i] || "";
+          const addr = raw.toLowerCase();
+          const amt = amounts[i] ?? 0n;
+          if (!addr || amt === 0n) continue;
+          let symbol = "ETH",
+            decimals = 18;
+          if (addr !== ZERO) {
+            try {
+              const erc = new ethers.Contract(
+                raw,
+                ["function symbol() view returns (string)", "function decimals() view returns (uint8)"],
+                provider
+              );
+              const [sym, dec] = await Promise.all([erc.symbol(), erc.decimals()]);
+              symbol = String(sym);
+              decimals = Number(dec);
+            } catch {
+              symbol = `${raw.slice(0, 6)}...${raw.slice(-4)}`;
+              decimals = 18;
+            }
+          }
+          out.push({ address: addr, symbol, decimals, amountBN: amt });
+        }
+        setBaseRows(out);
+      } catch {}
+
+      await loadStakingStats();
+      await loadBalances();
     } catch (e: any) {
-      console.error("Claim error:", e); showToast(e.message || "Claim failed", "error");
-    } finally { setLoading(false); dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } }); }
+      console.error("Claim error:", e);
+      showToast(e.message || "Claim failed", "error");
+    } finally {
+      setLoading(false);
+      dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: false } });
+    }
   };
 
   if (!connected || !networkSupported) {
@@ -384,18 +525,34 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
                   <span className="text-sm text-slate-400">Available: {formatNumber(liqBalance)} LIQ</span>
                 </div>
                 <div className="flex gap-2">
-                  <Input type="number" placeholder="0.0" value={stakeAmount}
+                  <Input
+                    type="number"
+                    placeholder="0.0"
+                    value={stakeAmount}
                     onChange={(e) => setStakeAmount(e.target.value)}
-                    className="bg-slate-700/50 border-slate-600" disabled={loading} />
-                  <Button variant="outline" size="sm" onClick={() => setStakeAmount(liqBalance)}
-                    className="border-slate-600" disabled={loading}>MAX</Button>
+                    className="bg-slate-700/50 border-slate-600"
+                    disabled={loading}
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setStakeAmount(liqBalance)}
+                    className="border-slate-600"
+                    disabled={loading}
+                  >
+                    MAX
+                  </Button>
                 </div>
               </div>
-              <Button onClick={handleStake} disabled={loading || !stakeAmount || parseFloat(stakeAmount) <= 0}
-                className="w-full bg-purple-600 hover:bg-purple-700">
+              <Button
+                onClick={handleStake}
+                disabled={loading || !stakeAmount || parseFloat(stakeAmount) <= 0}
+                className="w-full bg-purple-600 hover:bg-purple-700"
+              >
                 {loading && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
                 {needsApproval ? "Approve & Stake" : "Stake LIQ"}
               </Button>
+
               <div className="bg-slate-700/30 rounded-lg p-3">
                 <div className="flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 text-yellow-400 mt-0.5" />
@@ -422,22 +579,37 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
                   </div>
                 </div>
               )}
+
               <div>
                 <div className="flex justify-between mb-2">
                   <label className="text-sm text-slate-400">Amount to Unstake</label>
                   <span className="text-sm text-slate-400">Staked: {formatNumber(stakingStats.userStaked)} LIQ</span>
                 </div>
                 <div className="flex gap-2">
-                  <Input type="number" placeholder="0.0" value={unstakeAmount}
+                  <Input
+                    type="number"
+                    placeholder="0.0"
+                    value={unstakeAmount}
                     onChange={(e) => setUnstakeAmount(e.target.value)}
-                    className="bg-slate-700/50 border-slate-600" disabled={loading || isLocked} />
-                  <Button variant="outline" size="sm" onClick={() => setUnstakeAmount(stakingStats.userStaked)}
-                    className="border-slate-600" disabled={loading || isLocked}>MAX</Button>
+                    className="bg-slate-700/50 border-slate-600"
+                    disabled={loading || isLocked}
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setUnstakeAmount(stakingStats.userStaked)}
+                    className="border-slate-600"
+                    disabled={loading || isLocked}
+                  >
+                    MAX
+                  </Button>
                 </div>
               </div>
-              <Button onClick={handleUnstake}
+              <Button
+                onClick={handleUnstake}
                 disabled={loading || !unstakeAmount || parseFloat(unstakeAmount) <= 0 || isLocked}
-                className="w-full bg-purple-600 hover:bg-purple-700">
+                className="w-full bg-purple-600 hover:bg-purple-700"
+              >
                 {loading && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
                 {isLocked ? `Locked for ${fmtLock(stakingStats.timeUntilUnlock)}` : "Unstake LIQ"}
               </Button>
@@ -445,7 +617,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
           </Tabs>
 
           {/* Claimable per-token table */}
-          {(rewardsLoading || pricesLoading) ? (
+          {rewardsLoading || pricesLoading ? (
             <div className="mt-6 p-0 rounded-lg border border-slate-700/40 overflow-hidden">
               <div className="grid grid-cols-12 bg-slate-900/70 px-4 py-3 text-slate-400 text-xs">
                 <div className="col-span-5">Token</div>
@@ -467,40 +639,47 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
                 </div>
               ))}
             </div>
-          ) : rows.length > 0 && (
-            <div className="mt-6 p-0 rounded-lg border border-slate-700/40 overflow-hidden">
-              <div className="grid grid-cols-12 bg-slate-900/70 px-4 py-3 text-slate-400 text-xs">
-                <div className="col-span-5">Token</div>
-                <div className="col-span-4 text-right">Amount</div>
-                <div className="col-span-3 text-right">Value</div>
-              </div>
-              {rows.map((r, i) => (
-                <div key={r.address + i} className="grid grid-cols-12 items-center px-4 py-3 border-t border-slate-800/50">
-                  <div className="col-span-5">
-                    <div className="text-white font-medium">{r.symbol}</div>
-                    <div className="text-[11px] text-slate-400 break-all">{r.address}</div>
-                  </div>
-                  <div className="col-span-4 text-right text-white">
-                    {ethers.formatUnits(r.amountBN, r.decimals)}
-                  </div>
-                  <div className="col-span-3 text-right text-emerald-400">
-                    {r.usd ? `$${r.usd.toLocaleString(undefined,{ maximumFractionDigits: 6 })}` : '$0'}
-                  </div>
+          ) : (
+            rows.length > 0 && (
+              <div className="mt-6 p-0 rounded-lg border border-slate-700/40 overflow-hidden">
+                <div className="grid grid-cols-12 bg-slate-900/70 px-4 py-3 text-slate-400 text-xs">
+                  <div className="col-span-5">Token</div>
+                  <div className="col-span-4 text-right">Amount</div>
+                  <div className="col-span-3 text-right">Value</div>
                 </div>
-              ))}
-            </div>
+                {rows.map((r, i) => (
+                  <div
+                    key={r.address + i}
+                    className="grid grid-cols-12 items-center px-4 py-3 border-t border-slate-800/50"
+                  >
+                    <div className="col-span-5">
+                      <div className="text-white font-medium">{r.symbol}</div>
+                      <div className="text-[11px] text-slate-400 break-all">{r.address}</div>
+                    </div>
+                    <div className="col-span-4 text-right text-white">
+                      {ethers.formatUnits(r.amountBN, r.decimals)}
+                    </div>
+                    <div className="col-span-3 text-right text-emerald-400">
+                      {r.usd ? `$${r.usd.toLocaleString(undefined, { maximumFractionDigits: 6 })}` : "$0"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )
           )}
 
-          {rows.some(r => r.amountBN > 0n) && (
+          {rows.some((r) => r.amountBN > 0n) && (
             <div className="mt-6 p-4 bg-gradient-to-r from-purple-900/20 to-pink-900/20 rounded-lg border border-purple-700/30">
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm text-slate-400">Claimable Rewards</p>
                   <p className="text-lg font-bold text-white">${formatNumber(totalRewardsUSD)}</p>
                 </div>
-                <Button onClick={handleClaimRewards}
+                <Button
+                  onClick={handleClaimRewards}
                   disabled={loading || rewardsLoading || pricesLoading}
-                  className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700">
+                  className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700"
+                >
                   {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Gift className="w-4 h-4 mr-2" />}
                   Claim Rewards
                 </Button>

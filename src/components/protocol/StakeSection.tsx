@@ -17,6 +17,8 @@ import { useStaking } from "../contracts/hooks/useStaking";
 import { parseInputToBigNumber, formatBigNumber, sanitizeDecimalInput, useDebounce, validateTokenAmount, calculateYield } from "../lib/defi-utils";
 import { switchToBaseSepolia, getProvider } from "../lib/ethereum";
 import { usePrices } from "@/components/contexts/PriceContext";
+import { get1559Overrides } from '@/components/lib/fees';
+
 
 
 interface StakeSectionProps {
@@ -154,17 +156,18 @@ export default function StakeSection({ showToast, formatNumber }: StakeSectionPr
   const estimateGasForAction = async (_: 'stake' | 'unstake') => {
     try {
       const provider = getProvider();
-      const fee = await provider.getFeeData();
-      const gasPrice = fee.maxFeePerGas ?? fee.gasPrice ?? ethers.parseUnits('1', 'gwei');
+      const { maxFeePerGas, maxPriorityFeePerGas } = await get1559Overrides(provider);
       const gasLimit = 150000n;
-      const gasCost = gasPrice * gasLimit;
+      const gasCost = maxFeePerGas * gasLimit;  // worst-case bound for user info
       const ethBal = parseInputToBigNumber(balances.ethBalance || '0');
-      if (ethBal < gasCost) { 
-        showToast(`Insufficient ETH for gas. Need ~${formatBigNumber(gasCost, 18, 4)} ETH`, 'warning'); 
-        return false; 
+      if (ethBal < gasCost) {
+        showToast(`Insufficient ETH for gas. Need ~${formatBigNumber(gasCost, 18, 4)} ETH`, 'warning');
+        return false;
       }
       return true;
-    } catch { return true; }
+    } catch {
+      return true;
+    }
   };
 
   const handleStakeAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => setStakeAmount(sanitizeDecimalInput(e.target.value));
