@@ -32,7 +32,7 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
   const tvlUSD = Number(stats?.aeroLocked ?? 0) * aeroPrice;
 
   const liqSupply = Number(stats?.liqSupply ?? 0);
-  const liqMcapUSD = liqSupply * (prices.LIQ.usd || 0);
+  const liqMcapUSD = liqSupply * Number(prices?.LIQ?.usd ?? 0);
 
 
   const cards = [
@@ -131,8 +131,8 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
                 <div className="mt-4 pt-4 border-t border-slate-700/30">
                   <div className="flex justify-between text-xs text-slate-400">
                     <span>Peg Ratio</span>
-                    <span className={`${iAeroPrice / prices.AERO.usd > 0.99 ? "text-emerald-400" : "text-yellow-400"}`}>
-                      {((iAeroPrice / prices.AERO.usd) * 100).toFixed(1)}%
+                    <span className={`${(prices?.AERO?.usd && iAeroPrice / prices.AERO.usd > 0.99) ? "text-emerald-400" : "text-yellow-400"}`}>
+                      {prices?.AERO?.usd ? ((iAeroPrice / prices.AERO.usd) * 100).toFixed(1) : "—"}%
                     </span>
                   </div>
                 </div>
