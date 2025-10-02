@@ -31,7 +31,6 @@ import {
 } from "../lib/defi-utils";
 import { getProvider } from "../lib/ethereum";
 import { usePrices } from "@/components/contexts/PriceContext";
-import { WalletTokensSection } from "@/components/wallet/WalletTokensSection";
 
 interface RewardsSectionProps {
   showToast: (m: string, t: "success" | "error" | "info" | "warning") => void;
@@ -740,9 +739,6 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
           </div>
         </CardContent>
       </Card>
-
-      {/* Wallet assets (auto-detected) */}
-      <WalletTokensSection />
 
     </motion.div>
   );
