@@ -141,7 +141,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
 
       setStakingStats({
         totalStaked: ethers.formatEther(totalSupply ?? 0n),
-        apy: 25.5,
+        apy: 2.5,
         userStaked: ethers.formatEther(userBalance ?? 0n),
         canUnstake,
         timeUntilUnlock,
