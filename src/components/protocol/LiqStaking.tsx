@@ -86,7 +86,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   const [loading, setLoading] = useState(false);
   const [stakingStats, setStakingStats] = useState<StakingStats>({
     totalStaked: "0",
-    apy: 25.5,
+    apy: 2.55,
     userStaked: "0",
     canUnstake: false,
     timeUntilUnlock: 0,
