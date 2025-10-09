@@ -33,6 +33,24 @@ const XIcon = ({ className }: { className?: string }) => (
   </svg>
 );
 
+// NEW: Classic Aero Shield Logo Component
+const AeroShieldLogo = ({ className = "w-full h-full" }: { className?: string }) => (
+  <svg viewBox="0 0 200 200" className={className}>
+    <defs>
+      <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" style={{stopColor: '#06b6d4', stopOpacity: 1}} />
+        <stop offset="100%" style={{stopColor: '#8b5cf6', stopOpacity: 1}} />
+      </linearGradient>
+    </defs>
+    <path d="M 100 40 L 140 80 Q 145 100, 140 120 L 100 160 L 60 120 Q 55 100, 60 80 Z" 
+          fill="url(#shieldGrad)" opacity="0.3"/>
+    <path d="M 100 50 L 130 80 Q 135 100, 130 120 L 100 150 L 70 120 Q 65 100, 70 80 Z" 
+          fill="url(#shieldGrad)" opacity="0.6"/>
+    <path d="M 100 65 L 120 85 Q 123 100, 120 115 L 100 135 L 80 115 Q 77 100, 80 85 Z" 
+          fill="url(#shieldGrad)"/>
+  </svg>
+);
+
 // Utility function
 const formatNumber = (num: string | number) => {
  const n = typeof num === 'string' ? parseFloat(num) : num;
@@ -51,7 +69,7 @@ export default function IaeroProtocolApp() {
  let toastCounter = 0;
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' | 'warning' = 'info') => {
-  const id = Date.now() + (++toastCounter); // This creates a number instead of string
+  const id = Date.now() + (++toastCounter);
   setToasts(prev => [...prev, { id, message, type }]);
   setTimeout(() => {
     setToasts(prev => prev.filter(t => t.id !== id));
@@ -73,11 +91,13 @@ export default function IaeroProtocolApp() {
          <div className="flex items-center justify-between">
            <div className="flex items-center space-x-8">
              <div className="flex items-center space-x-3">
-               <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center">
-                 <Sparkles className="w-6 h-6 text-white" />
-               </div>
+              {/* NEW: Classic Aero Shield Logo */}
+              <div className="w-18 h-18 flex-shrink-0">
+                <AeroShieldLogo />
+              </div>
+      
                <div>
-                 <h1 className="text-xl md:text-2xl font-bold text-white">iAERO Protocol</h1>
+                 <h1 className="text-xl md:text-2xl font-bold text-white">iAero Protocol</h1>
                  <p className="text-xs text-slate-400">Liquid Staking on Base</p>
                </div>
              </div>
