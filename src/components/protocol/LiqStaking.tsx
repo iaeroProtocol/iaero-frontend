@@ -2,19 +2,22 @@
 // src/components/protocol/LiqStaking.tsx
 // =============================
 import React, { useState, useEffect, useMemo } from "react";
-import { ethers } from "ethers";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Coins, TrendingUp, Clock, Gift, AlertCircle, Loader2 } from "lucide-react";
 import { useProtocol } from "@/components/contexts/ProtocolContext";
+import { useAccount, useChainId, useWriteContract, usePublicClient } from 'wagmi';
+import { getContractAddress } from '@/components/contracts/addresses';
+import { ABIS } from '@/components/contracts/abis';
 import { parseTokenAmount } from "@/components/lib/ethereum";
 import { usePrices } from "@/components/contexts/PriceContext";
-import { get1559Overrides } from "@/components/lib/fees";
+import { formatUnits } from 'viem';
 
-const ZERO = ethers.ZeroAddress; // native ETH (address(0))
-const DEFAULT_WETH_BASE = "0x4200000000000000000000000000000000000006"; // Base WETH
+const ZERO = "0x0000000000000000000000000000000000000000";
+const DEFAULT_WETH_BASE = "0x4200000000000000000000000000000000000006";
+
 
 async function fetchPricesForAddrs(addrs: string[], chainId = 8453): Promise<Record<string, number>> {
   const unique = Array.from(new Set(addrs.map((a) => a.toLowerCase()).filter(Boolean)));
@@ -70,8 +73,18 @@ type BaseRow = { address: string; symbol: string; decimals: number; amountBN: bi
 type RowWithUsd = BaseRow & { usd: number };
 
 export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps) {
-  const { account, connected, networkSupported, getContracts, loadBalances, dispatch } = useProtocol();
+  const { connected, networkSupported, loadBalances, setTransactionLoading } = useProtocol();
+  const { address } = useAccount();
+  const chainId = useChainId();
+  const publicClient = usePublicClient();
+  const { writeContractAsync } = useWriteContract();
   const { prices } = usePrices();
+
+  // Helper to safely format ether
+  const safeFormatEther = (value: bigint | undefined): string => {
+    if (!value) return '0';
+    return (Number(value) / 1e18).toString();
+  };
 
   const fmtLock = (secs: number) => {
     if (secs <= 0) return "Unlocked";
@@ -95,54 +108,59 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   const [allowance, setAllowance] = useState("0");
   const [needsApproval, setNeedsApproval] = useState(false);
 
-  // Rewards: one truth for on-chain amounts, separate prices
   const [baseRows, setBaseRows] = useState<BaseRow[]>([]);
   const [priceByAddr, setPriceByAddr] = useState<Record<string, number>>({});
-
-  // Visible loading flags
   const [rewardsLoading, setRewardsLoading] = useState(false);
   const [pricesLoading, setPricesLoading] = useState(false);
 
   const isLocked = stakingStats.timeUntilUnlock > 0;
 
-  // --- Stats (total/user/lock) ---
-  const loadStakingStats = async () => {
-    if (!connected || !networkSupported || !account) return;
+  // Get contract address helper
+  const getAddr = (name: any) => {
     try {
-      const contracts = await getContracts();
-      if (!contracts?.LIQStakingDistributor) return;
-      let totalSupply: bigint = 0n;
-      try {
-        totalSupply = await contracts.LIQStakingDistributor.totalLIQStaked();
-      } catch {
-        try {
-          // legacy property read fallback (some ABIs export as public var)
-          totalSupply = await (contracts.LIQStakingDistributor as any).totalLIQStaked;
-        } catch {}
-      }
-      const userBalance: bigint = await contracts.LIQStakingDistributor.balanceOf(account);
+      return getContractAddress(name, chainId);
+    } catch {
+      return undefined;
+    }
+  };
 
-      let canUnstake = false,
-        timeUntilUnlock = 0;
-      try {
-        const unlockTimestamp: bigint = await contracts.LIQStakingDistributor.unlockTime(account);
-        const now = Math.floor(Date.now() / 1000);
-        const unlockN = Number(unlockTimestamp);
-        if (unlockN > now) {
-          timeUntilUnlock = unlockN - now;
-          canUnstake = false;
-        } else {
-          canUnstake = true;
-        }
-      } catch {
-        canUnstake = false;
-        timeUntilUnlock = 7 * 24 * 60 * 60;
-      }
+  // Load staking stats
+  const loadStakingStats = async () => {
+    if (!connected || !networkSupported || !address || !publicClient) return;
+    
+    try {
+      const liqStakingAddr = getAddr('LIQStakingDistributor');
+      if (!liqStakingAddr) return;
+
+      const [totalSupply, userBalance, unlockTimestamp] = await Promise.all([
+        publicClient.readContract({
+          address: liqStakingAddr,
+          abi: ABIS.LIQStakingDistributor,
+          functionName: 'totalLIQStaked',
+        }).catch(() => 0n),
+        publicClient.readContract({
+          address: liqStakingAddr,
+          abi: ABIS.LIQStakingDistributor,
+          functionName: 'balanceOf',
+          args: [address],
+        }),
+        publicClient.readContract({
+          address: liqStakingAddr,
+          abi: ABIS.LIQStakingDistributor,
+          functionName: 'unlockTime',
+          args: [address],
+        }).catch(() => 0n),
+      ]);
+
+      const now = Math.floor(Date.now() / 1000);
+      const unlockN = Number(unlockTimestamp);
+      const canUnstake = unlockN <= now;
+      const timeUntilUnlock = unlockN > now ? unlockN - now : 0;
 
       setStakingStats({
-        totalStaked: ethers.formatEther(totalSupply ?? 0n),
+        totalStaked: safeFormatEther(totalSupply as bigint),
         apy: 2.5,
-        userStaked: ethers.formatEther(userBalance ?? 0n),
+        userStaked: safeFormatEther(userBalance as bigint),
         canUnstake,
         timeUntilUnlock,
       });
@@ -151,24 +169,43 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
     }
   };
 
+  // Load LIQ balance
   const loadLiqBalance = async () => {
-    if (!connected || !networkSupported || !account) return;
+    if (!connected || !networkSupported || !address || !publicClient) return;
+    
     try {
-      const contracts = await getContracts();
-      if (!contracts?.LIQ || !contracts?.LIQStakingDistributor) return;
-      const bal = await contracts.LIQ.balanceOf(account);
-      setLiqBalance(ethers.formatEther(bal));
-      const stakingAddr = await contracts.LIQStakingDistributor.getAddress();
-      const allow = await contracts.LIQ.allowance(account, stakingAddr);
-      setAllowance(ethers.formatEther(allow));
+      const liqAddr = getAddr('LIQ');
+      const liqStakingAddr = getAddr('LIQStakingDistributor');
+      if (!liqAddr || !liqStakingAddr) return;
+
+      const [bal, allow] = await Promise.all([
+        publicClient.readContract({
+          address: liqAddr,
+          abi: ABIS.LIQ,
+          functionName: 'balanceOf',
+          args: [address],
+        }),
+        publicClient.readContract({
+          address: liqAddr,
+          abi: ABIS.LIQ,
+          functionName: 'allowance',
+          args: [address, liqStakingAddr],
+        }),
+      ]);
+
+      setLiqBalance(safeFormatEther(bal as bigint));
+      setAllowance(safeFormatEther(allow as bigint));
     } catch (e) {
       console.error("Error loading LIQ balance:", e);
     }
   };
 
   useEffect(() => {
-    if (stakeAmount && parseFloat(stakeAmount) > 0) setNeedsApproval(parseFloat(stakeAmount) > parseFloat(allowance));
-    else setNeedsApproval(false);
+    if (stakeAmount && parseFloat(stakeAmount) > 0) {
+      setNeedsApproval(parseFloat(stakeAmount) > parseFloat(allowance));
+    } else {
+      setNeedsApproval(false);
+    }
   }, [stakeAmount, allowance]);
 
   useEffect(() => {
@@ -181,44 +218,149 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       }, 30000);
       return () => clearInterval(t);
     }
-  }, [connected, networkSupported, account]);
+  }, [connected, networkSupported, address]);
 
-  // ===== Rewards load (no flicker) =====
-  // 1) Pull contract-native pending (tokens + amounts) -> baseRows
+  // Load pending rewards
   useEffect(() => {
     (async () => {
-      if (!connected || !networkSupported || !account) {
+      if (!connected || !networkSupported || !address || !publicClient) {
+        console.log('LIQ rewards: Missing requirements');
         setBaseRows([]);
         return;
       }
       setRewardsLoading(true);
       try {
-        const { LIQStakingDistributor, provider } = await getContracts();
-        if (!LIQStakingDistributor) {
+        const liqStakingAddr = getAddr('LIQStakingDistributor');
+        console.log('=== LIQ REWARDS DEBUG ===');
+        console.log('Contract Address:', liqStakingAddr);
+        console.log('User Address:', address);
+        
+        if (!liqStakingAddr) {
           setBaseRows([]);
           return;
         }
-        const res = await LIQStakingDistributor.getPendingRewards(account);
-        const tokens: string[] = Array.isArray(res?.[0]) ? res[0] : [];
-        const amounts: bigint[] = Array.isArray(res?.[1]) ? res[1] : [];
+
+        // ✅ First check if user actually has staked balance
+        const userStaked = await publicClient.readContract({
+          address: liqStakingAddr,
+          abi: ABIS.LIQStakingDistributor,
+          functionName: 'balanceOf',
+          args: [address],
+        });
+        console.log('User Staked Balance (raw):', userStaked);
+        console.log('User Staked Balance (formatted):', safeFormatEther(userStaked as bigint));
+
+        // ✅ Check total staked
+        const totalStaked = await publicClient.readContract({
+          address: liqStakingAddr,
+          abi: ABIS.LIQStakingDistributor,
+          functionName: 'totalLIQStaked',
+        }).catch(() => 0n);
+        console.log('Total LIQ Staked:', totalStaked);
+
+        // ✅ Check accumulator for USDC and cbBTC specifically
+        const USDC_ADDR = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+        const CBBTC_ADDR = '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf';
+        
+        const [usdcAcc, cbbtcAcc, usdcDebt, cbbtcDebt] = await Promise.all([
+          publicClient.readContract({
+            address: liqStakingAddr,
+            abi: ABIS.LIQStakingDistributor,
+            functionName: 'accRewardPerShare',
+            args: [USDC_ADDR],
+          }),
+          publicClient.readContract({
+            address: liqStakingAddr,
+            abi: ABIS.LIQStakingDistributor,
+            functionName: 'accRewardPerShare',
+            args: [CBBTC_ADDR],
+          }),
+          publicClient.readContract({
+            address: liqStakingAddr,
+            abi: ABIS.LIQStakingDistributor,
+            functionName: 'rewardDebt',
+            args: [address, USDC_ADDR],
+          }),
+          publicClient.readContract({
+            address: liqStakingAddr,
+            abi: ABIS.LIQStakingDistributor,
+            functionName: 'rewardDebt',
+            args: [address, CBBTC_ADDR],
+          }),
+        ]);
+
+        const queuedUSDC = await publicClient.readContract({
+          address: liqStakingAddr,
+          abi: ABIS.LIQStakingDistributor,
+          functionName: 'queuedRewards',
+          args: ['0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'],
+        });
+        console.log('🔍 QUEUED USDC:', queuedUSDC, '=', Number(queuedUSDC) / 1e6, 'USDC');
+
+        console.log('USDC accRewardPerShare:', usdcAcc);
+        console.log('USDC rewardDebt:', usdcDebt);
+        console.log('USDC pending calc:', userStaked, '*', '(', usdcAcc, '-', usdcDebt, ') /', '1e18');
+        
+        console.log('cbBTC accRewardPerShare:', cbbtcAcc);
+        console.log('cbBTC rewardDebt:', cbbtcDebt);
+        console.log('cbBTC pending calc:', userStaked, '*', '(', cbbtcAcc, '-', cbbtcDebt, ') /', '1e18');
+
+        // Manual calculation to verify
+        if (userStaked > 0n) {
+          const usdcPending = (userStaked as bigint) * ((usdcAcc as bigint) - (usdcDebt as bigint)) / BigInt(1e18);
+          const cbbtcPending = (userStaked as bigint) * ((cbbtcAcc as bigint) - (cbbtcDebt as bigint)) / BigInt(1e18);
+          console.log('USDC pending (manual calc):', usdcPending, '=', Number(usdcPending) / 1e6, 'USDC');
+          console.log('cbBTC pending (manual calc):', cbbtcPending, '=', Number(cbbtcPending) / 1e8, 'cbBTC');
+        }
+
+        // ✅ Now get pending rewards from contract
+        const result = await publicClient.readContract({
+          address: liqStakingAddr,
+          abi: ABIS.LIQStakingDistributor,
+          functionName: 'getPendingRewards',
+          args: [address],
+        });
+
+        console.log('getPendingRewards raw result:', result);
+        console.log('Result type:', typeof result);
+
+        const tokens: string[] = Array.isArray(result?.[0]) ? result[0] : [];
+        const amounts: bigint[] = Array.isArray(result?.[1]) ? result[1] : [];
+
+        console.log('Tokens count:', tokens.length);
+        console.log('Amounts count:', amounts.length);
+        
+        // Find USDC and cbBTC in the results
+        const usdcIdx = tokens.findIndex(t => t.toLowerCase() === USDC_ADDR.toLowerCase());
+        const cbbtcIdx = tokens.findIndex(t => t.toLowerCase() === CBBTC_ADDR.toLowerCase());
+        
+        console.log('USDC index:', usdcIdx, 'Amount:', amounts[usdcIdx]);
+        console.log('cbBTC index:', cbbtcIdx, 'Amount:', amounts[cbbtcIdx]);
+        console.log('========================');
 
         const out: BaseRow[] = [];
         for (let i = 0; i < tokens.length; i++) {
           const raw = tokens[i] || "";
           const addr = raw.toLowerCase();
           const amt = amounts[i] ?? 0n;
+          
           if (!addr || amt === 0n) continue;
 
-          let symbol = "ETH",
-            decimals = 18;
+          let symbol = "ETH", decimals = 18;
           if (addr !== ZERO) {
             try {
-              const erc = new ethers.Contract(
-                raw,
-                ["function symbol() view returns (string)", "function decimals() view returns (uint8)"],
-                provider
-              );
-              const [sym, dec] = await Promise.all([erc.symbol(), erc.decimals()]);
+              const [sym, dec] = await Promise.all([
+                publicClient.readContract({
+                  address: raw as `0x${string}`,
+                  abi: ABIS.ERC20,
+                  functionName: 'symbol',
+                }),
+                publicClient.readContract({
+                  address: raw as `0x${string}`,
+                  abi: ABIS.ERC20,
+                  functionName: 'decimals',
+                }),
+              ]);
               symbol = String(sym);
               decimals = Number(dec);
             } catch {
@@ -228,6 +370,8 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
           }
           out.push({ address: addr, symbol, decimals, amountBN: amt });
         }
+        
+        console.log('Final reward rows:', out);
         setBaseRows(out);
       } catch (e) {
         console.error("load LIQ pending rows failed", e);
@@ -236,9 +380,9 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         setRewardsLoading(false);
       }
     })();
-  }, [connected, networkSupported, account, getContracts]);
+  }, [connected, networkSupported, address, publicClient]);
 
-  // 2) Fetch prices for addresses in baseRows
+  // Fetch prices for reward tokens
   useEffect(() => {
     (async () => {
       const addrs = baseRows.map((r) => r.address);
@@ -248,44 +392,45 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       }
       setPricesLoading(true);
       try {
-        const map = await fetchPricesForAddrs(addrs, 8453);
+        const map = await fetchPricesForAddrs(addrs, chainId);
         setPriceByAddr(map);
       } finally {
         setPricesLoading(false);
       }
     })();
-  }, [baseRows]);
+  }, [baseRows, chainId]);
 
-  // 3) Derive display rows with USD (no state write here -> no loops)
   const rows: RowWithUsd[] = useMemo(() => {
     return baseRows.map((r) => {
       const price = priceByAddr[r.address] ?? 0;
-      const human = Number(ethers.formatUnits(r.amountBN, r.decimals)) || 0;
+      const human = Number(r.amountBN) / 10 ** r.decimals;
       return { ...r, usd: human * price };
     });
   }, [baseRows, priceByAddr]);
 
   const totalRewardsUSD = useMemo(() => rows.reduce((s, r) => s + r.usd, 0), [rows]);
 
-  // ---- Actions ----
+  // Actions
   const handleApprove = async () => {
-    if (!connected || !account) return;
+    if (!connected || !address) return;
     const txId = "approveLiq";
-    dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: true } });
+    setTransactionLoading(txId, true);
     setLoading(true);
+    
     try {
-      const contracts = await getContracts(true);
-      if (!contracts?.LIQ || !contracts?.LIQStakingDistributor) throw new Error("Contracts not initialized");
-      const stakingAddr = await contracts.LIQStakingDistributor.getAddress();
+      const liqAddr = getAddr('LIQ');
+      const liqStakingAddr = getAddr('LIQStakingDistributor');
+      if (!liqAddr || !liqStakingAddr) throw new Error("Contracts not initialized");
 
-      const provider = contracts.LIQ.runner?.provider as ethers.Provider;
-      const overrides = await get1559Overrides(provider);
-      // (optional) estimate gas for approve
-      const gas = await contracts.LIQ.approve.estimateGas(stakingAddr, ethers.MaxUint256).catch(() => 120_000n);
-      const tx = await contracts.LIQ.approve(stakingAddr, ethers.MaxUint256, { ...overrides, gasLimit: gas });
+      const hash = await writeContractAsync({
+        address: liqAddr,
+        abi: ABIS.LIQ,
+        functionName: 'approve',
+        args: [liqStakingAddr, BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')],
+      });
 
       showToast("Approving LIQ...", "info");
-      await tx.wait();
+      await publicClient?.waitForTransactionReceipt({ hash });
       showToast("LIQ approved!", "success");
       await loadLiqBalance();
     } catch (e: any) {
@@ -293,147 +438,126 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       showToast(e.message || "Approval failed", "error");
     } finally {
       setLoading(false);
-      dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: false } });
+      setTransactionLoading(txId, false);
     }
   };
 
   const handleStake = async () => {
-    if (!connected || !account || !stakeAmount) return;
+    if (!connected || !address || !stakeAmount) return;
     const txId = "stakeLiq";
-    dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: true } });
+    setTransactionLoading(txId, true);
     setLoading(true);
+    
     try {
-      const contracts = await getContracts(true);
-      if (!contracts?.LIQStakingDistributor) throw new Error("LIQ Staking contract not initialized");
+      const liqStakingAddr = getAddr('LIQStakingDistributor');
+      if (!liqStakingAddr) throw new Error("LIQ Staking contract not initialized");
 
       if (needsApproval) await handleApprove();
 
       const amount = parseTokenAmount(stakeAmount);
-      const provider = contracts.LIQStakingDistributor.runner?.provider as ethers.Provider;
-      const overrides = await get1559Overrides(provider);
-      const gasStake = await contracts.LIQStakingDistributor.stake.estimateGas(amount).catch(() => 150_000n);
-      const tx = await contracts.LIQStakingDistributor.stake(amount, { ...overrides, gasLimit: (gasStake * 115n) / 100n });
+      const hash = await writeContractAsync({
+        address: liqStakingAddr,
+        abi: ABIS.LIQStakingDistributor,
+        functionName: 'stake',
+        args: [amount],
+      });
 
       showToast("Staking LIQ...", "info");
-      await tx.wait();
+      await publicClient?.waitForTransactionReceipt({ hash });
       showToast(`Staked ${stakeAmount} LIQ!`, "success");
+      
       setStakeAmount("");
-      await loadStakingStats();
-      await loadLiqBalance();
-      await loadBalances();
+      await Promise.all([loadStakingStats(), loadLiqBalance(), loadBalances()]);
     } catch (e: any) {
       console.error("Staking error:", e);
       showToast(e.message || "Staking failed", "error");
     } finally {
       setLoading(false);
-      dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: false } });
+      setTransactionLoading(txId, false);
     }
   };
 
   const handleUnstake = async () => {
-    if (!connected || !account || !unstakeAmount) return;
+    if (!connected || !address || !unstakeAmount) return;
     const txId = "unstakeLiq";
-    dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: true } });
+    setTransactionLoading(txId, true);
     setLoading(true);
+    
     try {
-      const contracts = await getContracts(true);
-      if (!contracts?.LIQStakingDistributor) throw new Error("LIQ Staking contract not initialized");
+      const liqStakingAddr = getAddr('LIQStakingDistributor');
+      if (!liqStakingAddr) throw new Error("LIQ Staking contract not initialized");
 
       const amount = parseTokenAmount(unstakeAmount);
-      const provider = contracts.LIQStakingDistributor.runner?.provider as ethers.Provider;
-      const overrides = await get1559Overrides(provider);
-      const gasUnstake = await contracts.LIQStakingDistributor.unstake.estimateGas(amount).catch(() => 150_000n);
-      const tx = await contracts.LIQStakingDistributor.unstake(amount, { ...overrides, gasLimit: (gasUnstake * 115n) / 100n });
+      const hash = await writeContractAsync({
+        address: liqStakingAddr,
+        abi: ABIS.LIQStakingDistributor,
+        functionName: 'unstake',
+        args: [amount],
+      });
 
       showToast("Unstaking LIQ...", "info");
-      await tx.wait();
+      await publicClient?.waitForTransactionReceipt({ hash });
       showToast(`Unstaked ${unstakeAmount} LIQ!`, "success");
+      
       setUnstakeAmount("");
-      await loadStakingStats();
-      await loadLiqBalance();
-      await loadBalances();
+      await Promise.all([loadStakingStats(), loadLiqBalance(), loadBalances()]);
     } catch (e: any) {
       console.error("Unstaking error:", e);
       showToast(e.message || "Unstaking failed", "error");
     } finally {
       setLoading(false);
-      dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: false } });
+      setTransactionLoading(txId, false);
     }
   };
 
   const handleClaimRewards = async () => {
-    if (!connected || !account) return;
+    if (!connected || !address) return;
     const txId = "claimLiqRewards";
-    dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: true } });
+    setTransactionLoading(txId, true);
     setLoading(true);
+    
     try {
-      const contracts = await getContracts(true);
-      if (!contracts?.LIQStakingDistributor) throw new Error("LIQ Staking contract not initialized");
+      const liqStakingAddr = getAddr('LIQStakingDistributor');
+      if (!liqStakingAddr) throw new Error("LIQ Staking contract not initialized");
 
       const claimTokens = rows.filter((r) => r.amountBN > 0n).map((r) => r.address);
-      const provider = contracts.LIQStakingDistributor.runner?.provider as ethers.Provider;
-      const overrides = await get1559Overrides(provider);
-
-      let tx;
-      if (claimTokens.length && (contracts.LIQStakingDistributor as any).claimMany) {
-        const gas = await (contracts.LIQStakingDistributor as any).claimMany.estimateGas(claimTokens).catch(() => 700_000n);
-        tx = await (contracts.LIQStakingDistributor as any).claimMany(claimTokens, { ...overrides, gasLimit: gas });
+      
+      let hash;
+      if (claimTokens.length && typeof ABIS.LIQStakingDistributor.find((f: any) => f.name === 'claimMany') !== 'undefined') {
+        hash = await writeContractAsync({
+          address: liqStakingAddr,
+          abi: ABIS.LIQStakingDistributor,
+          functionName: 'claimMany',
+          args: [claimTokens],
+          gas: 700_000n,
+        });
         showToast(`Claiming ${claimTokens.length} reward tokens...`, "info");
       } else {
-        const gas = await (contracts.LIQStakingDistributor as any).claimRewards.estimateGas().catch(() => 350_000n);
-        tx = await (contracts.LIQStakingDistributor as any).claimRewards({ ...overrides, gasLimit: gas });
+        hash = await writeContractAsync({
+          address: liqStakingAddr,
+          abi: ABIS.LIQStakingDistributor,
+          functionName: 'claimRewards',
+          gas: 350_000n,
+        });
         showToast("Claiming rewards...", "info");
       }
 
-      await tx.wait();
+      await publicClient?.waitForTransactionReceipt({ hash });
       showToast("Rewards claimed!", "success");
 
-      // refresh pending after claim to clear rows
-      try {
-        // force a quick re-pull of pending rows
-        const { LIQStakingDistributor, provider } = await getContracts();
-        const res = await LIQStakingDistributor.getPendingRewards(account);
-        const tokens: string[] = Array.isArray(res?.[0]) ? res[0] : [];
-        const amounts: bigint[] = Array.isArray(res?.[1]) ? res[1] : [];
-        const out: BaseRow[] = [];
-        for (let i = 0; i < tokens.length; i++) {
-          const raw = tokens[i] || "";
-          const addr = raw.toLowerCase();
-          const amt = amounts[i] ?? 0n;
-          if (!addr || amt === 0n) continue;
-          let symbol = "ETH",
-            decimals = 18;
-          if (addr !== ZERO) {
-            try {
-              const erc = new ethers.Contract(
-                raw,
-                ["function symbol() view returns (string)", "function decimals() view returns (uint8)"],
-                provider
-              );
-              const [sym, dec] = await Promise.all([erc.symbol(), erc.decimals()]);
-              symbol = String(sym);
-              decimals = Number(dec);
-            } catch {
-              symbol = `${raw.slice(0, 6)}...${raw.slice(-4)}`;
-              decimals = 18;
-            }
-          }
-          out.push({ address: addr, symbol, decimals, amountBN: amt });
-        }
-        setBaseRows(out);
-      } catch {}
-
-      await loadStakingStats();
-      await loadBalances();
+      // Refresh
+      await Promise.all([loadStakingStats(), loadBalances()]);
+      // Trigger rewards reload
+      setBaseRows([]);
     } catch (e: any) {
       console.error("Claim error:", e);
       showToast(e.message || "Claim failed", "error");
     } finally {
       setLoading(false);
-      dispatch({ type: "SET_TRANSACTION_LOADING", payload: { id: txId, loading: false } });
+      setTransactionLoading(txId, false);
     }
   };
-
+  
   if (!connected || !networkSupported) {
     return (
       <div className="text-center py-12">
@@ -657,7 +781,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
                       <div className="text-[11px] text-slate-400 break-all">{r.address}</div>
                     </div>
                     <div className="col-span-4 text-right text-white">
-                      {ethers.formatUnits(r.amountBN, r.decimals)}
+                      {formatUnits(r.amountBN, r.decimals)}
                     </div>
                     <div className="col-span-3 text-right text-emerald-400">
                       {r.usd ? `$${r.usd.toLocaleString(undefined, { maximumFractionDigits: 6 })}` : "$0"}

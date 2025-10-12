@@ -120,7 +120,7 @@ export async function GET(req: Request) {
     const AERO = NET.AERO!.toLowerCase() as `0x${string}`;
 
     // Public client (Edge-friendly)
-    const rpcUrl = process.env.RPC_URL || 'https://base-mainnet.g.alchemy.com/v2/OOO0w6ZDwoB2-08TOnNvN';
+    const rpcUrl = `https://base-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_KEY || process.env.NEXT_PUBLIC_ALCHEMY_KEY}`;
     const client = createPublicClient({ chain: base, transport: http(rpcUrl) });
 
     // 1) Llama batch

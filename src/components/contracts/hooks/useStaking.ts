@@ -1,56 +1,68 @@
-// =============================
 // src/contracts/hooks/useStaking.ts
-// =============================
 import { useState, useCallback } from 'react';
-import { ethers, ContractTransactionReceipt } from 'ethers';
+import { useAccount, useChainId, useWriteContract, useWaitForTransactionReceipt, usePublicClient } from 'wagmi';
+import type { Hash } from 'viem';
+import { getContractAddress } from '../addresses';
+import { ABIS } from '../abis';
 import { useProtocol } from '../../contexts/ProtocolContext';
-import { parseTokenAmount } from '../../lib/ethereum';
-import { get1559Overrides } from '@/components/lib/fees';
 
+const DEFAULT_STAKING_APR = Number(process.env.NEXT_PUBLIC_DEFAULT_STAKING_APR ?? '30');
 
-const DEFAULT_STAKING_APR =
-  Number(process.env.NEXT_PUBLIC_DEFAULT_STAKING_APR ?? '30'); // percent
-
-// -----------------------------
 // Types
-// -----------------------------
 interface StakingAPR {
   aero: number;
   total: number;
 }
+
 interface StakingStats {
   totalStaked: string;
   rewardTokensCount: number;
 }
+
 interface PendingReward {
-  token: string;       // address (lowercased in JSON loader)
-  amount: string;      // human units (formatted)
-  symbol?: string;     // optional symbol (resolved ERC20)
-  decimals?: number;   // 👈 add this
+  token: string;
+  amount: string;
+  symbol?: string;
+  decimals?: number;
 }
 
-
-export type ProgressCallback = (message: string) => void;
-export type SuccessCallback = (receipt: ContractTransactionReceipt) => void;
+export type SuccessCallback = (receipt: any) => void;
 export type ErrorCallback = (error: any) => void;
+export type ProgressCallback = (message: string) => void;
 
-// -----------------------------
-// Local helpers
-// -----------------------------
-const WEEK = 7n * 24n * 60n * 60n;
+// Helper to check user rejection
+const isUserRejection = (error: any): boolean =>
+  error?.name === 'UserRejectedRequestError' ||
+  error?.message?.toLowerCase?.().includes('user rejected') ||
+  error?.message?.toLowerCase?.().includes('user denied');
 
-/** Fetch the list your Python job exported (default in /public). */
-async function loadClaimTokensFromJson(url = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"): Promise<string[]> {
+// Helper to format ether
+const safeFormatEther = (value: bigint | undefined): string => {
+  if (!value) return '0';
+  return (Number(value) / 1e18).toString();
+};
+
+// Helper to parse ether
+const parseEther = (value: string): bigint => {
+  try {
+    return BigInt(Math.floor(parseFloat(value) * 1e18));
+  } catch {
+    return 0n;
+  }
+};
+
+// Load claim tokens from JSON
+async function loadClaimTokensFromJson(
+  url = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"
+): Promise<string[]> {
   try {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     
-    // Get current and previous epochs
     const currentEpoch = Math.floor(Date.now() / 1000 / 604800) * 604800;
     const previousEpoch = currentEpoch - 604800;
     
-    // Combine tokens from both epochs
     const tokens = new Set<string>();
     
     if (data.epochs?.[currentEpoch]?.tokens) {
@@ -60,113 +72,111 @@ async function loadClaimTokensFromJson(url = "https://raw.githubusercontent.com/
       data.epochs[previousEpoch].tokens.forEach((t: string) => tokens.add(t.toLowerCase()));
     }
     
-    // normalize + dedupe
-    const norm = Array.from(tokens).filter((t) => /^0x[0-9a-f]{40}$/.test(t));
-    
-    return norm;
+    return Array.from(tokens).filter((t) => /^0x[0-9a-f]{40}$/.test(t));
   } catch (e) {
     console.warn("[loadClaimTokensFromJson] failed:", e);
     return [];
   }
 }
 
-/** Split into ≤50 (EpochStakingDistributor has a sensible cap and your contract enforces limits). */
+// Chunk array into groups of 50
 function chunk50<T>(arr: T[]): T[][] {
   const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += 50) out.push(arr.slice(i, i + 50));
+  for (let i = 0; i < arr.length; i += 50) {
+    out.push(arr.slice(i, i + 50));
+  }
   return out;
 }
 
-/** toBigInt util */
-const toBigInt = (v: any): bigint => {
-  try {
-    if (typeof v === 'bigint') return v;
-    if (typeof v === 'number') return BigInt(Math.floor(v));
-    if (typeof v === 'string') return BigInt(v);
-    return BigInt(v?.toString?.() ?? '0');
-  } catch {
-    return 0n;
-  }
-};
-
-/** user-rejection detector */
-const isUserRejection = (error: any): boolean =>
-  error?.code === 'ACTION_REJECTED' ||
-  error?.code === 4001 ||
-  error?.message?.toLowerCase?.().includes('user rejected') ||
-  error?.message?.toLowerCase?.().includes('user denied');
-
-// =============================
-// Hook
-// =============================
 export const useStaking = () => {
-  const { getContracts, loadBalances, loadAllowances, loadPendingRewards, dispatch } = useProtocol();
+  const { address } = useAccount();
+  const chainId = useChainId();
+  const publicClient = usePublicClient();
+  const { loadBalances, loadAllowances, loadPendingRewards, setTransactionLoading } = useProtocol();
+  
   const [loading, setLoading] = useState(false);
+  
+  // Wagmi write hook
+  const { writeContractAsync } = useWriteContract();
 
-  // -----------------------------
-  // Approvals
-  // -----------------------------
-  const checkIAeroApprovalWei = useCallback(async (amountWei: bigint): Promise<boolean> => {
+  // Helper to get contract address safely
+  const getAddr = useCallback((name: any) => {
     try {
-      const contracts = await getContracts(true);
-      if (!contracts?.iAERO || !contracts?.stakingDistributor) return false;
-      const owner = contracts.iAERO.runner?.address;
-      if (!owner) return false;
-      const spender = (contracts.stakingDistributor.target || contracts.stakingDistributor.address) as string;
-      const currentAllowance = await contracts.iAERO.allowance(owner, spender);
-      return toBigInt(currentAllowance) >= amountWei;
+      return getContractAddress(name, chainId);
+    } catch {
+      return undefined;
+    }
+  }, [chainId]);
+
+  // Check approval
+  const checkIAeroApproval = useCallback(async (amount: string): Promise<boolean> => {
+    if (!address || !publicClient) return false;
+    
+    try {
+      const stakingAddr = getAddr('StakingDistributor');
+      if (!stakingAddr) return false;
+
+      const allowance = await publicClient.readContract({
+        address: getAddr('iAERO')!,
+        abi: ABIS.iAERO,
+        functionName: 'allowance',
+        args: [address, stakingAddr],
+      });
+
+      return (allowance as bigint) >= parseEther(amount);
     } catch (e) {
-      console.error('checkIAeroApprovalWei error', e);
+      console.error('checkIAeroApproval error', e);
       return false;
     }
-  }, [getContracts]);
+  }, [address, publicClient, getAddr]);
 
-  const checkIAeroApproval = useCallback(async (amount: string): Promise<boolean> => {
-    return checkIAeroApprovalWei(parseTokenAmount(amount));
-  }, [checkIAeroApprovalWei]);
-
+  // Approve iAERO
   const approveIAero = useCallback(async (
     amount: string,
     onSuccess?: SuccessCallback,
     onError?: ErrorCallback
-  ): Promise<ContractTransactionReceipt | undefined> => {
+  ): Promise<any> => {
     const txId = 'approveIAero';
-    dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
+    setTransactionLoading(txId, true);
+    
     try {
-      const amountWei = parseTokenAmount(amount);
-      const contracts = await getContracts(true);
-      if (!contracts?.iAERO || !contracts?.stakingDistributor) throw new Error('Contracts not initialized');
+      const stakingAddr = getAddr('StakingDistributor');
+      if (!stakingAddr) throw new Error('Staking contract not found');
 
-      const spender = (contracts.stakingDistributor.target || contracts.stakingDistributor.address) as string;
-
-      const owner = contracts.iAERO.runner?.address;
-      const current = owner ? await contracts.iAERO.allowance(owner, spender) : 0;
-      if (toBigInt(current) >= amountWei) {
+      // Check if already approved
+      const isApproved = await checkIAeroApproval(amount);
+      if (isApproved) {
         await loadAllowances();
         return undefined;
       }
 
-      const provider = contracts.iAERO.runner?.provider as ethers.Provider;
-      const overrides = await get1559Overrides(provider);
-      const tx = await contracts.iAERO.approve(spender, ethers.MaxUint256, overrides);
+      // Write approval transaction
+      const hash = await writeContractAsync({
+        address: getAddr('iAERO')!,
+        abi: ABIS.iAERO,
+        functionName: 'approve',
+        args: [stakingAddr, BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')], // MaxUint256
+      });
 
-      const receipt = await tx.wait();
+      // Wait for transaction
+      const receipt = await publicClient?.waitForTransactionReceipt({ hash });
+      
       await loadAllowances();
       onSuccess?.(receipt);
       return receipt;
     } catch (error: any) {
-      if (!isUserRejection(error)) console.error('approveIAero failed:', error);
+      if (!isUserRejection(error)) {
+        console.error('approveIAero failed:', error);
+      }
       onError?.(error);
       if (!isUserRejection(error)) throw error;
       return undefined;
     } finally {
-      dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } });
+      setTransactionLoading(txId, false);
     }
-  }, [getContracts, dispatch, loadAllowances]);
+  }, [address, publicClient, writeContractAsync, getAddr, checkIAeroApproval, loadAllowances, setTransactionLoading]);
 
-  // -----------------------------
-  // Stake / Unstake
-  // -----------------------------
+  // Stake iAERO
   const stakeIAero = useCallback(async (
     amount: string,
     onSuccess?: SuccessCallback,
@@ -175,44 +185,67 @@ export const useStaking = () => {
   ) => {
     setLoading(true);
     const txId = 'stakeIAero';
-    dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
+    setTransactionLoading(txId, true);
+    
     try {
-      const contracts = await getContracts(true);
-      const sd = contracts?.stakingDistributor;
-      if (!sd) throw new Error('Staking contract not initialized');
+      const amountWei = parseEther(amount);
+      const stakingAddr = getAddr('StakingDistributor');
+      if (!stakingAddr) throw new Error('Staking contract not initialized');
 
-      const amountWei = parseTokenAmount(amount);
-
+      // Check approval
       onProgress?.('Checking allowance...');
-      if (!(await checkIAeroApprovalWei(amountWei))) {
+      const isApproved = await checkIAeroApproval(amount);
+      
+      if (!isApproved) {
         onProgress?.('Approving iAERO spending...');
-        await approveIAero(ethers.formatEther(amountWei));
+        await approveIAero(amount);
       }
 
+      // Stake transaction
       onProgress?.('Staking iAERO...');
-      const provider = sd.runner?.provider as ethers.Provider;
-      const overrides = await get1559Overrides(provider);
-      const gas = await sd.stake.estimateGas(amountWei).catch(() => 180_000n);
-      const tx = await sd.stake(amountWei, { ...overrides, gasLimit: (gas * 120n) / 100n });
+      const hash = await writeContractAsync({
+        address: stakingAddr,
+        abi: ABIS.StakingDistributor,
+        functionName: 'stake',
+        args: [amountWei],
+      });
 
-      const receipt = await tx.wait();
+      // Wait for confirmation
+      const receipt = await publicClient?.waitForTransactionReceipt({ hash });
 
       onProgress?.('Updating balances...');
-      await Promise.all([loadBalances(), loadAllowances(), loadPendingRewards?.()].filter(Boolean) as Promise<any>[]);
+      await Promise.all([
+        loadBalances(),
+        loadAllowances(),
+        loadPendingRewards?.()
+      ].filter(Boolean));
 
       onSuccess?.(receipt);
       return receipt;
     } catch (error: any) {
-      if (!isUserRejection(error)) console.error('stakeIAero failed:', error);
+      if (!isUserRejection(error)) {
+        console.error('stakeIAero failed:', error);
+      }
       onError?.(error);
       if (!isUserRejection(error)) throw error;
       return undefined;
     } finally {
       setLoading(false);
-      dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } });
+      setTransactionLoading(txId, false);
     }
-  }, [getContracts, checkIAeroApprovalWei, approveIAero, dispatch, loadBalances, loadAllowances, loadPendingRewards]);
+  }, [
+    publicClient,
+    writeContractAsync,
+    getAddr,
+    checkIAeroApproval,
+    approveIAero,
+    loadBalances,
+    loadAllowances,
+    loadPendingRewards,
+    setTransactionLoading
+  ]);
 
+  // Unstake iAERO
   const unstakeIAero = useCallback(async (
     amount: string,
     onSuccess?: SuccessCallback,
@@ -221,41 +254,54 @@ export const useStaking = () => {
   ) => {
     setLoading(true);
     const txId = 'unstakeIAero';
-    dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
+    setTransactionLoading(txId, true);
+    
     try {
-      const contracts = await getContracts(true);
-      const sd = contracts?.stakingDistributor;
-      if (!sd) throw new Error('Staking contract not initialized');
-
-      const amountWei = parseTokenAmount(amount);
+      const amountWei = parseEther(amount);
+      const stakingAddr = getAddr('StakingDistributor');
+      if (!stakingAddr) throw new Error('Staking contract not initialized');
 
       onProgress?.('Unstaking iAERO...');
-      const provider = sd.runner?.provider as ethers.Provider;
-      const overrides = await get1559Overrides(provider);
-      const gas = await sd.unstake.estimateGas(amountWei).catch(() => 150_000n);
-      const tx = await sd.unstake(amountWei, { ...overrides, gasLimit: (gas * 120n) / 100n });
+      const hash = await writeContractAsync({
+        address: stakingAddr,
+        abi: ABIS.StakingDistributor,
+        functionName: 'unstake',
+        args: [amountWei],
+      });
 
-      const receipt = await tx.wait();
+      const receipt = await publicClient?.waitForTransactionReceipt({ hash });
 
       onProgress?.('Updating balances...');
-      await Promise.all([loadBalances(), loadAllowances(), loadPendingRewards?.()].filter(Boolean) as Promise<any>[]);
+      await Promise.all([
+        loadBalances(),
+        loadAllowances(),
+        loadPendingRewards?.()
+      ].filter(Boolean));
 
       onSuccess?.(receipt);
       return receipt;
     } catch (error: any) {
-      if (!isUserRejection(error)) console.error('unstakeIAero failed:', error);
+      if (!isUserRejection(error)) {
+        console.error('unstakeIAero failed:', error);
+      }
       onError?.(error);
       if (!isUserRejection(error)) throw error;
       return undefined;
     } finally {
       setLoading(false);
-      dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } });
+      setTransactionLoading(txId, false);
     }
-  }, [getContracts, dispatch, loadBalances, loadAllowances, loadPendingRewards]);
+  }, [
+    publicClient,
+    writeContractAsync,
+    getAddr,
+    loadBalances,
+    loadAllowances,
+    loadPendingRewards,
+    setTransactionLoading
+  ]);
 
-  // -----------------------------
-  // Claims (FILE-FIRST METHOD)
-// -----------------------------
+  // Claim all rewards
   const claimAllRewards = useCallback(async (
     onSuccess?: SuccessCallback,
     onError?: ErrorCallback,
@@ -264,20 +310,11 @@ export const useStaking = () => {
   ) => {
     setLoading(true);
     const txId = 'claimAllRewards';
-    dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
+    setTransactionLoading(txId, true);
+    
     try {
-      const contracts = await getContracts(true);
-      const sd = contracts?.stakingDistributor;
-      if (!sd) throw new Error('Staking contract not initialized');
-
-      // Optional: handle pause if exposed
-      try {
-        const paused = await (sd as any).paused?.();
-        if (paused) {
-          onError?.(new Error('Claims are paused on the distributor.'));
-          return undefined;
-        }
-      } catch {}
+      const stakingAddr = getAddr('StakingDistributor');
+      if (!stakingAddr || !address) throw new Error('Not initialized');
 
       onProgress?.('Loading token list…');
       const tokens = await loadClaimTokensFromJson(tokenFileUrl);
@@ -287,78 +324,115 @@ export const useStaking = () => {
       }
 
       onProgress?.('Prefiltering claimable tokens…');
-      const nowEpoch: bigint = await sd.currentEpoch();
-      const prevEpoch: bigint = nowEpoch - WEEK;
+      
+      // Get current epoch
+      const currentEpoch = await publicClient?.readContract({
+        address: stakingAddr,
+        abi: ABIS.StakingDistributor,
+        functionName: 'currentEpoch',
+      }) as bigint;
 
-      // Get user address (signer preferred)
-      const signerAddr =
-        (sd.runner as ethers.Signer | undefined)?.getAddress
-          ? await (sd.runner as ethers.Signer).getAddress()
-          : (contracts.account || (sd.runner as any)?.address);
+      const WEEK = 7n * 24n * 60n * 60n;
+      const prevEpoch = currentEpoch - WEEK;
 
-      if (!signerAddr) {
-        onError?.(new Error('No connected account for claim.'));
-        return undefined;
-      }
-
-      // Pre-filter: keep only tokens with >0 claimable (prev+now)
+      // Filter claimable tokens
       const claimables: string[] = [];
-      for (const t of tokens) {
+      for (const token of tokens) {
         const [aNow, aPrev] = await Promise.all([
-          sd.previewClaim(signerAddr, t, nowEpoch).catch(() => 0n),
-          sd.previewClaim(signerAddr, t, prevEpoch).catch(() => 0n),
+          publicClient?.readContract({
+            address: stakingAddr,
+            abi: ABIS.StakingDistributor,
+            functionName: 'previewClaim',
+            args: [address, token, currentEpoch],
+          }).catch(() => 0n),
+          publicClient?.readContract({
+            address: stakingAddr,
+            abi: ABIS.StakingDistributor,
+            functionName: 'previewClaim',
+            args: [address, token, prevEpoch],
+          }).catch(() => 0n),
         ]);
-        if ((aNow ?? 0n) + (aPrev ?? 0n) > 0n) claimables.push(t);
+        
+        if ((aNow as bigint ?? 0n) + (aPrev as bigint ?? 0n) > 0n) {
+          claimables.push(token);
+        }
       }
+
       if (!claimables.length) {
         onError?.(new Error('No claimable rewards for your account right now.'));
         return undefined;
       }
 
+      // Claim in batches
       const batches = chunk50(claimables);
-      let lastRc: ContractTransactionReceipt | undefined;
+      let lastReceipt: any;
 
       onProgress?.(`Claiming ${claimables.length} tokens in ${batches.length} batch(es)…`);
-      const provider = sd.runner?.provider as ethers.Provider;
+      
       for (let i = 0; i < batches.length; i++) {
         const batch = batches[i];
-        const overrides = await get1559Overrides(provider);  // <— HOISTED
-      
+        
         try {
-          const tx = await sd.claimLatest(batch, { ...overrides, gasLimit: 1_000_000n });
-          lastRc = await tx.wait();
+          const hash = await writeContractAsync({
+            address: stakingAddr,
+            abi: ABIS.StakingDistributor,
+            functionName: 'claimLatest',
+            args: [batch],
+            gas: 1_000_000n,
+          });
+          
+          lastReceipt = await publicClient?.waitForTransactionReceipt({ hash });
         } catch (e) {
-          console.warn(`[claimAllRewards] batch ${i + 1} failed, falling back per-token:`, e);
-          for (const t of batch) {
+          console.warn(`Batch ${i + 1} failed, trying per-token:`, e);
+          
+          // Fallback: claim individually
+          for (const token of batch) {
             try {
-              const tx = await sd.claimLatest([t], { ...overrides, gasLimit: 400_000n });
-              lastRc = await tx.wait();
+              const hash = await writeContractAsync({
+                address: stakingAddr,
+                abi: ABIS.StakingDistributor,
+                functionName: 'claimLatest',
+                args: [[token]],
+                gas: 400_000n,
+              });
+              
+              lastReceipt = await publicClient?.waitForTransactionReceipt({ hash });
             } catch (err) {
-              console.warn(`[claimAllRewards] token ${t} failed, skipping`, err);
+              console.warn(`Token ${token} failed, skipping`, err);
             }
           }
         }
       }
 
       onProgress?.('Updating balances…');
-      await Promise.all([loadBalances(), loadPendingRewards?.()].filter(Boolean) as Promise<any>[]);
+      await Promise.all([loadBalances(), loadPendingRewards?.()].filter(Boolean));
 
-      if (!lastRc) {
+      if (!lastReceipt) {
         onError?.(new Error('No claims succeeded.'));
         return undefined;
       }
-      onSuccess?.(lastRc);
-      return lastRc;
+      
+      onSuccess?.(lastReceipt);
+      return lastReceipt;
     } catch (error: any) {
       console.error('claimAllRewards failed:', error);
       onError?.(error);
       return undefined;
     } finally {
       setLoading(false);
-      dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } });
+      setTransactionLoading(txId, false);
     }
-  }, [getContracts, dispatch, loadBalances, loadPendingRewards]);
+  }, [
+    address,
+    publicClient,
+    writeContractAsync,
+    getAddr,
+    loadBalances,
+    loadPendingRewards,
+    setTransactionLoading
+  ]);
 
+  // Claim single reward
   const claimReward = useCallback(async (
     tokenAddress: string,
     onSuccess?: SuccessCallback,
@@ -367,205 +441,183 @@ export const useStaking = () => {
   ) => {
     setLoading(true);
     const txId = 'claimReward';
-    dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
+    setTransactionLoading(txId, true);
+    
     try {
-      const contracts = await getContracts(true);
-      const sd = contracts?.stakingDistributor;
-      if (!sd) throw new Error('Staking contract not initialized');
+      const stakingAddr = getAddr('StakingDistributor');
+      if (!stakingAddr) throw new Error('Staking contract not initialized');
 
       onProgress?.('Claiming reward…');
-      const provider = sd.runner?.provider as ethers.Provider;
-      const overrides = await get1559Overrides(provider);
-      const epoch = await sd.currentEpoch();
-      const gas = await sd.claim.estimateGas(tokenAddress, epoch).catch(() => 180_000n);
-      const tx = await sd.claim(tokenAddress, epoch, { ...overrides, gasLimit: (gas * 120n) / 100n });
+      
+      const epoch = await publicClient?.readContract({
+        address: stakingAddr,
+        abi: ABIS.StakingDistributor,
+        functionName: 'currentEpoch',
+      }) as bigint;
 
+      const hash = await writeContractAsync({
+        address: stakingAddr,
+        abi: ABIS.StakingDistributor,
+        functionName: 'claim',
+        args: [tokenAddress, epoch],
+      });
 
-      const receipt = await tx.wait();
+      const receipt = await publicClient?.waitForTransactionReceipt({ hash });
 
       onProgress?.('Updating balances…');
-      await Promise.all([loadBalances(), loadPendingRewards?.()].filter(Boolean) as Promise<any>[]);
+      await Promise.all([loadBalances(), loadPendingRewards?.()].filter(Boolean));
 
       onSuccess?.(receipt);
       return receipt;
     } catch (error: any) {
-      if (!isUserRejection(error)) console.error('claimReward failed:', error);
+      if (!isUserRejection(error)) {
+        console.error('claimReward failed:', error);
+      }
       onError?.(error);
       return undefined;
     } finally {
       setLoading(false);
-      dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } });
+      setTransactionLoading(txId, false);
     }
-  }, [getContracts, dispatch, loadBalances, loadPendingRewards]);
+  }, [
+    publicClient,
+    writeContractAsync,
+    getAddr,
+    loadBalances,
+    loadPendingRewards,
+    setTransactionLoading
+  ]);
 
-  // -----------------------------
-  // Views / Stats (FILE-FIRST)
-// -----------------------------
-  const getRewardTokens = useCallback(async (tokenFileUrl = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"): Promise<string[]> => {
+  // Get reward tokens
+  const getRewardTokens = useCallback(async (
+    tokenFileUrl = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"
+  ): Promise<string[]> => {
     try {
-      // primary: file
-      const fileTokens = await loadClaimTokensFromJson(tokenFileUrl);
-      return fileTokens;
+      return await loadClaimTokensFromJson(tokenFileUrl);
     } catch (e) {
       console.error('getRewardTokens failed:', e);
       return [];
     }
   }, []);
 
+  // Calculate staking APR
   const calculateStakingAPR = useCallback(async (): Promise<StakingAPR> => {
-    // Keep constant unless you’ve wired a model
     return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
   }, []);
 
-  const getStakingStats = useCallback(async (tokenFileUrl = "/claim_tokens_last7d.json"): Promise<StakingStats> => {
+  // Get staking stats
+  const getStakingStats = useCallback(async (
+    tokenFileUrl = "/claim_tokens_last7d.json"
+  ): Promise<StakingStats> => {
     try {
-      const contracts = await getContracts();
-      const sd = contracts?.stakingDistributor;
-      if (!sd) return { totalStaked: '0', rewardTokensCount: 0 };
+      const stakingAddr = getAddr('StakingDistributor');
+      if (!stakingAddr || !publicClient) {
+        return { totalStaked: '0', rewardTokensCount: 0 };
+      }
 
-      const totalStakedRaw = await sd.totalStaked();
+      const totalStakedRaw = await publicClient.readContract({
+        address: stakingAddr,
+        abi: ABIS.StakingDistributor,
+        functionName: 'totalStaked',
+      });
+
       const tokens = await loadClaimTokensFromJson(tokenFileUrl);
+      
       return {
-        totalStaked: ethers.formatEther(totalStakedRaw ?? 0n),
+        totalStaked: safeFormatEther(totalStakedRaw as bigint),
         rewardTokensCount: tokens.length,
       };
     } catch (e) {
       console.error('getStakingStats failed:', e);
       return { totalStaked: '0', rewardTokensCount: 0 };
     }
-  }, [getContracts]);
+  }, [publicClient, getAddr]);
 
-  const getPendingRewards = useCallback(
-    async (
-      userAddress?: string,
-      tokenFileUrl = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"
-    ): Promise<PendingReward[]> => {
-      try {
-        const contracts = await getContracts();
-        const sd = contracts?.stakingDistributor;
-        if (!sd) return [];
-  
-        // Resolve the user address robustly (ethers v6)
-        let addr = userAddress || "";
-        if (!addr) {
-          // Try signer address first if sd was built with a signer
-          const r: any = sd.runner;
-          if (r && typeof r.getAddress === "function") {
-            try { addr = await r.getAddress(); } catch {}
-          }
-          // Fallback to whatever the caller placed in context
-          if (!addr) addr = (contracts as any).account || "";
-        }
-        if (!addr) return [];
-  
-        // This is an epoch distributor: we need current + previous epoch
-        if (typeof (sd as any).currentEpoch !== "function") return [];
-  
-        const nowEpoch: bigint = await sd.currentEpoch();
-        const prevEpoch: bigint = nowEpoch - WEEK;
-  
-        // Get token list (same source the keeper uses)
-        const tokens = await loadClaimTokensFromJson(tokenFileUrl);
-        if (!tokens.length) return [];
+  // Get pending rewards
+  const getPendingRewards = useCallback(async (
+    userAddress?: string,
+    tokenFileUrl = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"
+  ): Promise<PendingReward[]> => {
+    try {
+      const stakingAddr = getAddr('StakingDistributor');
+      const addr = userAddress || address;
+      
+      if (!stakingAddr || !addr || !publicClient) return [];
 
-        console.debug('[getPendingRewards] addr=', addr, 'tokens=', tokens.length, 'nowEpoch=', nowEpoch.toString());
-  
-        const toLower = tokens.map(t => t.toLowerCase());
-  
-        // Try batch path (fast): previewClaimsForEpoch for prev and now
-        const hasBatch =
-          typeof (sd as any).previewClaimsForEpoch === "function";
-  
-        let prevAmounts: bigint[] = [];
-        let nowAmounts: bigint[] = [];
-  
-        if (hasBatch) {
+      const currentEpoch = await publicClient.readContract({
+        address: stakingAddr,
+        abi: ABIS.StakingDistributor,
+        functionName: 'currentEpoch',
+      }) as bigint;
+
+      const WEEK = 7n * 24n * 60n * 60n;
+      const prevEpoch = currentEpoch - WEEK;
+
+      const tokens = await loadClaimTokensFromJson(tokenFileUrl);
+      if (!tokens.length) return [];
+
+      const out: PendingReward[] = [];
+
+      for (const token of tokens) {
+        const [aPrev, aNow] = await Promise.all([
+          publicClient.readContract({
+            address: stakingAddr,
+            abi: ABIS.StakingDistributor,
+            functionName: 'previewClaim',
+            args: [addr, token, prevEpoch],
+          }).catch(() => 0n),
+          publicClient.readContract({
+            address: stakingAddr,
+            abi: ABIS.StakingDistributor,
+            functionName: 'previewClaim',
+            args: [addr, token, currentEpoch],
+          }).catch(() => 0n),
+        ]);
+
+        const total = (aPrev as bigint) + (aNow as bigint);
+        if (total === 0n) continue;
+
+        let symbol = 'ETH';
+        let decimals = 18;
+
+        if (token !== '0x0000000000000000000000000000000000000000') {
           try {
-            // batch prev
-            const amountsPrev: bigint[] = await (sd as any).previewClaimsForEpoch(
-              addr,
-              toLower,
-              prevEpoch
-            );
-            prevAmounts = amountsPrev || [];
-            // batch now
-            const amountsNow: bigint[] = await (sd as any).previewClaimsForEpoch(
-              addr,
-              toLower,
-              nowEpoch
-            );
-            nowAmounts = amountsNow || [];
-          } catch (e) {
-            // fall back to per-token
-            prevAmounts = [];
-            nowAmounts = [];
-          }
-        }
-  
-        // Fallback if batch failed or returned wrong length
-        const needPerToken =
-          prevAmounts.length !== toLower.length ||
-          nowAmounts.length !== toLower.length;
-  
-        if (needPerToken) {
-          prevAmounts = [];
-          nowAmounts = [];
-          for (const t of toLower) {
-            const [p, n] = await Promise.all([
-              sd.previewClaim(addr, t, prevEpoch).catch(() => 0n),
-              sd.previewClaim(addr, t, nowEpoch).catch(() => 0n),
+            const [sym, dec] = await Promise.all([
+              publicClient.readContract({
+                address: token as `0x${string}`,
+                abi: ABIS.ERC20,
+                functionName: 'symbol',
+              }),
+              publicClient.readContract({
+                address: token as `0x${string}`,
+                abi: ABIS.ERC20,
+                functionName: 'decimals',
+              }),
             ]);
-            prevAmounts.push(p ?? 0n);
-            nowAmounts.push(n ?? 0n);
+            
+            symbol = String(sym);
+            decimals = Number(dec);
+          } catch {
+            symbol = `${token.slice(0, 6)}...${token.slice(-4)}`;
           }
         }
-  
-        // Build output: include only tokens with > 0 total (prev + now)
-        const out: PendingReward[] = [];
-        for (let i = 0; i < toLower.length; i++) {
-          const total = (prevAmounts[i] ?? 0n) + (nowAmounts[i] ?? 0n);
-          if (total === 0n) continue;
-  
-          const tokenAddr = toLower[i];
-          let symbol = "ETH";
-          let decimals = 18;
-  
-          if (tokenAddr !== ethers.ZeroAddress) {
-            try {
-              const erc20 = new ethers.Contract(
-                tokenAddr,
-                ["function symbol() view returns (string)", "function decimals() view returns (uint8)"],
-                contracts.provider
-              );
-              const [sym, dec] = await Promise.all([erc20.symbol(), erc20.decimals()]);
-              symbol = String(sym);
-              decimals = Number(dec);
-            } catch {
-              symbol = `${tokenAddr.slice(0, 6)}...${tokenAddr.slice(-4)}`;
-              decimals = 18;
-            }
-          }
-  
-          out.push({
-            token: tokenAddr,
-            amount: ethers.formatUnits(total, decimals),
-            symbol,
-          });
-        }
-  
-        return out;
-      } catch (e) {
-        console.error("getPendingRewards failed:", e);
-        return [];
-      }
-    },
-    [getContracts]
-  );
-  
 
-  // -----------------------------
-  // Exit
-  // -----------------------------
+        out.push({
+          token,
+          amount: (Number(total) / 10 ** decimals).toString(),
+          symbol,
+          decimals,
+        });
+      }
+
+      return out;
+    } catch (e) {
+      console.error('getPendingRewards failed:', e);
+      return [];
+    }
+  }, [address, publicClient, getAddr]);
+
+  // Exit (unstake all + claim all)
   const exit = useCallback(async (
     onSuccess?: SuccessCallback,
     onError?: ErrorCallback,
@@ -573,49 +625,61 @@ export const useStaking = () => {
   ) => {
     setLoading(true);
     const txId = 'exit';
-    dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: true } });
+    setTransactionLoading(txId, true);
+    
     try {
-      const contracts = await getContracts(true);
-      const sd = contracts?.stakingDistributor;
-      if (!sd) throw new Error('Staking contract not initialized');
+      const stakingAddr = getAddr('StakingDistributor');
+      if (!stakingAddr) throw new Error('Staking contract not initialized');
 
       onProgress?.('Exiting position...');
-      const provider = sd.runner?.provider as ethers.Provider;
-      const overrides = await get1559Overrides(provider);
-      // (optional) estimate gas
-      const gas = await sd.exit.estimateGas().catch(() => 180_000n);
-      const tx = await sd.exit({ ...overrides, gasLimit: (gas * 120n) / 100n });
-      const receipt = await tx.wait();
+      
+      const hash = await writeContractAsync({
+        address: stakingAddr,
+        abi: ABIS.StakingDistributor,
+        functionName: 'exit',
+      });
 
+      const receipt = await publicClient?.waitForTransactionReceipt({ hash });
 
       onProgress?.('Updating balances…');
-      await Promise.all([loadBalances(), loadAllowances(), loadPendingRewards?.()].filter(Boolean) as Promise<any>[]);
+      await Promise.all([
+        loadBalances(),
+        loadAllowances(),
+        loadPendingRewards?.()
+      ].filter(Boolean));
 
       onSuccess?.(receipt);
       return receipt;
     } catch (error: any) {
-      if (!isUserRejection(error)) console.error('exit failed:', error);
+      if (!isUserRejection(error)) {
+        console.error('exit failed:', error);
+      }
       onError?.(error);
       if (!isUserRejection(error)) throw error;
       return undefined;
     } finally {
       setLoading(false);
-      dispatch({ type: 'SET_TRANSACTION_LOADING', payload: { id: txId, loading: false } });
+      setTransactionLoading(txId, false);
     }
-  }, [getContracts, dispatch, loadBalances, loadAllowances, loadPendingRewards]);
+  }, [
+    publicClient,
+    writeContractAsync,
+    getAddr,
+    loadBalances,
+    loadAllowances,
+    loadPendingRewards,
+    setTransactionLoading
+  ]);
 
   return {
     loading,
-    // actions
     stakeIAero,
     unstakeIAero,
     claimAllRewards,
     claimReward,
     exit,
-    // approvals
     checkIAeroApproval,
     approveIAero,
-    // views
     calculateStakingAPR,
     getStakingStats,
     getPendingRewards,

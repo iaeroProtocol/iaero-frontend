@@ -1,219 +1,329 @@
-import { ethers } from "ethers";
-import { getNetworkConfig, isSupportedNetwork } from "../contracts/addresses";
+// src/components/lib/ethereum.ts
+import { getNetworkConfig, isSupportedNetwork, type SupportedChainId } from "../contracts/addresses";
 
-// ---- Types / globals -------------------------------------------------------
+// ============================================================================
+// FORMATTING UTILITIES
+// ============================================================================
 
-declare global {
-  interface Window {
-    ethereum?: any; // You can replace 'any' with ethers.Eip1193Provider if desired
-  }
-}
-
-let cachedProvider: ethers.BrowserProvider | ethers.JsonRpcProvider | null = null;
-let cachedSigner: ethers.Signer | null = null;
-
-// ---- Provider / Signer helpers --------------------------------------------
-
-/** Returns a cached provider. BrowserProvider if wallet present, otherwise RPC. */
-export const getProvider = (chainId: number = 8453) => {
-  // Client + wallet: prefer BrowserProvider
-  if (typeof window !== "undefined" && window.ethereum) {
-    if (!(cachedProvider instanceof ethers.BrowserProvider)) {
-      cachedProvider = new ethers.BrowserProvider(window.ethereum);
-    }
-    return cachedProvider;
-  }
-
-  // SSR or no wallet: fall back to static RPC
-  const cfg = getNetworkConfig(chainId);
-  if (!(cachedProvider instanceof ethers.JsonRpcProvider)) {
-    cachedProvider = new ethers.JsonRpcProvider(cfg.rpcUrl);
-  }
-  return cachedProvider;
-};
-
-export const getSigner = async () => {
-  const p = getProvider();
-  if (!("getSigner" in p)) {
-    throw new Error("No browser wallet available to obtain a signer");
-  }
-  if (!cachedSigner) {
-    cachedSigner = await (p as ethers.BrowserProvider).getSigner();
-  }
-  return cachedSigner!;
-};
-
-// ---- Network switching -----------------------------------------------------
-
-export const switchToNetwork = async (chainId: number) => {
-  if (!window.ethereum) {
-    throw new Error("No wallet detected");
-  }
-
-  const cfg = getNetworkConfig(chainId);
-  const chainIdHex = cfg.chainId; // already hex in NETWORK_CONFIG
-
-  try {
-    await window.ethereum.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: chainIdHex }],
-    });
-  } catch (switchError: any) {
-    // Chain not added yet
-    if (switchError?.code === 4902 || switchError?.message?.includes("Unrecognized chain ID")) {
-      try {
-        await window.ethereum.request({
-          method: "wallet_addEthereumChain",
-          params: [
-            {
-              chainId: chainIdHex,
-              chainName: cfg.name,
-              nativeCurrency: cfg.nativeCurrency,
-              rpcUrls: [cfg.rpcUrl],
-              blockExplorerUrls: [cfg.blockExplorer],
-            },
-          ],
-        });
-      } catch (addError: any) {
-        throw new Error(`Failed to add network: ${addError?.message || addError}`);
-      }
-    } else {
-      throw new Error(`Failed to switch network: ${switchError?.message || switchError}`);
-    }
-  }
-};
-
-export const switchToBaseSepolia = () => switchToNetwork(84532);
-export const switchToBase = () => switchToNetwork(8453);
-
-// ---- Wallet connection -----------------------------------------------------
-
-export const connectWallet = async () => {
-
-  const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-  
-  if (!window.ethereum && isMobile) {
-    // Redirect to MetaMask mobile browser
-    const currentUrl = window.location.href;
-    window.location.href = `https://metamask.app.link/dapp/${currentUrl.replace('https://', '')}`;
-    return;
-  }
-
-  if (!window.ethereum) throw new Error('Please install MetaMask or another Web3 wallet');
-
-  try {
-    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-    if (accounts.length === 0) throw new Error('No accounts found');
-
-    // Check current network
-    const currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
-    let chainId = parseInt(currentChainId, 16);
-
-    // Auto-switch to Base mainnet if not on a supported network
-    if (!isSupportedNetwork(chainId)) {
-      const BASE_MAINNET_ID = 8453;
-      
-      try {
-        // Try to switch to Base mainnet
-        await window.ethereum.request({
-          method: 'wallet_switchEthereumChain',
-          params: [{ chainId: '0x2105' }], // 8453 in hex
-        });
-        chainId = BASE_MAINNET_ID;
-      } catch (switchError: any) {
-        if (switchError.code === 4902) {
-          // Base not in wallet, add it
-          await window.ethereum.request({
-            method: 'wallet_addEthereumChain',
-            params: [{
-              chainId: '0x2105',
-              chainName: 'Base',
-              nativeCurrency: {
-                name: 'Ethereum',
-                symbol: 'ETH',
-                decimals: 18
-              },
-              rpcUrls: ['https://mainnet.base.org'],
-              blockExplorerUrls: ['https://basescan.org']
-            }],
-          });
-          chainId = BASE_MAINNET_ID;
-        } else {
-          throw new Error('Failed to switch to Base network');
-        }
-      }
-    }
-
-    return { account: accounts[0], chainId };
-  } catch (error: any) {
-    console.error('Connection error:', error);
-    throw new Error(`Connection failed: ${error.message}`);
-  }
-};
-
-// ---- Misc helpers ----------------------------------------------------------
-
-export const getNetworkInfo = async () => {
-  try {
-    const prov = getProvider();
-    const net = await prov.getNetwork();
-    const chainId = Number(net.chainId);
-
-    return {
-      chainId,
-      name: net.name,
-      supported: isSupportedNetwork(chainId),
-      config: isSupportedNetwork(chainId) ? getNetworkConfig(chainId) : null,
-    };
-  } catch {
-    return { chainId: null, name: "Unknown", supported: false, config: null };
-  }
-};
-
-export const formatAddress = (address: string, chars = 4) => {
+/**
+ * Format an Ethereum address for display
+ * @example formatAddress("0x1234...5678") => "0x1234...5678"
+ */
+export const formatAddress = (address: string, chars = 4): string => {
   if (!address) return "";
   return `${address.slice(0, chars + 2)}...${address.slice(-chars)}`;
 };
 
+/**
+ * Format token amount for display
+ * @param amount - Amount as string, bigint, or number
+ * @param decimals - Token decimals (default 18)
+ * @param displayDecimals - How many decimals to show (default 2)
+ */
 export const formatTokenAmount = (
   amount: string | bigint | number,
   decimals = 18,
   displayDecimals = 2
-) => {
+): string => {
   if (amount == null) return "0";
-  const asBig = typeof amount === "bigint" ? amount : ethers.parseUnits(String(amount), decimals);
-  const num = parseFloat(ethers.formatUnits(asBig, decimals));
-  if (num === 0) return "0";
-  if (num < 0.01) return "< 0.01";
-  return num.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: displayDecimals });
-};
-
-export const parseTokenAmount = (amount: string | number | bigint, decimals = 18): bigint => {
-  if (amount === "" || amount == null) return ethers.parseUnits("0", decimals);
-  if (typeof amount === "bigint") return amount;
-  return ethers.parseUnits(String(amount), decimals);
-};
-
-// ---- Wallet event listeners ------------------------------------------------
-
-if (typeof window !== "undefined" && window.ethereum?.on) {
-  window.ethereum.on("accountsChanged", (accounts: string[]) => {
-    if (!accounts?.length) {
-      // User disconnected wallet
-      cachedProvider = null;
-      cachedSigner = null;
-    } else {
-      // Switch account
-      cachedSigner = null;
+  
+  let num: number;
+  
+  if (typeof amount === "bigint") {
+    num = Number(amount) / Math.pow(10, decimals);
+  } else if (typeof amount === "number") {
+    num = amount;
+  } else {
+    // String input
+    try {
+      if (amount.includes('.')) {
+        // Already formatted
+        num = parseFloat(amount);
+      } else {
+        // Wei/raw amount
+        num = Number(amount) / Math.pow(10, decimals);
+      }
+    } catch {
+      return "0";
     }
+  }
+  
+  if (num === 0) return "0";
+  if (num < 0.01 && num > 0) return "< 0.01";
+  
+  return num.toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: displayDecimals
   });
+};
 
-  window.ethereum.on("chainChanged", (_chainId: string) => {
-    // Reset caches so new chain is respected everywhere
-    cachedProvider = null;
-    cachedSigner = null;
+/**
+ * Parse token amount from user input to bigint (wei)
+ * @param amount - User input as string or number
+ * @param decimals - Token decimals (default 18)
+ */
+export const parseTokenAmount = (amount: string | number | bigint, decimals = 18): bigint => {
+  if (amount === "" || amount == null) return 0n;
+  if (typeof amount === "bigint") return amount;
+  
+  try {
+    const amountStr = String(amount);
+    const [whole, fraction = ""] = amountStr.split(".");
+    
+    // Pad or trim fraction to match decimals
+    const paddedFraction = fraction.padEnd(decimals, "0").slice(0, decimals);
+    
+    // Combine whole and fraction parts
+    const combined = whole + paddedFraction;
+    return BigInt(combined);
+  } catch (error) {
+    console.warn("Failed to parse token amount:", amount, error);
+    return 0n;
+  }
+};
 
-    // Optional, but keeps app state sane without complex global wiring
-    window.location.reload();
-  });
-}
+// ============================================================================
+// NETWORK UTILITIES
+// ============================================================================
+
+/**
+ * Get network configuration by chain ID
+ */
+export { getNetworkConfig, isSupportedNetwork };
+
+/**
+ * Get block explorer transaction URL
+ */
+export const getExplorerTxUrl = (chainId: number, txHash: string): string => {
+  const { blockExplorer } = getNetworkConfig(chainId);
+  return `${blockExplorer}/tx/${txHash}`;
+};
+
+/**
+ * Get block explorer address URL
+ */
+export const getExplorerAddressUrl = (chainId: number, address: string): string => {
+  const { blockExplorer } = getNetworkConfig(chainId);
+  return `${blockExplorer}/address/${address}`;
+};
+
+// ============================================================================
+// VALIDATION UTILITIES
+// ============================================================================
+
+/**
+ * Validate if a string is a valid Ethereum address
+ */
+export const isValidAddress = (address: string): boolean => {
+  if (!address) return false;
+  
+  // Check if it's a valid hex string with correct length
+  const validFormat = /^0x[0-9a-fA-F]{40}$/;
+  if (!validFormat.test(address)) return false;
+  
+  // Optional: Add checksum validation if needed
+  return true;
+};
+
+/**
+ * Validate token amount against balance
+ */
+export const validateTokenAmount = (
+  input: string,
+  balance: bigint,
+  decimals: number = 18,
+  minAmount?: bigint
+): {
+  valid: boolean;
+  error?: string;
+  amount?: bigint;
+} => {
+  if (!input || input === '') {
+    return { valid: false, error: 'Enter an amount' };
+  }
+
+  let amount: bigint;
+  try {
+    amount = parseTokenAmount(input, decimals);
+  } catch {
+    return { valid: false, error: 'Invalid amount' };
+  }
+
+  if (amount === 0n) {
+    return { valid: false, error: 'Amount must be greater than 0' };
+  }
+
+  if (amount > balance) {
+    return { valid: false, error: 'Insufficient balance' };
+  }
+
+  if (minAmount && amount < minAmount) {
+    const minFormatted = formatTokenAmount(minAmount, decimals, 4);
+    return { valid: false, error: `Minimum amount is ${minFormatted}` };
+  }
+
+  return { valid: true, amount };
+};
+
+// ============================================================================
+// BIGINT UTILITIES
+// ============================================================================
+
+/**
+ * Safely format bigint to decimal string
+ */
+export const formatBigInt = (value: bigint | undefined, decimals = 18): string => {
+  if (!value) return "0";
+  return (Number(value) / Math.pow(10, decimals)).toString();
+};
+
+/**
+ * Compare two bigints
+ */
+export const compareBigInt = (a: bigint, b: bigint): -1 | 0 | 1 => {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+};
+
+/**
+ * Calculate percentage of bigint
+ * @param value - The base value
+ * @param percentage - Percentage as number (e.g., 5.5 for 5.5%)
+ */
+export const calculatePercentage = (value: bigint, percentage: number): bigint => {
+  const basisPoints = BigInt(Math.floor(percentage * 100));
+  return (value * basisPoints) / 10000n;
+};
+
+// ============================================================================
+// FORMATTING CONSTANTS
+// ============================================================================
+
+/**
+ * Common token decimals
+ */
+export const TOKEN_DECIMALS = {
+  ETH: 18,
+  WETH: 18,
+  USDC: 6,
+  USDT: 6,
+  DAI: 18,
+  AERO: 18,
+  iAERO: 18,
+  LIQ: 18,
+} as const;
+
+/**
+ * Zero addresses for different purposes
+ */
+export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
+export const NATIVE_TOKEN = "0x0000000000000000000000000000000000000000" as const;
+
+// ============================================================================
+// ERROR HANDLING
+// ============================================================================
+
+/**
+ * Check if error is user rejection
+ */
+export const isUserRejection = (error: any): boolean => {
+  return (
+    error?.name === 'UserRejectedRequestError' ||
+    error?.code === 4001 ||
+    error?.code === 'ACTION_REJECTED' ||
+    error?.message?.toLowerCase?.().includes('user rejected') ||
+    error?.message?.toLowerCase?.().includes('user denied')
+  );
+};
+
+/**
+ * Extract user-friendly error message
+ */
+export const getErrorMessage = (error: any, fallback = "Transaction failed"): string => {
+  if (isUserRejection(error)) {
+    return "Transaction rejected by user";
+  }
+  
+  const message = error?.message || error?.reason || "";
+  const lowerMessage = message.toLowerCase();
+  
+  if (lowerMessage.includes("insufficient funds")) {
+    return "Insufficient funds for transaction";
+  }
+  
+  if (lowerMessage.includes("insufficient balance")) {
+    return "Insufficient token balance";
+  }
+  
+  if (lowerMessage.includes("execution reverted")) {
+    // Try to extract revert reason
+    const match = message.match(/execution reverted: (.+)/i);
+    if (match) return match[1];
+    return "Transaction would fail";
+  }
+  
+  if (lowerMessage.includes("nonce")) {
+    return "Transaction nonce issue - please try again";
+  }
+  
+  if (lowerMessage.includes("gas")) {
+    return "Gas estimation failed - transaction may fail";
+  }
+  
+  // Return shortened message if available
+  if (message && message.length < 100) {
+    return message;
+  }
+  
+  return fallback;
+};
+
+// ============================================================================
+// LEGACY EXPORTS (for backwards compatibility during migration)
+// ============================================================================
+
+/**
+ * @deprecated Use wagmi's usePublicClient instead
+ * This is kept for backwards compatibility during migration
+ */
+export const getProvider = () => {
+  console.warn('getProvider() is deprecated. Use wagmi usePublicClient() instead.');
+  throw new Error('getProvider() removed - use wagmi hooks');
+};
+
+/**
+ * @deprecated Use wagmi's useAccount and useWalletClient instead
+ * This is kept for backwards compatibility during migration
+ */
+export const getSigner = () => {
+  console.warn('getSigner() is deprecated. Use wagmi useWalletClient() instead.');
+  throw new Error('getSigner() removed - use wagmi hooks');
+};
+
+/**
+ * @deprecated Use RainbowKit's ConnectButton instead
+ * This is kept for backwards compatibility during migration
+ */
+export const connectWallet = () => {
+  console.warn('connectWallet() is deprecated. Use RainbowKit ConnectButton instead.');
+  throw new Error('connectWallet() removed - use RainbowKit');
+};
+
+/**
+ * @deprecated Use wagmi's useSwitchChain hook instead
+ * This is kept for backwards compatibility during migration
+ */
+export const switchToNetwork = () => {
+  console.warn('switchToNetwork() is deprecated. Use wagmi useSwitchChain instead.');
+  throw new Error('switchToNetwork() removed - use wagmi hooks');
+};
+
+export const switchToBaseSepolia = switchToNetwork;
+export const switchToBase = switchToNetwork;
+
+// ============================================================================
+// TYPE EXPORTS
+// ============================================================================
+
+export type { SupportedChainId };

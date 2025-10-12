@@ -1,17 +1,12 @@
 "use client";
-// src/contexts/ProtocolContext.js
-import React, { createContext, useContext, useReducer, useEffect, useCallback } from 'react';
-import { ethers } from 'ethers';
-import {
-  connectWallet as connectWalletUtil,
-  getNetworkInfo,
-  getProvider,
-  getSigner,
-  formatTokenAmount
-} from '../lib/ethereum';
-import { getContractAddress, type ContractName } from '../contracts/addresses';
+
+import React, { createContext, useContext, useEffect, useCallback, useMemo } from 'react';
+import { useAccount, useChainId, usePublicClient } from 'wagmi';
+import { getContractAddress, isSupportedNetwork, type ContractName } from '../contracts/addresses';
 import { ABIS } from '../contracts/abis';
 import { fetchPricesWithCache } from '@/lib/client-prices';
+
+/* ========================= Types ========================= */
 
 type ProtocolState = {
   connected: boolean;
@@ -44,7 +39,8 @@ type ProtocolState = {
     aeroLocked: string;
     emissionRate: string;
     iAeroSupply: string;
-    liqSupply: string;
+    liqSupply: string;       // circulating LIQ
+    liqMarketCap: string;    // USD market cap of LIQ (circ * price)
   };
 
   loading: {
@@ -57,612 +53,321 @@ type ProtocolState = {
   error: string | null;
 };
 
-type ProtocolAction =
-  | { type: 'SET_CONNECTION'; payload: { connected: boolean; account: string | null; chainId: number | null; networkSupported: boolean } }
-  | { type: 'SET_BALANCES'; payload: Partial<ProtocolState['balances']> }
-  | { type: 'SET_ALLOWANCES'; payload: Partial<ProtocolState['allowances']> }
-  | { type: 'SET_PENDING_REWARDS'; payload: Partial<ProtocolState['pendingRewards']> }
-  | { type: 'SET_STATS'; payload: Partial<ProtocolState['stats']> }
-  | { type: 'SET_LOADING'; payload: Partial<ProtocolState['loading']> }
-  | { type: 'SET_TRANSACTION_LOADING'; payload: { id: string; loading: boolean } }
-  | { type: 'SET_ERROR'; payload: string }
-  | { type: 'CLEAR_ERROR' }
-  | { type: 'DISCONNECT' };
+interface ProtocolContextValue extends ProtocolState {
+  loadBalances: () => Promise<void>;
+  loadAllowances: () => Promise<void>;
+  loadPendingRewards: () => Promise<void>;
+  loadStats: () => Promise<void>;
+  setTransactionLoading: (id: string, loading: boolean) => void;
+}
 
-type ABIKey = keyof typeof ABIS;
+const ProtocolContext = createContext<ProtocolContextValue | null>(null);
 
-const ProtocolContext = createContext<any>(null);
+/* ========================= Helpers ========================= */
 
-// Initial state
-const initialState: ProtocolState = {
-  connected: false,
-  account: null,
-  chainId: null,
-  networkSupported: false,
-
-  balances: {
-    aero: '0',
-    iAero: '0',
-    liq: '0',
-    stakedIAero: '0',
-    ethBalance: '0'
-  },
-
-  allowances: {
-    aeroToVault: '0',
-    iAeroToStaking: '0'
-  },
-
-  pendingRewards: {
-    tokens: [],
-    amounts: [],
-    totalValue: '0'
-  },
-
-  stats: {
-    tvl: '0',
-    totalStaked: '0',
-    aeroLocked: '0',
-    emissionRate: '0',
-    iAeroSupply: '0',
-    liqSupply: '0'
-  },
-
-  loading: {
-    connection: false,
-    balances: false,
-    stats: false,
-    transactions: {}
-  },
-
-  error: null
+// viem-style bigints are already JS bigint; format safely to string (18d)
+const safeFormatEther = (value: bigint | undefined | null) => {
+  if (!value) return '0';
+  return (Number(value) / 1e18).toString();
 };
+const fmt18 = (x: bigint) => (Number(x) / 1e18).toString();
 
-// Reducer
-function protocolReducer(state: ProtocolState, action: ProtocolAction): ProtocolState {
-  switch (action.type) {
-    case 'SET_CONNECTION':
-      return {
-        ...state,
-        connected: action.payload.connected,
-        account: action.payload.account,
-        chainId: action.payload.chainId,
-        networkSupported: action.payload.networkSupported,
-        error: null
-      };
+/** Minimal ABIs used only for a couple of read calls */
+const VESTER_ABI = [
+  {
+    type: 'function',
+    name: 'vested',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'streamId', type: 'uint256' },
+      { name: 'timestamp', type: 'uint256' },
+    ],
+    outputs: [{ type: 'uint256' }],
+  },
+] as const;
 
-    case 'SET_BALANCES':
-      return { ...state, balances: { ...state.balances, ...action.payload } };
+const VAULT_META_ABI = [
+  { type: 'function', name: 'treasury', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+] as const;
 
-    case 'SET_ALLOWANCES':
-      return { ...state, allowances: { ...state.allowances, ...action.payload } };
+/* ========================= Provider ========================= */
 
-    case 'SET_PENDING_REWARDS':
-      return { ...state, pendingRewards: { ...state.pendingRewards, ...action.payload } };
-
-    case 'SET_STATS':
-      return { ...state, stats: { ...state.stats, ...action.payload } };
-
-    case 'SET_LOADING':
-      return { ...state, loading: { ...state.loading, ...action.payload } };
-
-    case 'SET_TRANSACTION_LOADING':
-      return {
-        ...state,
-        loading: {
-          ...state.loading,
-          transactions: {
-            ...state.loading.transactions,
-            [action.payload.id]: action.payload.loading
-          }
-        }
-      };
-
-    case 'SET_ERROR':
-      return { ...state, error: action.payload };
-
-    case 'CLEAR_ERROR':
-      return { ...state, error: null };
-
-    case 'DISCONNECT':
-      return { ...initialState };
-
-    default:
-      return state;
-  }
-}
-
-// Helper function to safely format values for ethers v6
-function safeFormatEther(value: bigint | string | number | undefined) {
-  try {
-    if (value == null) return '0';
-    if (typeof value === 'bigint') return ethers.formatEther(value);
-    if (typeof value === 'number') return value.toString();
-    if (typeof value === 'string') {
-      if (!value.startsWith('0x') && value.includes('.')) return value; // already formatted
-      return ethers.formatEther(value);
-    }
-    return ethers.formatEther(BigInt(value as any));
-  } catch (error: any) {
-    console.error('Error formatting value:', value, error);
-    return '0';
-  }
-}
-
-// --- Helpers for epoch distributor ---
-const DEFAULT_CLAIM_TOKENS_BY_CHAIN: Record<number, string[]> = {
-  8453: [
-    getContractAddress('AERO', 8453)!,
-    getContractAddress('WETH', 8453) ?? '',
-    getContractAddress('USDC', 8453) ?? '',
-  ].filter(Boolean),
-};
-
-async function fetchEpochTokensViaRewardsSugar(contracts: any, chainId: number, limit = 200): Promise<string[]> {
-  try {
-    const rs = contracts.RewardsSugar;
-    if (!rs) return [];
-    const rows = await rs.epochsLatest(limit, 0);
-    const seen = new Set<string>();
-    for (const row of rows) {
-      const bribes = row.bribes ?? [];
-      const fees = row.fees ?? [];
-      for (const b of bribes) if (b?.token) seen.add(b.token.toLowerCase());
-      for (const f of fees) if (f?.token) seen.add(f.token.toLowerCase());
-    }
-    return Array.from(seen);
-  } catch {
-    return [];
-  }
-}
-
-async function getEpochClaimTokenList(contracts: any, chainId: number): Promise<string[]> {
-  const viaSugar = await fetchEpochTokensViaRewardsSugar(contracts, chainId);
-  if (viaSugar.length) return viaSugar;
-  return DEFAULT_CLAIM_TOKENS_BY_CHAIN[chainId] ?? [];
-}
-
-async function previewEpochPendingAll(
-  sd: any,
-  provider: ethers.Provider,
-  account: string,
-  tokens: string[],
-): Promise<{ tokens: string[]; amounts: string[] }> {
-  const nowEpoch: bigint = await sd.currentEpoch();
-  const WEEK = 7n * 24n * 60n * 60n;
-  const prevEpoch = nowEpoch - WEEK;
-
-  const outTokens: string[] = [];
-  const outAmounts: string[] = [];
-
-  for (const t of tokens) {
-    const aPrev: bigint = await sd.previewClaim(account, t, prevEpoch).catch(() => 0n);
-    const aNow: bigint = await sd.previewClaim(account, t, nowEpoch).catch(() => 0n);
-    const total: bigint = aPrev + aNow;
-    if (total === 0n) continue;
-
-    const decimals = t === ethers.ZeroAddress
-      ? 18
-      : await new ethers.Contract(t, ['function decimals() view returns (uint8)'], provider)
-          .decimals()
-          .catch(() => 18);
-
-    outTokens.push(t);
-    outAmounts.push(ethers.formatUnits(total, decimals));
-  }
-  return { tokens: outTokens, amounts: outAmounts };
-}
-
-// Context Provider
 export function ProtocolProvider({ children }: { children: React.ReactNode }) {
-  const [state, dispatch] = useReducer(protocolReducer, initialState);
+  // Wagmi
+  const { address, isConnected } = useAccount();
+  const chainId = useChainId();
+  const publicClient = usePublicClient();
+  const networkSupported = useMemo(() => isSupportedNetwork(chainId), [chainId]);
 
-  // Get contract instances (read-only by default; signer only when needed)
-  const getContracts = useCallback(async (needSigner = false) => {
-    // Fallback to Base mainnet if wallet not connected yet
-    const chainId = state.chainId ?? 8453;
+  // Local state
+  const [state, setState] = React.useState<ProtocolState>({
+    connected: false,
+    account: null,
+    chainId: null,
+    networkSupported: false,
+    balances: {
+      aero: '0',
+      iAero: '0',
+      liq: '0',
+      stakedIAero: '0',
+      ethBalance: '0',
+    },
+    allowances: {
+      aeroToVault: '0',
+      iAeroToStaking: '0',
+    },
+    pendingRewards: {
+      tokens: [],
+      amounts: [],
+      totalValue: '0',
+    },
+    stats: {
+      tvl: '0',
+      totalStaked: '0',
+      aeroLocked: '0',
+      emissionRate: '1',
+      iAeroSupply: '0',
+      liqSupply: '0',
+      liqMarketCap: '0',
+    },
+    loading: {
+      connection: false,
+      balances: false,
+      stats: false,
+      transactions: {},
+    },
+    error: null,
+  });
 
-    const provider = getProvider();
-    const runner = needSigner ? await getSigner() : provider;
+  // React to wallet/chain changes
+  useEffect(() => {
+    setState(prev => ({
+      ...prev,
+      connected: isConnected,
+      account: address || null,
+      chainId: chainId || null,
+      networkSupported,
+    }));
+  }, [isConnected, address, chainId, networkSupported]);
 
-    const make = (name: ContractName, abiKey: ABIKey = name as ABIKey) => {
-      try {
-        const addr = getContractAddress(name, chainId);
-        const abi = ABIS[abiKey];
-        if (!abi) throw new Error(`ABI missing for ${abiKey}`);
-        return new ethers.Contract(addr, abi, runner);
-      } catch {
-        return undefined;
-      }
-    };
+  /* ========================= Balances ========================= */
 
-    const map = {
-      PermalockVault:        make('PermalockVault', 'PermalockVault'),
-      StakingDistributor:    make('StakingDistributor', 'StakingDistributor'),
-      LIQStakingDistributor: make('LIQStakingDistributor'),
-      RewardsHarvester:      make('RewardsHarvester', 'RewardsHarvester'),
-      VotingManager:         make('VotingManager', 'VotingManager'),
-      iAERO:                 make('iAERO', 'iAERO'),
-      LIQ:                   make('LIQ', 'LIQ'),
-      AERO:                  make('AERO', 'AERO'),
-      VeAERO:                make('VeAERO', 'VeAERO'),
-      MockVeAERO:            make('MockVeAERO', 'MockVeAERO'),
-      VOTER:                 make('VOTER', 'VOTER'),
-      MockVoter:             make('MockVoter', 'MockVoter'),
-      Router:                make('Router', 'Router'),
-      PoolFactory:           make('PoolFactory', 'PoolFactory'),
-      RewardsSugar:          make('RewardsSugar', 'RewardsSugar'),
-
-      provider,
-    };
-
-    return {
-      ...map,
-      vault: map.PermalockVault,
-      stakingDistributor: map.StakingDistributor,
-      VeAEROResolved: map.VeAERO ?? map.MockVeAERO,
-      VoterResolved: map.VOTER ?? map.MockVoter,
-    };
-  }, [state.chainId]);
-
-  // Connect wallet
-  const connectWallet = async () => {
-    dispatch({ type: 'SET_LOADING', payload: { connection: true } });
-    dispatch({ type: 'CLEAR_ERROR' });
-
-    try {
-      const result = await connectWalletUtil();
-      if (!result) throw new Error('Failed to connect wallet');
-
-      const { account, chainId } = result;
-      const networkInfo = await getNetworkInfo();
-
-      dispatch({
-        type: 'SET_CONNECTION',
-        payload: {
-          connected: true,
-          account,
-          chainId,
-          networkSupported: networkInfo.supported
-        }
-      });
-
-      return true;
-    } catch (error: any) {
-      console.error('Wallet connection failed:', error);
-      dispatch({ type: 'SET_ERROR', payload: error?.message || 'Failed to connect wallet' });
-      return false;
-    } finally {
-      dispatch({ type: 'SET_LOADING', payload: { connection: false } });
-    }
-  };
-
-  // Disconnect wallet
-  const disconnectWallet = useCallback(() => {
-    dispatch({ type: 'DISCONNECT' });
-  }, []);
-
-  // Load user balances
   const loadBalances = useCallback(async () => {
-    if (!state.connected || !state.account || !state.networkSupported) return;
+    if (!isConnected || !address || !networkSupported || !publicClient) return;
 
-    dispatch({ type: 'SET_LOADING', payload: { balances: true } });
+    setState(prev => ({ ...prev, loading: { ...prev.loading, balances: true } }));
 
     try {
-      const contracts = await getContracts();
-      const provider = getProvider();
+      const AERO = getContractAddress('AERO', chainId);
+      const IAERO = getContractAddress('iAERO', chainId);
+      const LIQ = getContractAddress('LIQ', chainId);
+      const STAKE = getContractAddress('StakingDistributor', chainId);
 
-      if (!contracts.AERO || !contracts.iAERO || !contracts.LIQ || !contracts.stakingDistributor) {
-        throw new Error('Required contracts not available on this network');
-      }
-
-      const [
-        ethBalance,
-        aeroBalance,
-        iAeroBalance,
-        liqBalance,
-        stakedBalance,
-      ] = await Promise.all([
-        provider.getBalance(state.account),
-        contracts.AERO.balanceOf(state.account),
-        contracts.iAERO.balanceOf(state.account),
-        contracts.LIQ?.balanceOf(state.account),
-        contracts.stakingDistributor.balanceOf(state.account),
+      const [ethBalance, aero, iAero, liq, staked] = await Promise.all([
+        publicClient.getBalance({ address }),
+        publicClient.readContract({ address: AERO, abi: ABIS.AERO, functionName: 'balanceOf', args: [address] }) as Promise<bigint>,
+        publicClient.readContract({ address: IAERO, abi: ABIS.iAERO, functionName: 'balanceOf', args: [address] }) as Promise<bigint>,
+        publicClient.readContract({ address: LIQ,   abi: ABIS.LIQ,   functionName: 'balanceOf', args: [address] }) as Promise<bigint>,
+        publicClient.readContract({ address: STAKE, abi: ABIS.StakingDistributor, functionName: 'balanceOf', args: [address] }) as Promise<bigint>,
       ]);
 
-      dispatch({
-        type: 'SET_BALANCES',
-        payload: {
+      setState(prev => ({
+        ...prev,
+        balances: {
+          aero: safeFormatEther(aero),
+          iAero: safeFormatEther(iAero),
+          liq: safeFormatEther(liq),
+          stakedIAero: safeFormatEther(staked),
           ethBalance: safeFormatEther(ethBalance),
-          aero: safeFormatEther(aeroBalance),
-          iAero: safeFormatEther(iAeroBalance),
-          liq: safeFormatEther(liqBalance),
-          stakedIAero: safeFormatEther(stakedBalance)
-        }
-      });
-
+        },
+      }));
     } catch (error: any) {
       console.error('Failed to load balances:', error);
-      dispatch({ type: 'SET_BALANCES', payload: { stakedIAero: '0' } });
-      dispatch({ type: 'SET_ERROR', payload: 'Failed to load balances' });
+      setState(prev => ({ ...prev, error: 'Failed to load balances' }));
     } finally {
-      dispatch({ type: 'SET_LOADING', payload: { balances: false } });
+      setState(prev => ({ ...prev, loading: { ...prev.loading, balances: false } }));
     }
+  }, [isConnected, address, chainId, networkSupported, publicClient]);
 
-  }, [state.connected, state.account, state.networkSupported, getContracts]);
+  /* ========================= Allowances ========================= */
 
-  // Load allowances
   const loadAllowances = useCallback(async () => {
-    if (!state.connected || !state.account || !state.networkSupported) return;
+    if (!isConnected || !address || !networkSupported || !publicClient) return;
 
     try {
-      const contracts = await getContracts();
+      const AERO = getContractAddress('AERO', chainId);
+      const IAERO = getContractAddress('iAERO', chainId);
+      const VAULT = getContractAddress('PermalockVault', chainId);
+      const STAKE = getContractAddress('StakingDistributor', chainId);
 
       const [aeroToVault, iAeroToStaking] = await Promise.all([
-        contracts.AERO?.allowance(
-          state.account,
-          getContractAddress('PermalockVault', (state.chainId ?? 8453))
-        ),
-        contracts.iAERO?.allowance(
-          state.account,
-          getContractAddress('StakingDistributor', (state.chainId ?? 8453))
-        )
+        publicClient.readContract({ address: AERO,  abi: ABIS.AERO,  functionName: 'allowance', args: [address, VAULT] }) as Promise<bigint>,
+        publicClient.readContract({ address: IAERO, abi: ABIS.iAERO, functionName: 'allowance', args: [address, STAKE] }) as Promise<bigint>,
       ]);
 
-      dispatch({
-        type: 'SET_ALLOWANCES',
-        payload: {
+      setState(prev => ({
+        ...prev,
+        allowances: {
           aeroToVault: safeFormatEther(aeroToVault),
-          iAeroToStaking: safeFormatEther(iAeroToStaking)
-        }
-      });
-
+          iAeroToStaking: safeFormatEther(iAeroToStaking),
+        },
+      }));
     } catch (error: any) {
       console.error('Failed to load allowances:', error);
     }
-  }, [state.connected, state.account, state.networkSupported, state.chainId, getContracts]);
+  }, [isConnected, address, chainId, networkSupported, publicClient]);
 
-  // Load pending rewards
-  const loadPendingRewards = useCallback(async () => {
-    if (!state.connected || !state.account || !state.networkSupported) return;
+  /* ========================= Stats (TVL, supplies, LIQ circ & mcap) ========================= */
 
-    try {
-      const contracts = await getContracts();
-      const sd = contracts?.stakingDistributor;
-      if (!sd) return;
-
-      // LEGACY streaming
-      if (typeof sd.getPendingRewards === 'function') {
-        const [tokens, amounts] = await sd.getPendingRewards(state.account);
-        dispatch({
-          type: 'SET_PENDING_REWARDS',
-          payload: {
-            tokens,
-            amounts: amounts.map((x: any) => safeFormatEther(x)),
-            totalValue: '0',
-          },
-        });
-        return;
-      }
-
-      // EPOCH distributor
-      if (typeof sd.currentEpoch === 'function' && typeof sd.previewClaim === 'function') {
-        const tokens = await getEpochClaimTokenList(contracts, (state.chainId ?? 8453));
-        if (!tokens.length) {
-          dispatch({ type: 'SET_PENDING_REWARDS', payload: { tokens: [], amounts: [], totalValue: '0' } });
-          return;
-        }
-
-        const { tokens: tks, amounts: amts } = await previewEpochPendingAll(sd, contracts.provider, state.account, tokens);
-
-        const aeroAddr = getContractAddress('AERO', (state.chainId ?? 8453))?.toLowerCase();
-        let totalValue = 0;
-        for (let i = 0; i < tks.length; i++) {
-          if (tks[i].toLowerCase() === aeroAddr) {
-            const amt = Number(amts[i] || '0');
-            const price = 1.1; // placeholder; hook up to PriceContext if desired
-            totalValue += amt * price;
-          }
-        }
-
-        dispatch({
-          type: 'SET_PENDING_REWARDS',
-          payload: { tokens: tks, amounts: amts, totalValue: totalValue.toFixed(2) },
-        });
-      }
-    } catch (error: any) {
-      console.error('Failed to load rewards:', error);
-    }
-  }, [state.connected, state.account, state.networkSupported, state.chainId, getContracts]);
-
-  // Load protocol stats (read-only; works without wallet)
   const loadStats = useCallback(async () => {
-    dispatch({ type: 'SET_LOADING', payload: { stats: true } });
+    setState(prev => ({ ...prev, loading: { ...prev.loading, stats: true } }));
 
     try {
-      const contracts = await getContracts();
+      if (!publicClient) throw new Error('No public client');
 
-      const vaultStatus = await contracts.vault?.vaultStatus();
+      const VAULT = getContractAddress('PermalockVault', chainId);
+      const STAKE = getContractAddress('StakingDistributor', chainId);
+      const IAERO = getContractAddress('iAERO', chainId);
+      const LIQ   = getContractAddress('LIQ', chainId);
+      const VESTER= getContractAddress('LIQLinearVester', chainId);
 
-      const totalAeroLocked = vaultStatus?.[0] ?? 0n;
-      const totalAeroLockedFormatted = safeFormatEther(totalAeroLocked);
+      // 1) Read core stats
+      const [vaultStatus, totalStaked, iAeroSupply, liqTotalSupply] = await Promise.all([
+        publicClient.readContract({
+          address: VAULT,
+          abi: ABIS.PermalockVault,
+          functionName: 'vaultStatus',
+        }),
+        publicClient.readContract({
+          address: STAKE,
+          abi: ABIS.StakingDistributor,
+          functionName: 'totalStaked',
+        }) as Promise<bigint>,
+        publicClient.readContract({
+          address: IAERO,
+          abi: ABIS.iAERO,
+          functionName: 'totalSupply',
+        }) as Promise<bigint>,
+        publicClient.readContract({
+          address: LIQ,
+          abi: ABIS.LIQ,
+          functionName: 'totalSupply',
+        }) as Promise<bigint>,
+      ]);
 
-      // Total iAERO staked (ok if undefined on some networks)
-      let totalStakedFormatted = '0';
+      const totalAeroLocked = (vaultStatus as any)?.[0] ?? 0n;
+
+      // 2) Treasury address (exclude its LIQ from circ)
+      const treasuryAddr = await publicClient.readContract({
+        address: VAULT,
+        abi: VAULT_META_ABI,
+        functionName: 'treasury',
+      }) as `0x${string}`;
+
+      // 3) Vester unvested (streams 0 & 1, 20M total)
+      let unvested: bigint = 0n;
       try {
-        const totalStaked = await contracts.stakingDistributor?.totalStaked();
-        totalStakedFormatted = safeFormatEther(totalStaked);
-      } catch {}
-
-      // iAERO total supply
-      let iAeroSupplyFormatted = '0';
-      try {
-        const iAeroSupply = await contracts.iAERO?.totalSupply();
-        iAeroSupplyFormatted = safeFormatEther(iAeroSupply);
-      } catch {}
-
-      // LIQ circulating calc (best-effort)
-      let liqCirculatingFormatted = '0';
-      try {
-        const liqSupply: bigint = await contracts.LIQ?.totalSupply();
-        const VESTING_TOTAL = ethers.parseEther('20000000');
-        let totalVested: bigint = 0n;
-        try {
-          const vesterAddr = getContractAddress('LIQLinearVester', (state.chainId ?? 8453));
-          const vester = new ethers.Contract(
-            vesterAddr,
-            ['function vested(uint256 streamId, uint256 timestamp) view returns (uint256)'],
-            contracts.provider
-          );
-          const currentBlock = await contracts.provider.getBlock('latest');
-          const ts = currentBlock ? currentBlock.timestamp : Math.floor(Date.now() / 1000);
-          const vested0 = await vester.vested(0, ts);
-          const vested1 = await vester.vested(1, ts);
-          totalVested = vested0 + vested1;
-        } catch {}
-        const unvested = VESTING_TOTAL - totalVested;
-        const circulating = liqSupply - unvested;
-        liqCirculatingFormatted = ethers.formatEther(circulating);
-      } catch {}
-
-      // Emission rate (best-effort)
-      let emissionRateFormatted = '1';
-      try {
-        const emissionRate = await contracts.vault?.getCurrentEmissionRate();
-        emissionRateFormatted = safeFormatEther(emissionRate);
+        const nowTs = BigInt(Math.floor(Date.now() / 1000));
+        const [v0, v1] = await Promise.all([
+          publicClient.readContract({ address: VESTER, abi: VESTER_ABI, functionName: 'vested', args: [0n, nowTs] }) as Promise<bigint>,
+          publicClient.readContract({ address: VESTER, abi: VESTER_ABI, functionName: 'vested', args: [1n, nowTs] }) as Promise<bigint>,
+        ]);
+        const VESTING_TOTAL = 20_000_000n * 10n ** 18n; // 20M LIQ
+        const totalVested   = (v0 ?? 0n) + (v1 ?? 0n);
+        unvested = VESTING_TOTAL > totalVested ? (VESTING_TOTAL - totalVested) : 0n;
       } catch {
-        try {
-          const baseEmissionRate = await contracts.vault?.baseEmissionRate();
-          emissionRateFormatted = safeFormatEther(baseEmissionRate);
-        } catch {}
+        // keep 0n on error
       }
 
-      // TVL via prices
-      const prices = await fetchPricesWithCache();
+      // 4) Treasury LIQ balance
+      let treasuryBal: bigint = 0n;
+      try {
+        treasuryBal = await publicClient.readContract({
+          address: LIQ,
+          abi: ABIS.LIQ,
+          functionName: 'balanceOf',
+          args: [treasuryAddr],
+        }) as bigint;
+      } catch {}
+
+      // 5) Circulating = total - unvested - treasury
+      let liqCirc = (liqTotalSupply as bigint) ?? 0n;
+      if (liqCirc > unvested)     liqCirc -= unvested; else liqCirc = 0n;
+      if (liqCirc > treasuryBal)  liqCirc -= treasuryBal; else liqCirc = 0n;
+
+      // 6) Prices & TVL
+      const prices = await fetchPricesWithCache(); // expects .aeroUsd and .liqUsd if available
       const aeroPrice = prices.aeroUsd || 0;
-      const aeroLockedNum = parseFloat(totalAeroLockedFormatted);
-      const totalValueLocked = aeroLockedNum * aeroPrice;
+      const liqPrice  = prices.liqUsd  || 0; // if missing, market cap falls back to 0
+      const tvl = (Number(totalAeroLocked) / 1e18) * aeroPrice;
 
-      const statsData = {
-        tvl: totalValueLocked.toFixed(0),
-        totalStaked: totalStakedFormatted,
-        aeroLocked: totalAeroLockedFormatted,
-        emissionRate: emissionRateFormatted,
-        iAeroSupply: iAeroSupplyFormatted,
-        liqSupply: liqCirculatingFormatted,
-      };
+      // 7) Market cap = circulating * price
+      const liqMcapNum = (Number(liqCirc) / 1e18) * liqPrice;
 
-      dispatch({ type: 'SET_STATS', payload: statsData });
-
+      setState(prev => ({
+        ...prev,
+        stats: {
+          tvl: Math.round(tvl).toString(),
+          totalStaked: safeFormatEther(totalStaked),
+          aeroLocked:  safeFormatEther(totalAeroLocked),
+          emissionRate:'1', // hook up getCurrentEmissionRate() later if desired
+          iAeroSupply: safeFormatEther(iAeroSupply),
+          liqSupply:   fmt18(liqCirc),                      // circulating supply
+          liqMarketCap: Math.round(liqMcapNum).toString(),  // USD mcap
+        },
+      }));
     } catch (error: any) {
       console.error('Failed to load stats:', error);
-      dispatch({
-        type: 'SET_STATS',
-        payload: {
-          tvl: '0',
-          totalStaked: '0',
-          aeroLocked: '0',
-          emissionRate: '1',
-          iAeroSupply: '0',
-          liqSupply: '0',
-        }
-      });
-      dispatch({ type: 'SET_ERROR', payload: 'Failed to load protocol stats' });
     } finally {
-      dispatch({ type: 'SET_LOADING', payload: { stats: false } });
+      setState(prev => ({ ...prev, loading: { ...prev.loading, stats: false } }));
     }
-  }, [getContracts, state.chainId]);
+  }, [chainId, publicClient]);
 
-  // --- NEW: initialize chain info on first paint (read-only) ---
-  useEffect(() => {
-    (async () => {
-      try {
-        const info = await getNetworkInfo(); // should work with public provider
-        dispatch({
-          type: 'SET_CONNECTION',
-          payload: {
-            connected: false,
-            account: null,
-            chainId: info?.chainId ?? 8453,
-            networkSupported: info?.supported ?? true
-          }
-        });
-      } catch {
-        // fallback to Base mainnet
-        dispatch({
-          type: 'SET_CONNECTION',
-          payload: {
-            connected: false,
-            account: null,
-            chainId: 8453,
-            networkSupported: true
-          }
-        });
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  /* ========================= Pending Rewards (no-op placeholder) ========================= */
+
+  const loadPendingRewards = useCallback(async () => {
+    // Kept for backwards compatibility; your dedicated components fetch rewards now.
+    return;
   }, []);
 
-  // Always load protocol stats (read-only) on mount + interval
-  useEffect(() => {
-    loadStats(); // first paint
-    const statsInterval = setInterval(loadStats, 300000); // every 5 minutes
-    return () => clearInterval(statsInterval);
-  }, [loadStats]);
+  /* ========================= Tx loading flag ========================= */
 
-  // User-specific auto-refresh when connected
+  const setTransactionLoading = useCallback((id: string, loading: boolean) => {
+    setState(prev => ({
+      ...prev,
+      loading: {
+        ...prev.loading,
+        transactions: {
+          ...prev.loading.transactions,
+          [id]: loading,
+        },
+      },
+    }));
+  }, []);
+
+  /* ========================= Auto-refresh ========================= */
+
   useEffect(() => {
-    if (state.connected && state.networkSupported) {
+    if (isConnected && networkSupported) {
       loadBalances();
       loadAllowances();
       loadPendingRewards();
-
-      const balanceInterval = setInterval(() => {
-        loadBalances();
-        loadAllowances();
-        loadPendingRewards();
-      }, 120000); // every 2 minutes
-
-      return () => clearInterval(balanceInterval);
     }
-  }, [state.connected, state.networkSupported, loadBalances, loadAllowances, loadPendingRewards]);
+  }, [isConnected, networkSupported, loadBalances, loadAllowances, loadPendingRewards]);
 
-  // Check existing wallet session on mount (optional convenience)
   useEffect(() => {
-    const checkConnection = async () => {
-      if (typeof window !== 'undefined' && window.ethereum) {
-        try {
-          const accounts = await window.ethereum.request({ method: 'eth_accounts' });
-          if (accounts.length > 0) {
-            const networkInfo = await getNetworkInfo();
-            dispatch({
-              type: 'SET_CONNECTION',
-              payload: {
-                connected: true,
-                account: accounts[0],
-                chainId: networkInfo.chainId,
-                networkSupported: networkInfo.supported
-              }
-            });
-          }
-        } catch (error: any) {
-          console.error('Failed to check existing connection:', error);
-        }
-      }
-    };
-    checkConnection();
-  }, []);
+    loadStats();
+    const interval = setInterval(loadStats, 300000); // 5 minutes
+    return () => clearInterval(interval);
+  }, [loadStats]);
 
-  const value = {
+  const value: ProtocolContextValue = {
     ...state,
-    connectWallet,
-    disconnectWallet,
     loadBalances,
     loadAllowances,
     loadPendingRewards,
     loadStats,
-    getContracts,
-    dispatch
+    setTransactionLoading,
   };
 
   return (
@@ -672,7 +377,6 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-// Custom hook
 export const useProtocol = () => {
   const context = useContext(ProtocolContext);
   if (!context) {

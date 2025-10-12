@@ -1,7 +1,6 @@
 // src/components/protocol/LockSection.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ethers } from "ethers";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,7 +9,6 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Lock, AlertTriangle, Loader2, CheckCircle, History } from "lucide-react";
-
 import { useProtocol } from "../contexts/ProtocolContext";
 import { useVault } from "../contracts/hooks/useVault";
 import {
@@ -21,7 +19,11 @@ import {
   useDebounce,
   validateTokenAmount,
 } from "../lib/defi-utils";
-import { switchToBaseSepolia, getProvider } from "../lib/ethereum";
+import { useSwitchChain } from 'wagmi';
+import { baseSepolia } from 'wagmi/chains';
+import { usePublicClient } from 'wagmi';
+import { getContractAddress } from '@/components/contracts/addresses';
+import { ABIS } from '@/components/contracts/abis';
 
 interface LockSectionProps {
   showToast: (message: string, type: "success" | "error" | "info" | "warning") => void;
@@ -37,8 +39,8 @@ interface TxHistory {
 
 // Constants
 const WEEK = 7 * 24 * 60 * 60;
-const MIN_LOCK_AMOUNT = ethers.parseUnits("0.01", 18);
-const MAX_DUST = ethers.parseUnits("0.001", 18);
+const MIN_LOCK_AMOUNT = BigInt(10000000000000000); // 0.01 in wei
+const MAX_DUST = BigInt(1000000000000000);
 
 // Helpers
 const msgFromError = (e: any, fallback = "Transaction failed") => {
@@ -81,8 +83,8 @@ const calculateVeNFTRewards = (nft: any) => {
 };    
 
 export default function LockSection({ showToast, formatNumber }: LockSectionProps) {
-  const { connected, networkSupported, balances, allowances, loading, chainId, account, getContracts } = useProtocol();
-
+  const { connected, networkSupported, balances, allowances, loading, chainId, account } = useProtocol();
+  const { switchChain } = useSwitchChain();
   const {
     depositAero,
     calculateLiqRewards,
@@ -93,7 +95,7 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
     depositVeNFT,
     loading: vaultLoading,
   } = useVault();
-
+  const publicClient = usePublicClient();
   // Tabs: deposit iAERO + LIQ, deposit existing veNFT, add to existing veNFT
   const [lockType, setLockType] = useState<"deposit" | "depositNFT">("deposit");
 
@@ -147,18 +149,36 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
   const allowanceLoading = Boolean((loading as any)?.allowances ?? (loading as any)?.balances ?? false);
 
   const verifyVaultReceived = async (type: 'AERO' | 'veNFT', tokenId?: number) => {
+    if (!publicClient || !chainId) return false;
+    
     try {
-      const contracts = await getContracts();
-      const vaultAddress = await contracts.vault.getAddress();  // Add this line
+      const vaultAddress = getContractAddress('PermalockVault', chainId);
       
       if (type === 'AERO') {
-        const vaultAeroBalance = await contracts.AERO.balanceOf(vaultAddress);  // Use vaultAddress
+        const aeroAddress = getContractAddress('AERO', chainId);
+        const vaultAeroBalance = await publicClient.readContract({
+          address: aeroAddress,
+          abi: ABIS.AERO,
+          functionName: 'balanceOf',
+          args: [vaultAddress],
+        }) as bigint;
+        
         console.log('Vault AERO balance:', formatBigNumber(vaultAeroBalance));
         return vaultAeroBalance > 0n;
       } else if (type === 'veNFT' && tokenId) {
-        const owner = await contracts.VeAEROResolved.ownerOf(tokenId);
+        const veAddress = getContractAddress('VeAERO', chainId) || getContractAddress('MockVeAERO', chainId);
+        if (!veAddress) return false;
+        
+        const owner = await publicClient.readContract({
+          address: veAddress,
+          abi: ABIS.VeAERO,
+          functionName: 'ownerOf',
+          args: [BigInt(tokenId)],
+        }) as string;
+        
         console.log(`veNFT #${tokenId} owner:`, owner);
-        const isVaultOwner = owner.toLowerCase() === vaultAddress.toLowerCase();  // Use vaultAddress
+        const isVaultOwner = owner.toLowerCase() === vaultAddress.toLowerCase();
+        
         if (isVaultOwner) {
           showToast(`✅ Verified: Vault received veNFT #${tokenId}`, 'success');
         } else {
@@ -284,30 +304,31 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
 
   // MAX buttons
   const handleMaxDeposit = () => { 
-    const buffer = ethers.parseUnits("0.001", 18);
+    const buffer = BigInt(1000000000000000); // 0.001 in wei
     const max = aeroBN > buffer ? aeroBN - buffer : 0n; 
-    setDepositAmount(ethers.formatUnits(max, 18)); 
+    setDepositAmount((Number(max) / 1e18).toString()); 
   };
   
   const handleMaxAdd = () => { 
-    const buffer = ethers.parseUnits("0.001", 18);
+    const buffer = BigInt(1000000000000000); // 0.001 in wei
     const max = aeroBN > buffer ? aeroBN - buffer : 0n; 
-    setAddAmount(ethers.formatUnits(max, 18)); 
+    setAddAmount((Number(max) / 1e18).toString()); 
   };
 
   // Gas check
   const estimateGasForAction = async (action: "deposit" | "depositNFT") => {
     try {
-      const provider = getProvider();
-      const fee = await provider.getFeeData();
-      const gasPrice = fee.maxFeePerGas ?? fee.gasPrice ?? ethers.parseUnits("1", "gwei");
+      if (!publicClient) return true;
+      
+      // Viem uses different method for gas price
+      const gasPrice = await publicClient.getGasPrice();
       const gasLimit = action === "depositNFT" ? 300000n : 150000n;
       const gasCost = gasPrice * gasLimit;
-
+  
       let ethBalanceBN = parseInputToBigNumber(balances?.ethBalance || "0", 18);
       if (!balances?.ethBalance && account) {
         try {
-          const onchainBal = await provider.getBalance(account);
+          const onchainBal = await publicClient.getBalance({ address: account as `0x${string}` });
           ethBalanceBN = onchainBal;
         } catch {}
       }
@@ -364,20 +385,6 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
       setIsProcessing(false); 
       setProgressStep("");
     }
-  };
-
-  const getVaultWithDeposit = async (c: any) => {
-    const vaultAny = c.vault as any;
-    const addr = await c.vault.getAddress();
-    const runner = vaultAny?.runner ?? (c.VeAEROResolved as any)?.runner; // signer/provider
-    // if the generated ABI already has the function, just use it
-    if (typeof vaultAny?.depositVeNFT === "function") return vaultAny;
-    // otherwise build a minimal ethers.Contract that has the method
-    return new ethers.Contract(
-      addr,
-      ["function depositVeNFT(uint256 tokenId) external"],
-      runner
-    );
   };
 
   const handleDepositVeNFT = async () => {
@@ -676,7 +683,7 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
               <Button
                 onClick={async () => { 
                   try { 
-                    await switchToBaseSepolia(); 
+                    switchChain({ chainId: baseSepolia.id });
                   } catch (e) { 
                     console.error(e); 
                     showToast("Network switch failed", "error"); 
@@ -734,7 +741,7 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
                   <div className="flex items-center space-x-3">
                     <span className="text-white font-medium">{tx.amount} {tx.type === "depositNFT" ? "" : "AERO"}</span>
                     {tx.txHash && (
-                      <a href={`${txBaseUrl(chainId)}${tx.txHash}`} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">↗</a>
+                      <a href={`${txBaseUrl(chainId || 8453)}${tx.txHash}`} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">↗</a>
                     )}
                   </div>
                 </div>

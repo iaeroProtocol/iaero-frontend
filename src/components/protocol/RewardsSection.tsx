@@ -3,8 +3,7 @@
 // ==============================================
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ethers } from "ethers";
-
+import { usePublicClient } from 'wagmi';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -29,7 +28,6 @@ import {
   formatBigNumber,
   calculateYield,
 } from "../lib/defi-utils";
-import { getProvider } from "../lib/ethereum";
 import { usePrices } from "@/components/contexts/PriceContext";
 
 interface RewardsSectionProps {
@@ -88,7 +86,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     loading,
     loadPendingRewards,
   } = useProtocol();
-
+  const publicClient = usePublicClient();
   const {
     claimAllRewards,
     claimReward,
@@ -199,10 +197,8 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
   const estimateGasCost = useCallback(async (action: "single" | "all") => {
     try {
-      const provider = getProvider();
-      const fee = await provider.getFeeData();
-      const gasPrice =
-        fee.maxFeePerGas ?? fee.gasPrice ?? ethers.parseUnits("1", "gwei");
+      if (!publicClient) return "0.001";
+      const gasPrice = await publicClient.getGasPrice();
       const gasLimit =
         action === "all" ? GAS_ESTIMATES.claimAll : GAS_ESTIMATES.claimSingle;
       const gasCost = gasPrice * gasLimit;
@@ -210,7 +206,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     } catch {
       return "0.001";
     }
-  }, []);
+  }, [publicClient]);
 
   useEffect(() => {
     if (connected && networkSupported) {
@@ -220,7 +216,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
   // Load canonical pending rewards (with loading flag)
   useEffect(() => {
-    if (!connected || !networkSupported) return;
+    if (!connected || !networkSupported || !account) return; // ✅ Add !account check
     (async () => {
       setRewardsLoading(true);
       try {
@@ -237,7 +233,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
   const aeroAddr = useMemo(() => {
     try {
-      return (getContractAddress("AERO", chainId) || "").toLowerCase();
+      return (getContractAddress("AERO", chainId || 8453) || "").toLowerCase();
     } catch {
       return "";
     }
@@ -245,7 +241,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
   const liqAddr = useMemo(() => {
     try {
-      return (getContractAddress("LIQ", chainId) || "").toLowerCase();
+      return (getContractAddress("LIQ", chainId || 8453) || "").toLowerCase();
     } catch {
       return "";
     }
@@ -327,6 +323,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     ]);
 
   const handleRefresh = async () => {
+    if (!account) return; // ✅ Add early return if no account
     setIsRefreshing(true);
     try {
       await loadPendingRewards?.();
@@ -342,10 +339,8 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
   const checkGasBalance = async (): Promise<boolean> => {
     try {
-      const provider = getProvider();
-      const fee = await provider.getFeeData();
-      const gasPrice =
-        fee.maxFeePerGas ?? fee.gasPrice ?? ethers.parseUnits("1", "gwei");
+      if (!publicClient) return true;
+      const gasPrice = await publicClient.getGasPrice();
       const gasLimit = GAS_ESTIMATES.claimAll;
       const gasCost = gasPrice * gasLimit;
       const ethBal = parseInputToBigNumber(balances.ethBalance || "0");
