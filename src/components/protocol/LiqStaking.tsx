@@ -18,6 +18,12 @@ import { formatUnits } from 'viem';
 const ZERO = "0x0000000000000000000000000000000000000000";
 const DEFAULT_WETH_BASE = "0x4200000000000000000000000000000000000006";
 
+// Safely coerce viem `unknown` returns into bigint without throwing on {}
+const toBigintSafe = (x: unknown): bigint => {
+  if (typeof x === 'bigint') return x;
+  if (typeof x === 'number' || typeof x === 'string' || typeof x === 'boolean') return BigInt(x as any);
+  try { return BigInt(x as any); } catch { return 0n; }
+};
 
 async function fetchPricesForAddrs(addrs: string[], chainId = 8453): Promise<Record<string, number>> {
   const unique = Array.from(new Set(addrs.map((a) => a.toLowerCase()).filter(Boolean)));
@@ -247,8 +253,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
           functionName: 'balanceOf',
           args: [address],
         });
-        const userStaked =
-          typeof userStakedRaw === 'bigint' ? userStakedRaw : BigInt(userStakedRaw ?? 0);
+        const userStaked = toBigintSafe(userStakedRaw);
         console.log('User Staked Balance (raw):', userStaked);
         console.log('User Staked Balance (formatted):', safeFormatEther(userStaked));
 
@@ -264,7 +269,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         const USDC_ADDR = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
         const CBBTC_ADDR = '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf';
         
-        const [usdcAcc, cbbtcAcc, usdcDebt, cbbtcDebt] = await Promise.all([
+        const [usdcAccRaw, cbbtcAccRaw, usdcDebtRaw, cbbtcDebtRaw] = await Promise.all([
           publicClient.readContract({
             address: liqStakingAddr,
             abi: ABIS.LIQStakingDistributor,
@@ -290,13 +295,18 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
             args: [address, CBBTC_ADDR],
           }),
         ]);
+        const usdcAcc   = toBigintSafe(usdcAccRaw);
+        const cbbtcAcc  = toBigintSafe(cbbtcAccRaw);
+        const usdcDebt  = toBigintSafe(usdcDebtRaw);
+        const cbbtcDebt = toBigintSafe(cbbtcDebtRaw);
 
-        const queuedUSDC = await publicClient.readContract({
+        const queuedUSDCRaw = await publicClient.readContract({
           address: liqStakingAddr,
           abi: ABIS.LIQStakingDistributor,
           functionName: 'queuedRewards',
-          args: ['0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'],
+          args: [USDC_ADDR],
         });
+        const queuedUSDC = toBigintSafe(queuedUSDCRaw);
         console.log('🔍 QUEUED USDC:', queuedUSDC, '=', Number(queuedUSDC) / 1e6, 'USDC');
 
         console.log('USDC accRewardPerShare:', usdcAcc);
@@ -308,13 +318,8 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         console.log('cbBTC pending calc:', userStaked, '*', '(', cbbtcAcc, '-', cbbtcDebt, ') /', '1e18');
 
         if (userStaked > 0n) {
-          const _usdcAcc  = typeof usdcAcc  === 'bigint' ? usdcAcc  : BigInt(usdcAcc  ?? 0);
-          const _usdcDebt = typeof usdcDebt === 'bigint' ? usdcDebt : BigInt(usdcDebt ?? 0);
-          const _cbbtcAcc  = typeof cbbtcAcc  === 'bigint' ? cbbtcAcc  : BigInt(cbbtcAcc  ?? 0);
-          const _cbbtcDebt = typeof cbbtcDebt === 'bigint' ? cbbtcDebt : BigInt(cbbtcDebt ?? 0);
-
-          const usdcPending  = userStaked * (_usdcAcc  - _usdcDebt)  / 1000000000000000000n;
-          const cbbtcPending = userStaked * (_cbbtcAcc - _cbbtcDebt) / 1000000000000000000n;
+          const usdcPending  = userStaked * (usdcAcc  - usdcDebt)  / 1000000000000000000n;
+          const cbbtcPending = userStaked * (cbbtcAcc - cbbtcDebt) / 1000000000000000000n;
           console.log('USDC pending (manual calc):', usdcPending, '=', Number(usdcPending) / 1e6, 'USDC');
           console.log('cbBTC pending (manual calc):', cbbtcPending, '=', Number(cbbtcPending) / 1e8, 'cbBTC');
         }
