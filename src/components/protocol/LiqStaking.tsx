@@ -325,18 +325,19 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         }
 
         // ✅ Now get pending rewards from contract
+        // Result is a tuple: (tokens[], amounts[])
+        type PendingRewardsResult = readonly [`0x${string}`[], readonly bigint[]];
         const result = await publicClient.readContract({
           address: liqStakingAddr,
           abi: ABIS.LIQStakingDistributor,
           functionName: 'getPendingRewards',
           args: [address],
-        });
-
-        console.log('getPendingRewards raw result:', result);
-        console.log('Result type:', typeof result);
-
-        const tokens: string[] = Array.isArray(result?.[0]) ? result[0] : [];
-        const amounts: bigint[] = Array.isArray(result?.[1]) ? result[1] : [];
+        }) as unknown as PendingRewardsResult;
+        
+                console.log('getPendingRewards raw result:', result);
+                const [tokensRaw, amountsRaw] = Array.isArray(result) ? result : [[], []] as PendingRewardsResult;
+                const tokens: string[] = Array.from(tokensRaw ?? []);
+                const amounts: bigint[] = Array.from(amountsRaw ?? []);
 
         console.log('Tokens count:', tokens.length);
         console.log('Amounts count:', amounts.length);
