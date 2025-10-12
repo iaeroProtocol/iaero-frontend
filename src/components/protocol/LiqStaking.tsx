@@ -306,9 +306,12 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         console.log('cbBTC pending calc:', userStaked, '*', '(', cbbtcAcc, '-', cbbtcDebt, ') /', '1e18');
 
         // Manual calculation to verify
+        const userStakedRaw = await publicClient.readContract({ /* ... */ });
+        const userStaked = BigInt(userStakedRaw as any); // or: const userStaked = userStakedRaw as bigint;
+
         if (userStaked > 0n) {
-          const usdcPending = (userStaked as bigint) * ((usdcAcc as bigint) - (usdcDebt as bigint)) / BigInt(1e18);
-          const cbbtcPending = (userStaked as bigint) * ((cbbtcAcc as bigint) - (cbbtcDebt as bigint)) / BigInt(1e18);
+          const usdcPending  = userStaked * ((usdcAcc as bigint)  - (usdcDebt as bigint))  / 1000000000000000000n;
+          const cbbtcPending = userStaked * ((cbbtcAcc as bigint) - (cbbtcDebt as bigint)) / 1000000000000000000n;
           console.log('USDC pending (manual calc):', usdcPending, '=', Number(usdcPending) / 1e6, 'USDC');
           console.log('cbBTC pending (manual calc):', cbbtcPending, '=', Number(cbbtcPending) / 1e8, 'cbBTC');
         }
