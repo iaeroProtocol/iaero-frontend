@@ -1,4 +1,5 @@
 // src/contracts/abis.ts
+
 import type { Abi } from 'viem';
 
 import VaultArtifact from "./abi-json/PermalockVault.sol/PermalockVault.json";
@@ -15,7 +16,9 @@ import PoolFactoryArtifact from "./abi-json/PoolFactory.sol/PoolFactory.json";
 import StiAEROArtifact from "./abi-json/StiAERO.sol/StiAERO.json";
 import EpochStakingDistributorArtifact from "./abi-json/EpochStakingDistributor.sol/EpochStakingDistributor.json";
 
-// -------- Minimal ERC20 --------
+// ============================================================================
+// Minimal ERC20 ABI (approve/allowance/balanceOf/decimals/symbol/name/transfer)
+// ============================================================================
 export const ERC20_ABI = [
   { "inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}], "name":"approve", "outputs":[{"type":"bool"}], "stateMutability":"nonpayable", "type":"function" },
   { "inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}], "name":"allowance", "outputs":[{"type":"uint256"}], "stateMutability":"view", "type":"function" },
@@ -27,25 +30,31 @@ export const ERC20_ABI = [
   { "inputs":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"amount","type":"uint256"}], "name":"transferFrom", "outputs":[{"type":"bool"}], "stateMutability":"nonpayable", "type":"function" }
 ] as const;
 
-// -------- Typed ABI constants (compile-time only; no runtime change) --------
-export const PermalockVault          = VaultArtifact.abi as const satisfies Abi;
-export const LIQStakingDistributor   = LIQDistributorArtifact.abi as const satisfies Abi;
-export const RewardsHarvester        = HarvesterArtifact.abi as const satisfies Abi;
-export const VotingManager           = VotingManagerArtifact.abi as const satisfies Abi;
-export const iAERO                   = IAEROArtifact.abi as const satisfies Abi;
-export const LIQ                     = LIQArtifact.abi as const satisfies Abi;
-export const VeAERO                  = (VeAEROArtifact as any).abi
-  ? ((VeAEROArtifact as any).abi as const satisfies Abi)
-  : (VeAEROArtifact as unknown as Abi);
-export const VOTER                   = VOTERArtifact.abi as const satisfies Abi;
-export const Router                  = RouterArtifact.abi as const satisfies Abi;
-export const TreasuryDistributor     = TreasuryDistributorArtifact.abi as const satisfies Abi;
-export const PoolFactory             = PoolFactoryArtifact.abi as const satisfies Abi;
-export const stiAERO                 = StiAEROArtifact.abi as const satisfies Abi;
-export const EpochStakingDistributor = EpochStakingDistributorArtifact.abi as const satisfies Abi;
+// ============================================================================
+// Typed ABI constants (compile-time only; no runtime change)
+// ============================================================================
+export const PermalockVault          = VaultArtifact.abi as Abi;
+export const LIQStakingDistributor   = LIQDistributorArtifact.abi as Abi;
+export const RewardsHarvester        = HarvesterArtifact.abi as Abi;
+export const VotingManager           = VotingManagerArtifact.abi as Abi;
+export const iAERO                   = IAEROArtifact.abi as Abi;
+export const LIQ                     = LIQArtifact.abi as Abi;
 
-// -------- Public map used across the app --------
-// IMPORTANT: Keys must match names used in getContractAddress(...)
+export const VeAERO = (VeAEROArtifact as any).abi
+  ? ((VeAEROArtifact as any).abi as Abi)
+  : (VeAEROArtifact as unknown as Abi);
+
+export const VOTER                   = VOTERArtifact.abi as Abi;
+export const Router                  = RouterArtifact.abi as Abi;
+export const TreasuryDistributor     = TreasuryDistributorArtifact.abi as Abi;
+export const PoolFactory             = PoolFactoryArtifact.abi as Abi;
+export const stiAERO                 = StiAEROArtifact.abi as Abi;
+export const EpochStakingDistributor = EpochStakingDistributorArtifact.abi as Abi;
+
+// ============================================================================
+// ABIS map used across the app
+// IMPORTANT: Keys must match the names in getContractAddress(...)
+// ============================================================================
 export const ABIS = {
   // Core protocol
   PermalockVault,
@@ -75,7 +84,7 @@ export const ABIS = {
   // Generic
   ERC20: ERC20_ABI,
 
-  // App-specific helper ABI (ok to leave as-is)
+  // App-specific helper ABI
   RewardsSugar: [
     {
       "inputs": [
