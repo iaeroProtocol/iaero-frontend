@@ -241,14 +241,16 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         }
 
         // ✅ First check if user actually has staked balance
-        const userStaked = await publicClient.readContract({
+        const userStakedRaw = await publicClient.readContract({
           address: liqStakingAddr,
           abi: ABIS.LIQStakingDistributor,
           functionName: 'balanceOf',
           args: [address],
         });
+        const userStaked =
+          typeof userStakedRaw === 'bigint' ? userStakedRaw : BigInt(userStakedRaw ?? 0);
         console.log('User Staked Balance (raw):', userStaked);
-        console.log('User Staked Balance (formatted):', safeFormatEther(userStaked as bigint));
+        console.log('User Staked Balance (formatted):', safeFormatEther(userStaked));
 
         // ✅ Check total staked
         const totalStaked = await publicClient.readContract({
@@ -305,13 +307,14 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         console.log('cbBTC rewardDebt:', cbbtcDebt);
         console.log('cbBTC pending calc:', userStaked, '*', '(', cbbtcAcc, '-', cbbtcDebt, ') /', '1e18');
 
-        // Manual calculation to verify
-        const userStakedRaw = await publicClient.readContract({ /* ... */ });
-        const userStaked = BigInt(userStakedRaw as any); // or: const userStaked = userStakedRaw as bigint;
-
         if (userStaked > 0n) {
-          const usdcPending  = userStaked * ((usdcAcc as bigint)  - (usdcDebt as bigint))  / 1000000000000000000n;
-          const cbbtcPending = userStaked * ((cbbtcAcc as bigint) - (cbbtcDebt as bigint)) / 1000000000000000000n;
+          const _usdcAcc  = typeof usdcAcc  === 'bigint' ? usdcAcc  : BigInt(usdcAcc  ?? 0);
+          const _usdcDebt = typeof usdcDebt === 'bigint' ? usdcDebt : BigInt(usdcDebt ?? 0);
+          const _cbbtcAcc  = typeof cbbtcAcc  === 'bigint' ? cbbtcAcc  : BigInt(cbbtcAcc  ?? 0);
+          const _cbbtcDebt = typeof cbbtcDebt === 'bigint' ? cbbtcDebt : BigInt(cbbtcDebt ?? 0);
+
+          const usdcPending  = userStaked * (_usdcAcc  - _usdcDebt)  / 1000000000000000000n;
+          const cbbtcPending = userStaked * (_cbbtcAcc - _cbbtcDebt) / 1000000000000000000n;
           console.log('USDC pending (manual calc):', usdcPending, '=', Number(usdcPending) / 1e6, 'USDC');
           console.log('cbBTC pending (manual calc):', cbbtcPending, '=', Number(cbbtcPending) / 1e8, 'cbBTC');
         }

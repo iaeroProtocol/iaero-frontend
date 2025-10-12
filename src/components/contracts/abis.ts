@@ -1,7 +1,7 @@
 // src/contracts/abis.ts
+import type { Abi } from 'viem';
 
 import VaultArtifact from "./abi-json/PermalockVault.sol/PermalockVault.json";
-import DistributorArtifact from "./abi-json/StakingDistributor.sol/StakingDistributor.json";
 import LIQDistributorArtifact from "./abi-json/LIQStakingDistributor.sol/LIQStakingDistributor.json";
 import HarvesterArtifact from "./abi-json/RewardsHarvester.sol/RewardsHarvester.json";
 import VotingManagerArtifact from "./abi-json/VotingManager.sol/VotingManager.json";
@@ -15,7 +15,7 @@ import PoolFactoryArtifact from "./abi-json/PoolFactory.sol/PoolFactory.json";
 import StiAEROArtifact from "./abi-json/StiAERO.sol/StiAERO.json";
 import EpochStakingDistributorArtifact from "./abi-json/EpochStakingDistributor.sol/EpochStakingDistributor.json";
 
-// Minimal ERC20 ABI (approve/allowance/balanceOf/decimals/symbol/name/transfer/transferFrom)
+// -------- Minimal ERC20 --------
 export const ERC20_ABI = [
   { "inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}], "name":"approve", "outputs":[{"type":"bool"}], "stateMutability":"nonpayable", "type":"function" },
   { "inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}], "name":"allowance", "outputs":[{"type":"uint256"}], "stateMutability":"view", "type":"function" },
@@ -27,36 +27,55 @@ export const ERC20_ABI = [
   { "inputs":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"amount","type":"uint256"}], "name":"transferFrom", "outputs":[{"type":"bool"}], "stateMutability":"nonpayable", "type":"function" }
 ] as const;
 
-// IMPORTANT: Keys here should EXACTLY match the names you use in getContractAddress(...) / ContractName
+// -------- Typed ABI constants (compile-time only; no runtime change) --------
+export const PermalockVault          = VaultArtifact.abi as const satisfies Abi;
+export const LIQStakingDistributor   = LIQDistributorArtifact.abi as const satisfies Abi;
+export const RewardsHarvester        = HarvesterArtifact.abi as const satisfies Abi;
+export const VotingManager           = VotingManagerArtifact.abi as const satisfies Abi;
+export const iAERO                   = IAEROArtifact.abi as const satisfies Abi;
+export const LIQ                     = LIQArtifact.abi as const satisfies Abi;
+export const VeAERO                  = (VeAEROArtifact as any).abi
+  ? ((VeAEROArtifact as any).abi as const satisfies Abi)
+  : (VeAEROArtifact as unknown as Abi);
+export const VOTER                   = VOTERArtifact.abi as const satisfies Abi;
+export const Router                  = RouterArtifact.abi as const satisfies Abi;
+export const TreasuryDistributor     = TreasuryDistributorArtifact.abi as const satisfies Abi;
+export const PoolFactory             = PoolFactoryArtifact.abi as const satisfies Abi;
+export const stiAERO                 = StiAEROArtifact.abi as const satisfies Abi;
+export const EpochStakingDistributor = EpochStakingDistributorArtifact.abi as const satisfies Abi;
+
+// -------- Public map used across the app --------
+// IMPORTANT: Keys must match names used in getContractAddress(...)
 export const ABIS = {
   // Core protocol
-  PermalockVault: VaultArtifact.abi,
-  StakingDistributor: EpochStakingDistributorArtifact.abi,
-  LIQStakingDistributor: LIQDistributorArtifact.abi,
-  RewardsHarvester: HarvesterArtifact.abi,
-  VotingManager: VotingManagerArtifact.abi,
+  PermalockVault,
+  StakingDistributor: EpochStakingDistributor, // alias
+  LIQStakingDistributor,
+  RewardsHarvester,
+  VotingManager,
 
   // New Epoch-based contracts
-  EpochStakingDistributor: EpochStakingDistributorArtifact.abi,
-  stiAERO: StiAEROArtifact.abi,
+  EpochStakingDistributor,
+  stiAERO,
 
   // Tokens
-  iAERO: IAEROArtifact.abi,
-  LIQ: LIQArtifact.abi,
-  AERO: ERC20_ABI, // safer generic ERC20 (use a specific artifact only if you rely on custom funcs)
+  iAERO,
+  LIQ,
+  AERO: ERC20_ABI, // generic ERC20
 
   // ve/Voter/DEX infra
-  VeAERO: (VeAEROArtifact as any).abi ?? VeAEROArtifact,  // supports either {abi:[...]} or raw array
-  MockVeAERO: VeAEROArtifact.abi,
-  VOTER: VOTERArtifact.abi,
-  MockVoter: VOTERArtifact.abi,
-  Router: RouterArtifact.abi,
-  PoolFactory: PoolFactoryArtifact.abi,
-  TreasuryDistributor: TreasuryDistributorArtifact.abi,
+  VeAERO,
+  MockVeAERO: VeAERO,
+  VOTER,
+  MockVoter: VOTER,
+  Router,
+  PoolFactory,
+  TreasuryDistributor,
 
   // Generic
   ERC20: ERC20_ABI,
 
+  // App-specific helper ABI (ok to leave as-is)
   RewardsSugar: [
     {
       "inputs": [
