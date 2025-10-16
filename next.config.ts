@@ -1,19 +1,28 @@
-import type { NextConfig } from "next";
+import type { NextConfig } from 'next'
+import path from 'path'
 
 const nextConfig: NextConfig = {
-  output: 'export',
-  images: {
-    unoptimized: true, // Required for static export
-  },
-  env: {
-    NEXT_PUBLIC_ALCHEMY_KEY: process.env.NEXT_PUBLIC_ALCHEMY_KEY,
-    NEXT_PUBLIC_COINGECKO_API_KEY: process.env.NEXT_PUBLIC_COINGECKO_API_KEY,
-  },
-  // Disable webpack cache to avoid large files
+  images: { unoptimized: true },
   webpack: (config) => {
-    config.cache = false;
-    return config;
-  },
-};
+    config.resolve = config.resolve || {}
 
-export default nextConfig;
+    // prevent server-only modules from leaking into client
+    config.resolve.fallback = {
+      ...(config.resolve.fallback || {}),
+      fs: false,
+      path: false,
+      crypto: false,
+    }
+
+    // stub out Node-only optional deps from wallet stacks
+    config.resolve.alias = {
+      ...(config.resolve.alias || {}),
+      '@react-native-async-storage/async-storage': false,
+      'pino-pretty': false,
+    }
+
+    return config
+  },
+}
+
+export default nextConfig

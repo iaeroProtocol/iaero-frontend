@@ -130,6 +130,13 @@ export default function IaeroProtocolApp() {
                >
                  <XIcon className="w-5 h-5" />
                </a>
+               <a 
+                 href="/status"
+                 className="text-slate-300 hover:text-white transition-colors text-sm lg:text-base flex items-center gap-2"
+               >
+                 <TrendingUp className="w-4 h-4" />
+                 <span>Points</span>
+               </a>
              </nav>
            </div>
            
