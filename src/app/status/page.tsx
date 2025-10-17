@@ -10,11 +10,12 @@ type Health = {
   ok: boolean;
   name: string;
   chainId: number | null;
-  checkpoint: string;      // bigint as string
-  head: string | null;     // bigint as string
+  checkpoint: string | number | null; 
+  head: string | number | null;      
   lag: number | null;
   targets: string[];
 };
+
 
 type Meta = {
   wallets: number;
@@ -31,6 +32,7 @@ type WalletInfo = {
   points: string;
   lastBalance: string | number | bigint;
   lastTimestamp: number;
+  rank?: number | null;
 };
 
 export default function StatusPage() {
@@ -90,22 +92,17 @@ export default function StatusPage() {
 
   // numeric derivations
   const head = useMemo(() => {
-    try {
-      return BigInt(health?.head ?? 0);
-    } catch {
-      return 0n;
-    }
+    try { return BigInt(health?.head != null ? String(health.head) : '0'); }
+    catch { return 0n; }
   }, [health]);
-
+  
   const chk = useMemo(() => {
-    try {
-      return BigInt(health?.checkpoint ?? 0);
-    } catch {
-      return 0n;
-    }
+    try { return BigInt(health?.checkpoint != null ? String(health.checkpoint) : '0'); }
+    catch { return 0n; }
   }, [health]);
-
-  const lag = (health?.lag ?? Number(head - chk)) || 0;
+  
+  const lag = (health?.lag ?? Number(head - chk)) || 0; // keep this
+  
 
 
   const progPct = useMemo(() => {
@@ -251,6 +248,7 @@ export default function StatusPage() {
                   <table className="min-w-full text-left">
                     <thead className="text-slate-400">
                       <tr>
+                        <th className="py-2 pr-4">Rank</th> 
                         <th className="py-2 pr-4">Address</th>
                         <th className="py-2 pr-4">Points</th>
                         <th className="py-2 pr-4">Last Balance (wei)</th>
@@ -259,6 +257,9 @@ export default function StatusPage() {
                     </thead>
                     <tbody className="text-slate-200">
                       <tr className="border-t border-slate-700/40">
+                        <td className="py-2 pr-4">
+                          {result.rank != null ? `#${result.rank}` : '—'}
+                        </td>
                         <td className="py-2 pr-4">
                           <span className="font-mono break-all">{result.address}</span>
                         </td>
