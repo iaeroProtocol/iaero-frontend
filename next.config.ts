@@ -1,8 +1,12 @@
 import type { NextConfig } from 'next'
-import path from 'path'
 
 const nextConfig: NextConfig = {
+  // 👇 This makes `next build` produce a fully static site in /out
+  output: 'export',
+
+  // Images: already fine for export (no Image Optimization server)
   images: { unoptimized: true },
+
   webpack: (config) => {
     config.resolve = config.resolve || {}
 
