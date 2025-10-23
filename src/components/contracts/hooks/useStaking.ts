@@ -5,6 +5,8 @@ import type { Hash } from 'viem';
 import { getContractAddress } from '../addresses';
 import { ABIS } from '../abis';
 import { useProtocol } from '../../contexts/ProtocolContext';
+import { usePrices } from '../../contexts/PriceContext';
+
 
 const DEFAULT_STAKING_APR = Number(process.env.NEXT_PUBLIC_DEFAULT_STAKING_APR ?? '30');
 
@@ -93,7 +95,8 @@ export const useStaking = () => {
   const chainId = useChainId();
   const publicClient = usePublicClient();
   const { loadBalances, loadAllowances, loadPendingRewards, setTransactionLoading } = useProtocol();
-  
+  const { prices } = usePrices();
+
   const [loading, setLoading] = useState(false);
   
   // Wagmi write hook
@@ -107,6 +110,42 @@ export const useStaking = () => {
       return undefined;
     }
   }, [chainId]);
+
+  const E18 = 10n ** 18n;
+  const toE18 = (x: number) => BigInt(Math.round(x * 1e18));
+
+  const REWARDS_JSON_URL =
+    process.env.NEXT_PUBLIC_REWARDS_JSON_URL ||
+    "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/estimated_rewards_usd.json";
+
+  async function fetchStakersWeeklyUSD(): Promise<bigint> {
+    const r = await fetch(REWARDS_JSON_URL, { cache: "no-store" });
+    if (!r.ok) throw new Error(`rewards json ${r.status}`);
+    const j = await r.json();
+    if (j?.stakersWeeklyUSD_1e18) return BigInt(j.stakersWeeklyUSD_1e18);
+    if (j?.estimatedWeeklyUSD_1e18) return (BigInt(j.estimatedWeeklyUSD_1e18) * 8000n) / 10000n; // 0.8x fallback
+    throw new Error("missing stakersWeeklyUSD");
+  }
+
+  // Total protocol weekly USD (1e18), for LIQ APR math.
+  // Prefer estimatedWeeklyUSD_1e18. If missing, derive it from stakersWeeklyUSD_1e18 / 0.8
+  async function fetchEstimatedWeeklyUSD(): Promise<bigint> {
+    const r = await fetch(REWARDS_JSON_URL, { cache: "no-store" });
+    if (!r.ok) throw new Error(`rewards json ${r.status}`);
+    const j = await r.json();
+
+    if (j?.estimatedWeeklyUSD_1e18) {
+      return BigInt(j.estimatedWeeklyUSD_1e18);
+    }
+    if (j?.stakersWeeklyUSD_1e18) {
+      // stakersWeekly = 80% of estimated → estimated = stakersWeekly / 0.8
+      const stakers = BigInt(j.stakersWeeklyUSD_1e18);
+      return (stakers * 10000n) / 8000n;
+    }
+    throw new Error("missing estimatedWeeklyUSD_1e18");
+  }
+
+
 
   // Check approval
   const checkIAeroApproval = useCallback(async (amount: string): Promise<boolean> => {
@@ -500,10 +539,96 @@ export const useStaking = () => {
     }
   }, []);
 
-  // Calculate staking APR
+  // Calculate staking APR (real-time)
   const calculateStakingAPR = useCallback(async (): Promise<StakingAPR> => {
-    return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
-  }, []);
+    try {
+      const stakingAddr = getAddr('EPOCH_DIST') || getAddr('StakingDistributor');
+      if (!stakingAddr || !publicClient) {
+        return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
+      }
+
+      // (1) weekly stakers USD (1e18)
+      const weeklyUSD_1e18 = await fetchStakersWeeklyUSD();
+
+      // (2) total iAERO staked (1e18)
+      const totalStakedRaw = await publicClient.readContract({
+        address: stakingAddr,
+        abi: ABIS.StakingDistributor,
+        functionName: 'totalStaked',
+      }) as bigint;
+
+      if (!totalStakedRaw || totalStakedRaw === 0n) {
+        return { aero: 0, total: 0 };
+      }
+
+      // (3) iAERO price (fallback to AERO)
+      let iaeroUsd = Number(prices?.iAERO?.usd ?? 0);
+      if (!Number.isFinite(iaeroUsd) || iaeroUsd <= 0) {
+        iaeroUsd = Number(prices?.AERO?.usd ?? 0);
+      }
+      if (!Number.isFinite(iaeroUsd) || iaeroUsd <= 0) {
+        // cannot price → UI baseline only
+        return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
+      }
+
+      // (4) APR = (weekly * 52) / (totalStaked * price) * 100
+      const iaeroUsd_1e18 = toE18(iaeroUsd);
+      const annualUSD_1e18 = weeklyUSD_1e18 * 52n;
+      const tvlUSD_1e18 = (totalStakedRaw * iaeroUsd_1e18) / E18;
+
+      if (tvlUSD_1e18 === 0n) {
+        return { aero: 0, total: 0 };
+      }
+
+      const apyRatio_1e18 = (annualUSD_1e18 * E18) / tvlUSD_1e18; // 1e18-scaled ratio
+      const apyPct_1e18 = apyRatio_1e18 * 100n;                   // percentage * 1e18
+      const apyPct = Number(apyPct_1e18) / 1e18;
+
+      return { aero: apyPct, total: apyPct };
+    } catch (e) {
+      console.error('calculateStakingAPR failed:', e);
+      return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
+    }
+  }, [publicClient, getAddr, prices]);
+
+  const calculateLiqStakingAPR = useCallback(async (): Promise<number> => {
+    try {
+      const liqStakingAddr = getAddr('LIQStakingDistributor');
+      if (!liqStakingAddr || !publicClient) return DEFAULT_STAKING_APR;
+  
+      // (1) LIQ gets 8% of the *estimated* total protocol weekly USD
+      const estimatedWeeklyUSD_1e18 = await fetchEstimatedWeeklyUSD();
+      const liqWeeklyUSD_1e18 = (estimatedWeeklyUSD_1e18 * 800n) / 10000n; // 0.08  
+  
+      // (2) Total LIQ staked (1e18)
+      const totalLiqStaked = await publicClient.readContract({
+        address: liqStakingAddr,
+        abi: ABIS.LIQStakingDistributor,
+        functionName: 'totalLIQStaked',
+      }) as bigint;
+      if (!totalLiqStaked || totalLiqStaked === 0n) return 0;
+  
+      // (3) LIQ price (USD)
+      const liqUsd = Number(prices?.LIQ?.usd ?? 0);
+      if (!Number.isFinite(liqUsd) || liqUsd <= 0) return DEFAULT_STAKING_APR;
+  
+      // (4) APR = (0.08 * weekly * 52) / (totalLIQStaked * price) * 100
+      const liqUsd_1e18 = toE18(liqUsd);
+      const annualUSD_1e18 = liqWeeklyUSD_1e18 * 52n;
+      const tvlUSD_1e18 = (totalLiqStaked * liqUsd_1e18) / E18;
+      if (tvlUSD_1e18 === 0n) return 0;
+  
+      const aprRatio_1e18 = (annualUSD_1e18 * E18) / tvlUSD_1e18; // 1e18-scaled ratio
+      const aprPct = (Number(aprRatio_1e18) / 1e18) * 100;        // keep fractional precision
+      return aprPct;
+
+    } catch (e) {
+      console.error('calculateLiqStakingAPR failed:', e);
+      return DEFAULT_STAKING_APR;
+    }
+  }, [publicClient, getAddr, prices]);
+
+
 
   // Get staking stats
   const getStakingStats = useCallback(async (
@@ -681,6 +806,7 @@ export const useStaking = () => {
     checkIAeroApproval,
     approveIAero,
     calculateStakingAPR,
+    calculateLiqStakingAPR,
     getStakingStats,
     getPendingRewards,
     getRewardTokens,
