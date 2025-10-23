@@ -5,16 +5,20 @@ import { TrendingUp, DollarSign, Lock, Coins, Loader2 } from "lucide-react";
 import { usePrices } from '@/components/contexts/PriceContext';
 import { useStaking } from "../contracts/hooks/useStaking"; 
 
-// … (types unchanged)
+type StatsShape = {
+  aeroLocked?: string | number;
+  emissionRate?: string | number;
+  iAeroSupply?: string | number;
+  liqSupply?: string | number;
+};
 
 export default function StatsCards({ stats, formatNumber, loading }: StatsCardsProps) {
   const { prices } = usePrices();
-  const { calculateStakingAPR } = useStaking();            
+  const { calculateStakingAPR } = useStaking();
+  const [apr, setApr] = useState<number | null>(null);
+  const [aprLoading, setAprLoading] = useState(false);
 
-  const [apr, setApr] = useState<number | null>(null);     
-  const [aprLoading, setAprLoading] = useState(false);     
-
-  useEffect(() => {                                        
+  useEffect(() => {
     let alive = true;
     (async () => {
       try {
@@ -23,9 +27,6 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
         if (!alive) return;
         const aeroApr = Number(res?.aero);
         setApr(Number.isFinite(aeroApr) ? aeroApr : null);
-      } catch {
-        if (!alive) return;
-        setApr(null);
       } finally {
         if (!alive) return;
         setAprLoading(false);
