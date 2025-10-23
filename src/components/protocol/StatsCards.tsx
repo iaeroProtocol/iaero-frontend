@@ -3,18 +3,18 @@ import { motion } from "framer-motion";
 import { Card, CardContent } from "@/components/ui/card";
 import { TrendingUp, DollarSign, Lock, Coins, Loader2 } from "lucide-react";
 import { usePrices } from '@/components/contexts/PriceContext';
-import { useStaking } from "../contracts/hooks/useStaking"; // ✅ NEW
+import { useStaking } from "../contracts/hooks/useStaking"; 
 
 // … (types unchanged)
 
 export default function StatsCards({ stats, formatNumber, loading }: StatsCardsProps) {
   const { prices } = usePrices();
-  const { calculateStakingAPR } = useStaking();            // ✅ NEW
+  const { calculateStakingAPR } = useStaking();            
 
-  const [apr, setApr] = useState<number | null>(null);     // ✅ NEW
-  const [aprLoading, setAprLoading] = useState(false);     // ✅ NEW
+  const [apr, setApr] = useState<number | null>(null);     
+  const [aprLoading, setAprLoading] = useState(false);     
 
-  useEffect(() => {                                        // ✅ NEW
+  useEffect(() => {                                        
     let alive = true;
     (async () => {
       try {
