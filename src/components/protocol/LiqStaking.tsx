@@ -14,6 +14,8 @@ import { ABIS } from '@/components/contracts/abis';
 import { parseTokenAmount } from "@/components/lib/ethereum";
 import { usePrices } from "@/components/contexts/PriceContext";
 import { formatUnits } from 'viem';
+import { useStaking } from "../contracts/hooks/useStaking";
+
 
 const ZERO = "0x0000000000000000000000000000000000000000";
 const DEFAULT_WETH_BASE = "0x4200000000000000000000000000000000000006";
@@ -85,6 +87,8 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
   const { prices } = usePrices();
+  const { calculateLiqStakingAPR } = useStaking();
+
 
   // Helper to safely format ether
   const safeFormatEther = (value: bigint | undefined): string => {
@@ -105,7 +109,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   const [loading, setLoading] = useState(false);
   const [stakingStats, setStakingStats] = useState<StakingStats>({
     totalStaked: "0",
-    apy: 2.55,
+    apy: 0,
     userStaked: "0",
     canUnstake: false,
     timeUntilUnlock: 0,
@@ -163,9 +167,11 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       const canUnstake = unlockN <= now;
       const timeUntilUnlock = unlockN > now ? unlockN - now : 0;
 
+      const liqApr = await calculateLiqStakingAPR();
+
       setStakingStats({
         totalStaked: safeFormatEther(totalSupply as bigint),
-        apy: 2.5,
+        apy: Number.isFinite(liqApr) ? liqApr : 0,
         userStaked: safeFormatEther(userBalance as bigint),
         canUnstake,
         timeUntilUnlock,
