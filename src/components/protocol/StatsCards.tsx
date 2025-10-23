@@ -1,39 +1,47 @@
-// =============================
-// src/components/protocol/StatsCards.tsx
-// =============================
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Card, CardContent } from "@/components/ui/card";
-import { TrendingUp, DollarSign, Lock, Coins, ArrowUpRight, Loader2 } from "lucide-react";
+import { TrendingUp, DollarSign, Lock, Coins, Loader2 } from "lucide-react";
 import { usePrices } from '@/components/contexts/PriceContext';
+import { useStaking } from "../contracts/hooks/useStaking"; // ✅ NEW
 
-type StatsShape = {
-  aeroLocked?: string | number;
-  emissionRate?: string | number;
-  iAeroSupply?: string | number;
-  liqSupply?: string | number;
-  // REMOVED totalStaked - this doesn't belong here
-};
-
-interface StatsCardsProps {
-  stats: StatsShape;
-  formatNumber: (value: string | number) => string;
-  loading?: boolean;
-}
+// … (types unchanged)
 
 export default function StatsCards({ stats, formatNumber, loading }: StatsCardsProps) {
-  // Get prices from context
   const { prices } = usePrices();
+  const { calculateStakingAPR } = useStaking();            // ✅ NEW
+
+  const [apr, setApr] = useState<number | null>(null);     // ✅ NEW
+  const [aprLoading, setAprLoading] = useState(false);     // ✅ NEW
+
+  useEffect(() => {                                        // ✅ NEW
+    let alive = true;
+    (async () => {
+      try {
+        setAprLoading(true);
+        const res = await calculateStakingAPR();
+        if (!alive) return;
+        const aeroApr = Number(res?.aero);
+        setApr(Number.isFinite(aeroApr) ? aeroApr : null);
+      } catch {
+        if (!alive) return;
+        setApr(null);
+      } finally {
+        if (!alive) return;
+        setAprLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [calculateStakingAPR]);
 
   const iAeroPrice = Number(prices?.iAERO?.usd ?? 0);
-  const liqPrice = Number(prices?.LIQ?.usd ?? 0);
+  const liqPrice   = Number(prices?.LIQ?.usd ?? 0);
   const aeroPrice  = Number(prices?.AERO?.usd ?? 0);
 
   const tvlUSD = Number(stats?.aeroLocked ?? 0) * aeroPrice;
 
   const liqSupply = Number(stats?.liqSupply ?? 0);
-  const liqMcapUSD = liqSupply * Number(prices?.LIQ?.usd ?? 0);
-
+  const liqMcapUSD = liqSupply * liqPrice;
 
   const cards = [
     {
@@ -73,21 +81,20 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
       {cards.map((card, index) => (
-        <motion.div 
-          key={card.title} 
-          initial={{ opacity: 0, y: 20 }} 
-          animate={{ opacity: 1, y: 0 }} 
+        <motion.div
+          key={card.title}
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
           transition={{ delay: index * 0.1 }}
-          className="min-w-0" // Add this to prevent expansion
+          className="min-w-0"
         >
-          <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50 hover:bg-slate-800/70 transition-all duration-300 group relative overflow-hidden h-full"> {/* Add h-full */}
+          <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50 hover:bg-slate-800/70 transition-all duration-300 group relative overflow-hidden h-full">
             <CardContent className="p-6 relative">
-              {/* Background Gradient */}
               <div className={`absolute top-0 right-0 w-20 h-20 bg-gradient-to-br ${card.gradient} opacity-10 rounded-full transform translate-x-6 -translate-y-6 group-hover:scale-110 transition-transform duration-300`} />
 
               <div className="flex items-start justify-between relative z-10">
-                <div className="space-y-2 flex-1 min-w-0"> {/* Add min-w-0 */}
-                  <p className="text-slate-400 text-sm font-medium truncate">{card.title}</p> {/* Add truncate */}
+                <div className="space-y-2 flex-1 min-w-0">
+                  <p className="text-slate-400 text-sm font-medium truncate">{card.title}</p>
 
                   {card.loading ? (
                     <div className="flex items-center space-x-2">
@@ -95,20 +102,20 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
                       <span className="text-lg font-bold text-slate-400">Loading...</span>
                     </div>
                   ) : (
-                    <p className="text-2xl font-bold text-white truncate">{card.value}</p> // Add truncate
+                    <p className="text-2xl font-bold text-white truncate">{card.value}</p>
                   )}
 
                   {card.subtitle && !card.loading && (
-                    <p className="text-slate-400 text-sm break-words">{card.subtitle}</p> // Change to break-words
+                    <p className="text-slate-400 text-sm break-words">{card.subtitle}</p>
                   )}
                 </div>
 
-                <div className={`w-12 h-12 bg-gradient-to-br ${card.gradient} rounded-xl flex items-center justify-center opacity-80 group-hover:opacity-100 transition-opacity duration-300 ml-4 flex-shrink-0`}> {/* Add flex-shrink-0 */}
+                <div className={`w-12 h-12 bg-gradient-to-br ${card.gradient} rounded-xl flex items-center justify-center opacity-80 group-hover:opacity-100 transition-opacity duration-300 ml-4 flex-shrink-0`}>
                   <card.icon className="w-6 h-6 text-white" />
                 </div>
               </div>
 
-              {/* Extra metrics */}
+              {/* TVL: extra row */}
               {card.title === "Total Value Locked" && !card.loading && (
                 <div className="mt-4 pt-4 border-t border-slate-700/30">
                   <div className="flex justify-between text-xs text-slate-400">
@@ -118,6 +125,7 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
                 </div>
               )}
 
+              {/* veAERO: extra row */}
               {card.title === "veAERO Owned By Protocol" && !card.loading && (
                 <div className="mt-4 pt-4 border-t border-slate-700/30">
                   <div className="flex justify-between text-xs text-slate-400">
@@ -127,8 +135,15 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
                 </div>
               )}
 
+              {/* iAERO: extra rows — NOW includes Staking APR */}
               {card.title === "iAERO Price" && !card.loading && (
-                <div className="mt-4 pt-4 border-t border-slate-700/30">
+                <div className="mt-4 pt-4 border-t border-slate-700/30 space-y-1">
+                  <div className="flex justify-between text-xs text-slate-400">
+                    <span>Staking APR</span>
+                    <span className="text-emerald-400">
+                      {aprLoading ? "—" : (apr != null ? `${apr.toFixed(1)}%` : "—")}
+                    </span>
+                  </div>
                   <div className="flex justify-between text-xs text-slate-400">
                     <span>Peg Ratio</span>
                     <span className={`${(prices?.AERO?.usd && iAeroPrice / prices.AERO.usd > 0.99) ? "text-emerald-400" : "text-yellow-400"}`}>
@@ -138,6 +153,7 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
                 </div>
               )}
 
+              {/* LIQ: extra row */}
               {card.title === "LIQ Market Cap" && !card.loading && (
                 <div className="mt-4 pt-4 border-t border-slate-700/30">
                   <div className="flex justify-between text-xs text-slate-400">
