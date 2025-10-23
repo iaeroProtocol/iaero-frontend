@@ -7,6 +7,7 @@ import { usePublicClient } from 'wagmi';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import { parseAbi, getAddress as toChecksum } from 'viem';
 import {
   Gift,
   TrendingUp,
@@ -115,6 +116,17 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
   const [rewardsLoading, setRewardsLoading] = useState(false);
   const [pricesLoading, setPricesLoading] = useState(false);
 
+  // ===== APY state =====
+  const [apyPct, setApyPct] = useState<number | null>(null);
+  const [apyLoading, setApyLoading] = useState<boolean>(false);
+  const [apyError,   setApyError]   = useState<string | null>(null);
+
+  // 1e18 helpers
+  const E18 = 10n ** 18n;
+  const toE18 = (num: number) => BigInt(Math.round(num * 1e18));
+  const bnDivE18 = (a: bigint, b: bigint) => (a * E18) / b; // a/b scaled to 1e18
+  
+
   const formatUSD = (v: number, max = 6) => {
     if (!isFinite(v) || v === 0) return "$0";
     const tiny = 1e-6;
@@ -182,6 +194,40 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       return {};
     }
   }
+
+  const REWARDS_JSON_URL =
+  process.env.NEXT_PUBLIC_REWARDS_JSON_URL ||
+  "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/estimated_rewards_usd.json";
+
+  async function fetchStakersWeeklyUSD(): Promise<bigint> {
+    const r = await fetch(REWARDS_JSON_URL, { cache: "no-store" });
+    if (!r.ok) throw new Error(`rewards json ${r.status}`);
+    const j = await r.json();
+    // prefer stakersWeeklyUSD_1e18; fall back to estimatedWeeklyUSD_1e18 * 0.8
+    if (j?.stakersWeeklyUSD_1e18) return BigInt(j.stakersWeeklyUSD_1e18);
+    if (j?.estimatedWeeklyUSD_1e18) return (BigInt(j.estimatedWeeklyUSD_1e18) * 8000n) / 10000n;
+    throw new Error("missing stakersWeeklyUSD");
+  }
+
+  const DIST_ABI = parseAbi([
+    'function totalStaked() view returns (uint256)'
+  ]);
+
+  function addrOrEmpty(key: string) {
+    try { return (getContractAddress(key, chainId || 8453) || '').toLowerCase(); }
+    catch { return ''; }
+  }
+
+  const iAeroAddr = useMemo(() => {
+    // try common keys
+    return (addrOrEmpty('iAERO') || addrOrEmpty('IAERO')).toLowerCase();
+  }, [chainId]);
+
+  const distAddr = useMemo(() => {
+    return (addrOrEmpty('EPOCH_DIST') || addrOrEmpty('StakingDistributor') || addrOrEmpty('EPOCH_STAKING_DISTRIBUTOR')).toLowerCase();
+  }, [chainId]);
+
+
 
   useEffect(() => {
     if (!connected || !networkSupported) return;
@@ -266,6 +312,67 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       }
     })();
   }, [connected, networkSupported, chainId, pending]);
+
+  useEffect(() => {
+    if (!connected || !networkSupported || !publicClient) return;
+    (async () => {
+      setApyLoading(true);
+      setApyError(null);
+      try {
+        // (1) stakers USD per week (1e18)
+        const stakersWeeklyUSD_1e18 = await fetchStakersWeeklyUSD();
+
+        // (2) total iAERO staked (1e18)
+        if (!distAddr) throw new Error("staking distributor address missing");
+        const totalStakedRaw = await publicClient.readContract({
+          address: distAddr as `0x${string}`,
+          abi: DIST_ABI,
+          functionName: 'totalStaked',
+        }) as bigint;
+        if (!totalStakedRaw || totalStakedRaw === 0n) {
+          setApyPct(0);
+          setApyLoading(false);
+          return;
+        }
+        
+        // (3) iAERO USD price (prefer direct iAERO price; fallback to AERO peg)
+        let iaeroUsdNum = Number(prices?.iAERO?.usd ?? 0);
+        if (!isFinite(iaeroUsdNum) || iaeroUsdNum <= 0) {
+          iaeroUsdNum = Number(prices?.AERO?.usd ?? 0);
+        }
+        if (!isFinite(iaeroUsdNum) || iaeroUsdNum <= 0) {
+          throw new Error("iAERO/AERO price unavailable");
+        }
+        const iaeroUsd_1e18 = toE18(iaeroUsdNum);
+
+        // (4) APY = (stakersWeekly * 52) / (totalStaked * price)
+        const annualUSD_1e18 = stakersWeeklyUSD_1e18 * 52n;
+        const tvlUSD_1e18 = (totalStakedRaw * iaeroUsd_1e18) / E18;
+        if (tvlUSD_1e18 === 0n) {
+          setApyPct(0);
+          setApyLoading(false);
+          return;
+        }
+
+        // ratio as 1e18
+        const apyRatio_1e18 = (annualUSD_1e18 * E18) / tvlUSD_1e18;
+        // convert to percentage: (ratio * 100)
+        const apyPct_1e18 = apyRatio_1e18 * 100n;
+
+        // to JS number with 2 decimals: apyPct = Number(apyPct_1e18) / 1e18
+        const apyPctNum = Number(apyPct_1e18) / 1e18;
+        setApyPct(apyPctNum);
+      } catch (e: any) {
+        console.error('APY calc error:', e?.message || e);
+        setApyError('APY unavailable');
+        setApyPct(null);
+      } finally {
+        setApyLoading(false);
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected, networkSupported, publicClient, chainId, iAeroAddr, distAddr, prices]);
+
 
   // Build reward rows
   const rows: RewardTokenRow[] = useMemo(() => {
@@ -462,15 +569,29 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
               <span>Your Rewards</span>
               {loading?.balances && <Loader2 className="w-4 h-4 animate-spin ml-2" />}
             </CardTitle>
-            <Button
-              onClick={handleRefresh}
-              disabled={isRefreshing || isProcessing || rewardsLoading || pricesLoading}
-              variant="ghost"
-              size="sm"
-              className="text-slate-400 hover:text-white"
-            >
-              <RefreshCw className={`w-4 h-4 ${isRefreshing ? "animate-spin" : ""}`} />
-            </Button>
+            <div className="flex items-center gap-3">
+              {apyLoading ? (
+                <span className="text-slate-400 text-sm flex items-center gap-1">
+                  <Loader2 className="w-4 h-4 animate-spin" /> APY
+                </span>
+              ) : apyError ? (
+                <span className="text-slate-400 text-sm">APY —</span>
+              ) : apyPct !== null ? (
+                <div className="px-2 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-sm flex items-center gap-1">
+                  <TrendingUp className="w-4 h-4" />
+                  {apyPct.toFixed(2)}%
+                </div>
+              ) : null}
+              <Button
+               onClick={handleRefresh}
+               disabled={isRefreshing || isProcessing || rewardsLoading || pricesLoading}
+               variant="ghost"
+               size="sm"
+               className="text-slate-400 hover:text-white"
+              >
+                <RefreshCw className={`w-4 h-4 ${isRefreshing ? "animate-spin" : ""}`} />
+              </Button>
+            </div>
           </div>
         </CardHeader>
 
