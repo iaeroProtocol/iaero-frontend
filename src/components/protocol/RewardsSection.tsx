@@ -23,7 +23,7 @@ import {
 
 import { useProtocol } from "@/components/contexts/ProtocolContext";
 import { useStaking } from "../contracts/hooks/useStaking";
-import { getContractAddress } from "../contracts/addresses";
+import { getContractAddress, type ContractName } from "../contracts/addresses";
 import {
   parseInputToBigNumber,
   formatBigNumber,
@@ -214,9 +214,14 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
   ]);
 
   function addrOrEmpty(key: string) {
-    try { return (getContractAddress(key, chainId || 8453) || '').toLowerCase(); }
-    catch { return ''; }
-  }
+       try {
+         // Narrow to the union TS expects; runtime stays identical.
+         const name = key as unknown as ContractName;
+         return (getContractAddress(name, chainId || 8453) || '').toLowerCase();
+       } catch {
+         return '';
+       }
+     }
 
   const iAeroAddr = useMemo(() => {
     // try common keys
