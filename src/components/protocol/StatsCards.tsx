@@ -12,6 +12,13 @@ type StatsShape = {
   liqSupply?: string | number;
 };
 
+type StatsCardsProps = {
+  stats: StatsShape;
+  formatNumber: (v: string | number) => string;
+  loading?: boolean;
+};
+
+
 export default function StatsCards({ stats, formatNumber, loading }: StatsCardsProps) {
   const { prices } = usePrices();
   const { calculateStakingAPR } = useStaking();
@@ -170,3 +177,4 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
     </div>
   );
 }
+
