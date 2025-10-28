@@ -471,7 +471,6 @@ export const useStaking = () => {
     setTransactionLoading
   ]);
 
-  // Claim single reward
   const claimReward = useCallback(async (
     tokenAddress: string,
     onSuccess?: SuccessCallback,
@@ -481,51 +480,74 @@ export const useStaking = () => {
     setLoading(true);
     const txId = 'claimReward';
     setTransactionLoading(txId, true);
-    
+  
     try {
       const stakingAddr = getAddr('StakingDistributor');
       if (!stakingAddr) throw new Error('Staking contract not initialized');
-
+  
       onProgress?.('Claiming reward…');
-      
-      const epoch = await publicClient?.readContract({
+  
+      // We need both epochs to match the UI's preview logic
+      const currentEpoch = await publicClient!.readContract({
         address: stakingAddr,
         abi: ABIS.StakingDistributor,
         functionName: 'currentEpoch',
       }) as bigint;
-
-      const hash = await writeContractAsync({
-        address: stakingAddr,
-        abi: ABIS.StakingDistributor,
-        functionName: 'claim',
-        args: [tokenAddress, epoch],
-      });
-
-      const receipt = await publicClient?.waitForTransactionReceipt({ hash });
-
+  
+      const WEEK = 7n * 24n * 60n * 60n;
+      const prevEpoch = currentEpoch - WEEK;
+  
+      let hash: Hash | undefined;
+  
+      // Try claimLatest([token]) first (claims prev + current)
+      try {
+        hash = await writeContractAsync({
+          address: stakingAddr,
+          abi: ABIS.StakingDistributor,
+          functionName: 'claimLatest',
+          args: [[tokenAddress]],
+        });
+      } catch {
+        // Fallback: claim prev, then current
+        try {
+          const h1 = await writeContractAsync({
+            address: stakingAddr,
+            abi: ABIS.StakingDistributor,
+            functionName: 'claim',
+            args: [tokenAddress, prevEpoch],
+          });
+          await publicClient!.waitForTransactionReceipt({ hash: h1 });
+        } catch { /* okay if nothing pending in prev */ }
+  
+        hash = await writeContractAsync({
+          address: stakingAddr,
+          abi: ABIS.StakingDistributor,
+          functionName: 'claim',
+          args: [tokenAddress, currentEpoch],
+        });
+      }
+  
+      const receipt = await publicClient!.waitForTransactionReceipt({ hash: hash! });
+  
       onProgress?.('Updating balances…');
-      await Promise.all([loadBalances(), loadPendingRewards?.()].filter(Boolean));
-
+      await Promise.all([
+        loadBalances(),
+        loadPendingRewards?.(),
+      ].filter(Boolean));
+  
       onSuccess?.(receipt);
       return receipt;
     } catch (error: any) {
-      if (!isUserRejection(error)) {
-        console.error('claimReward failed:', error);
-      }
+      if (!isUserRejection(error)) console.error('claimReward failed:', error);
       onError?.(error);
       return undefined;
     } finally {
       setLoading(false);
       setTransactionLoading(txId, false);
     }
-  }, [
-    publicClient,
-    writeContractAsync,
-    getAddr,
-    loadBalances,
-    loadPendingRewards,
-    setTransactionLoading
-  ]);
+  }, [publicClient, writeContractAsync, getAddr, loadBalances, loadPendingRewards, setTransactionLoading]);
+  
+
 
   // Get reward tokens
   const getRewardTokens = useCallback(async (
@@ -664,83 +686,75 @@ export const useStaking = () => {
     tokenFileUrl = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"
   ): Promise<PendingReward[]> => {
     try {
-      const stakingAddr = getAddr('StakingDistributor');
+      const stakingAddr = getAddr('StakingDistributor'); // epoch + legacy are same addr in your setup
       const addr = userAddress || address;
-      
       if (!stakingAddr || !addr || !publicClient) return [];
-
+  
+      // epochs
       const currentEpoch = await publicClient.readContract({
         address: stakingAddr,
         abi: ABIS.StakingDistributor,
         functionName: 'currentEpoch',
       }) as bigint;
-
       const WEEK = 7n * 24n * 60n * 60n;
       const prevEpoch = currentEpoch - WEEK;
-
-      const tokens = await loadClaimTokensFromJson(tokenFileUrl);
+  
+      // token list from JSON
+      const rawTokens = await loadClaimTokensFromJson(tokenFileUrl);
+      const tokens = Array.from(new Set(
+        rawTokens.map(t => (t || "").toLowerCase()).filter(t => /^0x[0-9a-f]{40}$/.test(t))
+      )) as `0x${string}`[];
       if (!tokens.length) return [];
-
+  
+      // batch preview (authoritative, net of prior claims)
+      const PREVIEW_ABI = [{
+        type: 'function', name: 'previewClaimsForEpoch', stateMutability: 'view',
+        inputs: [{type:'address'},{type:'address[]'},{type:'uint256'}],
+        outputs:[{type:'uint256[]'}]
+      }] as const;
+  
+      const [amtsPrev, amtsNow] = await Promise.all([
+        publicClient.readContract({ address: stakingAddr, abi: PREVIEW_ABI, functionName: 'previewClaimsForEpoch', args: [addr, tokens, prevEpoch] }).catch(() => [] as bigint[]),
+        publicClient.readContract({ address: stakingAddr, abi: PREVIEW_ABI, functionName: 'previewClaimsForEpoch', args: [addr, tokens, currentEpoch] }).catch(() => [] as bigint[]),
+      ]);
+  
       const out: PendingReward[] = [];
-
-      for (const token of tokens) {
-        const [aPrev, aNow] = await Promise.all([
-          publicClient.readContract({
-            address: stakingAddr,
-            abi: ABIS.StakingDistributor,
-            functionName: 'previewClaim',
-            args: [addr, token, prevEpoch],
-          }).catch(() => 0n),
-          publicClient.readContract({
-            address: stakingAddr,
-            abi: ABIS.StakingDistributor,
-            functionName: 'previewClaim',
-            args: [addr, token, currentEpoch],
-          }).catch(() => 0n),
-        ]);
-
-        const total = (aPrev as bigint) + (aNow as bigint);
+      for (let i = 0; i < tokens.length; i++) {
+        const t = tokens[i];
+        const total = (amtsPrev[i] ?? 0n) + (amtsNow[i] ?? 0n);
         if (total === 0n) continue;
-
-        let symbol = 'ETH';
-        let decimals = 18;
-
-        if (token !== '0x0000000000000000000000000000000000000000') {
+  
+        // ERC20 meta (defensive)
+        let symbol = 'ETH', decimals = 18;
+        if (t !== '0x0000000000000000000000000000000000000000') {
           try {
             const [sym, dec] = await Promise.all([
-              publicClient.readContract({
-                address: token as `0x${string}`,
-                abi: ABIS.ERC20,
-                functionName: 'symbol',
-              }),
-              publicClient.readContract({
-                address: token as `0x${string}`,
-                abi: ABIS.ERC20,
-                functionName: 'decimals',
-              }),
+              publicClient.readContract({ address: t, abi: ABIS.ERC20, functionName: 'symbol' }),
+              publicClient.readContract({ address: t, abi: ABIS.ERC20, functionName: 'decimals' }),
             ]);
-            
             symbol = String(sym);
             decimals = Number(dec);
           } catch {
-            symbol = `${token.slice(0, 6)}...${token.slice(-4)}`;
+            symbol = `${t.slice(0,6)}...${t.slice(-4)}`;
+            decimals = 18;
           }
         }
-
-        out.push({
-          token,
-          amount: (Number(total) / 10 ** decimals).toString(),
-          symbol,
-          decimals,
-        });
+  
+        // normalize to human string
+        const human = Number(total) / 10 ** decimals;
+        if (human <= 0) continue; // belt-and-suspenders
+        out.push({ token: t, amount: human.toString(), symbol, decimals });
       }
-
+  
       return out;
     } catch (e) {
       console.error('getPendingRewards failed:', e);
       return [];
     }
   }, [address, publicClient, getAddr]);
+  
+  
+  
 
   // Exit (unstake all + claim all)
   const exit = useCallback(async (
