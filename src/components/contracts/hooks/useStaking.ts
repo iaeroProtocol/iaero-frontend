@@ -22,7 +22,7 @@ interface StakingStats {
 }
 
 interface PendingReward {
-  token: string;
+  token: `0x${string}`;
   amount: string;
   symbol?: string;
   decimals?: number;
@@ -753,7 +753,7 @@ export const useStaking = () => {
         // normalize to human string
         const human = Number(total) / 10 ** decimals;
         if (human <= 0) continue; // belt-and-suspenders
-        out.push({ token: t, amount: human.toString(), symbol, decimals });
+        out.push({ token: t as `0x${string}`, amount: human.toString(), symbol, decimals });
       }
   
       return out;

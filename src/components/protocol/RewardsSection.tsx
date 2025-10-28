@@ -514,7 +514,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
         const t = tokens[i];
         onProgress?.(n > 1 ? `Claiming ${i + 1}/${n} tokens…` : "Claiming token…");
         await claimReward(
-          t,
+          t as `0x${string}`,
           (receipt: any) => { if (i === n - 1) onSuccess?.(receipt); },
           (e: any) => { onError?.(e); },
           (m?: string) => onProgress?.(m)
