@@ -90,13 +90,6 @@ export default function StakeSection({ showToast, formatNumber }: StakeSectionPr
   const stakeError = getAmountError(stakeAmount, iAeroBN);
   const unstakeError = getAmountError(unstakeAmount, stakedIAeroBN);
 
-  const dailyRewardsPretty = useMemo(() => {
-    const apr = stakingAPR?.aero ?? 0;
-    if (stakedIAeroBN === 0n || apr === 0) return "0";
-    const daily = calculateYield(stakedIAeroBN, apr, 1, 18);
-    return formatBigNumber(daily, 18, 4);
-  }, [stakedIAeroBN, stakingAPR]);
-
   const positionValue = useMemo(() => {
     const staked = parseFloat(formatBigNumber(stakedIAeroBN, 18, 6));
     return getPriceInUSD('iAERO', staked);
@@ -343,7 +336,6 @@ export default function StakeSection({ showToast, formatNumber }: StakeSectionPr
                 <h4 className="text-white font-medium mb-3">Your Position</h4>
                 <div className="space-y-2">
                   <div className="flex justify-between items-center"><span className="text-slate-400">Staked</span><span className="text-white font-medium">{formatBigNumber(stakedIAeroBN)} iAERO</span></div>
-                  <div className="flex justify-between items-center"><span className="text-slate-400">Daily Rewards</span><span className="text-emerald-400 font-medium">~{dailyRewardsPretty} AERO</span></div>
                   <div className="flex justify-between items-center"><span className="text-slate-400">Value</span><span className="text-white">≈ ${formatNumber(positionValue)}</span></div>
                 </div>
               </div>
