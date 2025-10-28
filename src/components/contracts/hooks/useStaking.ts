@@ -1,6 +1,6 @@
 // src/contracts/hooks/useStaking.ts
 import { useState, useCallback } from 'react';
-import { useAccount, useChainId, useWriteContract, useWaitForTransactionReceipt, usePublicClient } from 'wagmi';
+import { useAccount, useChainId, useWriteContract, usePublicClient } from 'wagmi';
 import type { Hash } from 'viem';
 import { getContractAddress } from '../addresses';
 import { ABIS } from '../abis';
@@ -56,7 +56,7 @@ const parseEther = (value: string): bigint => {
 // Load claim tokens from JSON
 async function loadClaimTokensFromJson(
   url = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"
-): Promise<string[]> {
+): Promise<`0x${string}`[]> {
   try {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -74,7 +74,9 @@ async function loadClaimTokensFromJson(
       data.epochs[previousEpoch].tokens.forEach((t: string) => tokens.add(t.toLowerCase()));
     }
     
-    return Array.from(tokens).filter((t) => /^0x[0-9a-f]{40}$/.test(t));
+    return Array.from(tokens)
+      .filter((t) => /^0x[0-9a-f]{40}$/.test(t))
+      .map(t => t as `0x${string}`);
   } catch (e) {
     console.warn("[loadClaimTokensFromJson] failed:", e);
     return [];
@@ -152,14 +154,14 @@ export const useStaking = () => {
     if (!address || !publicClient) return false;
     
     try {
-      const stakingAddr = getAddr('StakingDistributor');
+      const stakingAddr = getAddr('StakingDistributor') as `0x${string}` | undefined;
       if (!stakingAddr) return false;
 
       const allowance = await publicClient.readContract({
-        address: getAddr('iAERO')!,
+        address: getAddr('iAERO')! as `0x${string}`,
         abi: ABIS.iAERO,
         functionName: 'allowance',
-        args: [address, stakingAddr],
+        args: [address as `0x${string}`, stakingAddr],
       });
 
       return (allowance as bigint) >= parseEther(amount);
@@ -179,7 +181,7 @@ export const useStaking = () => {
     setTransactionLoading(txId, true);
     
     try {
-      const stakingAddr = getAddr('StakingDistributor');
+      const stakingAddr = getAddr('StakingDistributor') as `0x${string}` | undefined;
       if (!stakingAddr) throw new Error('Staking contract not found');
 
       // Check if already approved
@@ -191,7 +193,7 @@ export const useStaking = () => {
 
       // Write approval transaction
       const hash = await writeContractAsync({
-        address: getAddr('iAERO')!,
+        address: getAddr('iAERO')! as `0x${string}`,
         abi: ABIS.iAERO,
         functionName: 'approve',
         args: [stakingAddr, BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')], // MaxUint256
@@ -228,7 +230,7 @@ export const useStaking = () => {
     
     try {
       const amountWei = parseEther(amount);
-      const stakingAddr = getAddr('StakingDistributor');
+      const stakingAddr = getAddr('StakingDistributor') as `0x${string}` | undefined;
       if (!stakingAddr) throw new Error('Staking contract not initialized');
 
       // Check approval
@@ -297,7 +299,7 @@ export const useStaking = () => {
     
     try {
       const amountWei = parseEther(amount);
-      const stakingAddr = getAddr('StakingDistributor');
+      const stakingAddr = getAddr('StakingDistributor') as `0x${string}` | undefined;
       if (!stakingAddr) throw new Error('Staking contract not initialized');
 
       onProgress?.('Unstaking iAERO...');
@@ -352,8 +354,9 @@ export const useStaking = () => {
     setTransactionLoading(txId, true);
     
     try {
-      const stakingAddr = getAddr('StakingDistributor');
+      const stakingAddr = getAddr('StakingDistributor') as `0x${string}` | undefined;
       if (!stakingAddr || !address) throw new Error('Not initialized');
+      const addr = address as `0x${string}`;
 
       onProgress?.('Loading token list…');
       const tokens = await loadClaimTokensFromJson(tokenFileUrl);
@@ -375,20 +378,20 @@ export const useStaking = () => {
       const prevEpoch = currentEpoch - WEEK;
 
       // Filter claimable tokens
-      const claimables: string[] = [];
+      const claimables: (`0x${string}`)[] = [];
       for (const token of tokens) {
         const [aNow, aPrev] = await Promise.all([
           publicClient?.readContract({
             address: stakingAddr,
             abi: ABIS.StakingDistributor,
             functionName: 'previewClaim',
-            args: [address, token, currentEpoch],
+            args: [addr, token, currentEpoch],
           }).catch(() => 0n),
           publicClient?.readContract({
             address: stakingAddr,
             abi: ABIS.StakingDistributor,
             functionName: 'previewClaim',
-            args: [address, token, prevEpoch],
+            args: [addr, token, prevEpoch],
           }).catch(() => 0n),
         ]);
         
@@ -403,7 +406,7 @@ export const useStaking = () => {
       }
 
       // Claim in batches
-      const batches = chunk50(claimables);
+      const batches = chunk50<`0x${string}`>(claimables);
       let lastReceipt: any;
 
       onProgress?.(`Claiming ${claimables.length} tokens in ${batches.length} batch(es)…`);
@@ -472,7 +475,7 @@ export const useStaking = () => {
   ]);
 
   const claimReward = useCallback(async (
-    tokenAddress: string,
+    tokenAddress: `0x${string}`,
     onSuccess?: SuccessCallback,
     onError?: ErrorCallback,
     onProgress?: ProgressCallback
@@ -482,7 +485,7 @@ export const useStaking = () => {
     setTransactionLoading(txId, true);
   
     try {
-      const stakingAddr = getAddr('StakingDistributor');
+      const stakingAddr = getAddr('StakingDistributor') as `0x${string}` | undefined;
       if (!stakingAddr) throw new Error('Staking contract not initialized');
   
       onProgress?.('Claiming reward…');
@@ -552,7 +555,7 @@ export const useStaking = () => {
   // Get reward tokens
   const getRewardTokens = useCallback(async (
     tokenFileUrl = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"
-  ): Promise<string[]> => {
+  ): Promise<`0x${string}`[]> => {
     try {
       return await loadClaimTokensFromJson(tokenFileUrl);
     } catch (e) {
@@ -564,7 +567,7 @@ export const useStaking = () => {
   // Calculate staking APR (real-time)
   const calculateStakingAPR = useCallback(async (): Promise<StakingAPR> => {
     try {
-      const stakingAddr = getAddr('EPOCH_DIST') || getAddr('StakingDistributor');
+      const stakingAddr = getAddr('StakingDistributor') as `0x${string}` | undefined;
       if (!stakingAddr || !publicClient) {
         return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
       }
@@ -615,7 +618,7 @@ export const useStaking = () => {
 
   const calculateLiqStakingAPR = useCallback(async (): Promise<number> => {
     try {
-      const liqStakingAddr = getAddr('LIQStakingDistributor');
+      const liqStakingAddr = getAddr('LIQStakingDistributor') as `0x${string}` | undefined;
       if (!liqStakingAddr || !publicClient) return DEFAULT_STAKING_APR;
   
       // (1) LIQ gets 8% of the *estimated* total protocol weekly USD
@@ -657,7 +660,7 @@ export const useStaking = () => {
     tokenFileUrl = "/claim_tokens_last7d.json"
   ): Promise<StakingStats> => {
     try {
-      const stakingAddr = getAddr('StakingDistributor');
+      const stakingAddr = getAddr('StakingDistributor') as `0x${string}` | undefined;
       if (!stakingAddr || !publicClient) {
         return { totalStaked: '0', rewardTokensCount: 0 };
       }
@@ -686,8 +689,8 @@ export const useStaking = () => {
     tokenFileUrl = "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/reward_tokens.json"
   ): Promise<PendingReward[]> => {
     try {
-      const stakingAddr = getAddr('StakingDistributor'); // epoch + legacy are same addr in your setup
-      const addr = userAddress || address;
+      const stakingAddr = getAddr('StakingDistributor') as `0x${string}` | undefined;
+      const addr = (userAddress || address) as `0x${string}` | undefined;
       if (!stakingAddr || !addr || !publicClient) return [];
   
       // epochs
@@ -700,10 +703,7 @@ export const useStaking = () => {
       const prevEpoch = currentEpoch - WEEK;
   
       // token list from JSON
-      const rawTokens = await loadClaimTokensFromJson(tokenFileUrl);
-      const tokens = Array.from(new Set(
-        rawTokens.map(t => (t || "").toLowerCase()).filter(t => /^0x[0-9a-f]{40}$/.test(t))
-      )) as `0x${string}`[];
+      const tokens = await loadClaimTokensFromJson(tokenFileUrl);
       if (!tokens.length) return [];
   
       // batch preview (authoritative, net of prior claims)
@@ -714,8 +714,18 @@ export const useStaking = () => {
       }] as const;
   
       const [amtsPrev, amtsNow] = await Promise.all([
-        publicClient.readContract({ address: stakingAddr, abi: PREVIEW_ABI, functionName: 'previewClaimsForEpoch', args: [addr, tokens, prevEpoch] }).catch(() => [] as bigint[]),
-        publicClient.readContract({ address: stakingAddr, abi: PREVIEW_ABI, functionName: 'previewClaimsForEpoch', args: [addr, tokens, currentEpoch] }).catch(() => [] as bigint[]),
+        publicClient.readContract({
+          address: stakingAddr,
+          abi: PREVIEW_ABI,
+          functionName: 'previewClaimsForEpoch',
+          args: [addr, tokens, prevEpoch],
+        }).catch(() => [] as bigint[]),
+        publicClient.readContract({
+          address: stakingAddr,
+          abi: PREVIEW_ABI,
+          functionName: 'previewClaimsForEpoch',
+          args: [addr, tokens, currentEpoch],
+        }).catch(() => [] as bigint[]),
       ]);
   
       const out: PendingReward[] = [];
@@ -767,8 +777,9 @@ export const useStaking = () => {
     setTransactionLoading(txId, true);
     
     try {
-      const stakingAddr = getAddr('StakingDistributor');
+      const stakingAddr = getAddr('StakingDistributor') as `0x${string}` | undefined;
       if (!stakingAddr) throw new Error('Staking contract not initialized');
+      
 
       onProgress?.('Exiting position...');
       
