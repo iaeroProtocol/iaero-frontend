@@ -3,11 +3,11 @@
 // ==============================================
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { usePublicClient } from 'wagmi';
+import { usePublicClient, useWriteContract } from 'wagmi';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { parseAbi, getAddress as toChecksum } from 'viem';
+import { parseAbi } from 'viem';
 import {
   Gift,
   TrendingUp,
@@ -42,6 +42,8 @@ interface RewardTokenRow {
   usdValue: number;
   icon: string;
   gradient: string;
+  epoch?: bigint;
+  rawBN?: bigint;
 }
 
 interface TxHistory {
@@ -68,6 +70,8 @@ const msgFromError = (e: any, fallback = "Transaction failed") => {
   return fallback;
 };
 
+const ZERO = "0x0000000000000000000000000000000000000000";
+
 const formatTimeAgo = (t: number) => {
   const s = Math.floor((Date.now() - t) / 1000);
   if (s < 60) return "just now";
@@ -75,6 +79,10 @@ const formatTimeAgo = (t: number) => {
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
 };
+
+const EPOCH_DIST_ABI = parseAbi([
+  'function claimMany(address[] tokens, uint256[] epochs) external',
+]); // minimal ABI
 
 // ---------- Component ----------
 export default function RewardsSection({ showToast, formatNumber }: RewardsSectionProps) {
@@ -89,6 +97,9 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
   const publicClient = usePublicClient();
 
+  const { writeContractAsync } = useWriteContract();
+
+
   // only the methods we actually use
   const {
     claimReward,
@@ -99,7 +110,18 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
   const { prices } = usePrices();
 
   // canonical rows (from off-chain JSON)
-  const [pending, setPending] = useState<Array<{ token: string; amount: string; symbol?: string; decimals?: number }>>([]);
+  const [pending, setPending] = useState<
+    Array<{
+      token: string;
+      raw: string;              // on-chain integer from file "amount"
+      amount: string;           // human string (amountHuman/amountHumanStr fallback)
+      decimals: number;
+      symbol?: string;
+      priceUsd?: number;
+      usd?: number;
+      epoch?: bigint;           // preserve if file provides it
+    }>
+  >([]);
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressStep, setProgressStep] = useState("");
@@ -151,7 +173,6 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     [balances?.stakedIAero]
   );
 
-  const ZERO = "0x0000000000000000000000000000000000000000";
   const DEFAULT_WETH_BASE = "0x4200000000000000000000000000000000000006";
 
   // --------- Price fetching for rows ----------
@@ -202,10 +223,12 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     priceUsd?: number;
     usd?: number;
     symbol?: string;
+    epoch?: number | string;
   };
 
   function normalizeOffchain(list: PendingJsonItem[]) {
     return list.map((it) => {
+      // Prefer amountHuman if present; else derive from raw amount
       const human =
         typeof it.amountHuman === "number"
           ? String(it.amountHuman)
@@ -213,10 +236,14 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
           ? (Number(it.amount) / 10 ** (it.decimals ?? 18)).toString()
           : "0";
       return {
-        token: it.token,
-        amount: human,
+        token: (it.token || "").toLowerCase(),
+        raw: String(it.amount || "0"),                          // on-chain integer
+        amount: human,                                          // human string
         symbol: it.symbol,
         decimals: typeof it.decimals === "number" ? it.decimals : 18,
+        priceUsd: typeof it.priceUsd === "number" ? it.priceUsd : undefined,
+        usd: typeof it.usd === "number" ? it.usd : undefined,
+        epoch: it.epoch !== undefined ? BigInt(it.epoch as any) : undefined,
       };
     });
   }
@@ -225,21 +252,22 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     const r = await fetch(STAKER_REWARDS_URL, { cache: "no-store" });
     if (!r.ok) throw new Error(`staker_rewards.json ${r.status}`);
     const j = await r.json();
+
+    // capture the latest funded epoch for defaulting
+    try {
+        if (Array.isArray(j?.fundedEpochs) && j.fundedEpochs.length) {
+          const maxEpoch = Math.max(...j.fundedEpochs.map((e: any) => Number(e)||0));
+          if (maxEpoch > 0) setLastEpoch(BigInt(maxEpoch));
+        }
+      } catch {}
     const lower = addr.toLowerCase();
 
-    // Shape A: { holders: [{ address, pending: [...] }, ...] }
     if (Array.isArray(j?.holders)) {
-      const h = j.holders.find((x: any) => (x?.address || "").toLowerCase() === lower);
-      return Array.isArray(h?.pending) ? h.pending : [];
-    }
-    // Shape B: { [address]: { pending: [...] } }
-    const maybe = j[lower] || j[addr] || null;
-    if (maybe?.pending && Array.isArray(maybe.pending)) return maybe.pending;
-
-    // Shape C: { pending: [...] }
-    if (Array.isArray(j?.pending)) return j.pending;
-
-    return [];
+            const h = j.holders.find((x: any) => (x?.address || "").toLowerCase() === lower);
+            return Array.isArray(h?.pending) ? h.pending : [];
+          }
+          // Any other shape → refuse to show anything (prevents global totals leakage)
+          return [];
   }
 
   // --------- APY (unchanged) ----------
@@ -257,6 +285,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
   }
 
   const DIST_ABI = parseAbi(['function totalStaked() view returns (uint256)']);
+
 
   function addrOrEmpty(key: string) {
     try {
@@ -312,10 +341,11 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
         // Preload any prices present in the file
         const preloaded: Record<string, number> = {};
-        for (const it of list) {
-          const k = (it.token || "").toLowerCase();
-          if (k && typeof it.priceUsd === "number" && isFinite(it.priceUsd)) preloaded[k] = it.priceUsd;
-        }
+        for (const it of normalized) {
+                    if (it.token && typeof it.priceUsd === "number" && isFinite(it.priceUsd)) {
+                      preloaded[it.token] = it.priceUsd;
+                    }
+                  }
         if (Object.keys(preloaded).length) setPriceByAddr(prev => ({ ...prev, ...preloaded }));
       } catch (e) {
         console.error("load off-chain pending rewards failed", e);
@@ -355,6 +385,8 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       }
     })();
   }, [connected, networkSupported, chainId, pending]);
+
+  const [lastEpoch, setLastEpoch] = useState<bigint | undefined>(undefined);
 
   // --------- APY calc (unchanged logic) ----------
   useEffect(() => {
@@ -422,22 +454,47 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
         const frac = (parts[1] || '').padEnd(decimals, '0').slice(0, decimals);
         amountBN = BigInt(whole + (decimals ? frac : ''));
       } catch {}
+      // rawBN for selection/claim (ensures dust isn't filtered out)
+      let rawBN: bigint = 0n;
+      try { rawBN = BigInt(p.raw || '0'); } catch {}
       const humanFloat = Number(p.amount || '0') || 0;
-      const price = priceByAddr[addr] ?? 0;
-      const usdValue = humanFloat * price;
+      const price = (typeof p.priceUsd === 'number' ? p.priceUsd : (priceByAddr[addr] ?? 0));
+      const usdValue = typeof p.usd === 'number' ? p.usd : (humanFloat * price);
 
       let icon = '💰', gradient = 'from-slate-600 to-slate-700';
       if (symbol === 'AERO') { icon = '🚀'; gradient = 'from-blue-500 to-cyan-500'; }
       else if (symbol === 'ETH') { icon = '⚡'; gradient = 'from-purple-500 to-indigo-500'; }
       else if (symbol === 'LIQ') { icon = '🟣'; gradient = 'from-fuchsia-500 to-purple-600'; }
 
-      out.push({ address: addr, symbol, decimals, amountBN, usdValue, icon, gradient });
+      out.push({
+                address: addr,
+                symbol,
+                decimals,
+                amountBN,
+                usdValue,
+                icon,
+                gradient,
+                epoch: (p.epoch ?? lastEpoch), // prefer per-item epoch, else default
+                // carry rawBN for selection (TS: ok to widen with "as any")
+                // @ts-expect-error custom field for internal use
+                rawBN,
+              });
     }
     return out;
-  }, [pending, priceByAddr, aeroAddr, liqAddr]);
+  }, [pending, priceByAddr, aeroAddr, liqAddr, lastEpoch]);
 
-  const hasRewards = useMemo(() => rows.some((r) => r.amountBN > 0n), [rows]);
-  const totalRewardsUSD = useMemo(() => rows.reduce((s, r) => s + r.usdValue, 0), [rows]);
+  // Use rawBN so dust-level rewards that round to 0 still count
+  const hasRewards = useMemo(
+    () => rows.some((r) => r.rawBN > 0n),
+    [rows]
+  );
+
+  // Sum only what’s actually claimable
+  const totalRewardsUSD = useMemo(
+    () => rows.filter((r) => r.rawBN > 0n).reduce((s, r) => s + r.usdValue, 0),
+    [rows]
+  );
+
 
   const dailyRewardsPretty = useMemo(() => {
     if (stakedIAeroBN === 0n || stakingAPR === 0) return "0";
@@ -499,7 +556,6 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     }
   };
 
-  // --------- NEW: claim only the tokens we actually show ----------
   async function claimSelected(
     tokens: string[],
     {
@@ -509,13 +565,70 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     }: { onProgress?: (m?: string) => void; onSuccess?: (r?: any) => void; onError?: (e: any) => void }
   ) {
     try {
-      const n = tokens.length;
-      for (let i = 0; i < n; i++) {
-        const t = tokens[i];
-        onProgress?.(n > 1 ? `Claiming ${i + 1}/${n} tokens…` : "Claiming token…");
+      const selected = rows
+      // use rawBN to include dust-level rewards
+      .filter((r: RewardTokenRow & { rawBN?: bigint }) =>
+        (r.rawBN ?? 0n) > 0n && tokens.includes(r.address) && r.address !== ZERO
+      )
+      .map(r => ({
+        token: r.address as `0x${string}`,
+        epoch: (typeof r.epoch === 'bigint' ? r.epoch : lastEpoch) as bigint,
+        hadExplicitEpoch: typeof r.epoch === 'bigint',
+      }));
+
+
+      const missingEpochs = selected.some(x => !x.hadExplicitEpoch);
+      if (missingEpochs && lastEpoch) {
+        showToast(`Using funded epoch ${lastEpoch.toString()} for batch claim.`, "info");
+      }
+
+      if (selected.length === 0) {
+        onProgress?.('No claimable rewards.');
+        onSuccess?.();
+        return;
+      }
+  
+      const haveAllEpochs = selected.length > 0 && selected.every(x => typeof x.epoch === 'bigint');
+  
+      // Prefer single on-chain batch if we have epochs for every token
+      const MAX = 50;
+      if (distAddr && haveAllEpochs && selected.length > 1) {
+        for (let i = 0; i < selected.length; i += MAX) {
+          const slice = selected.slice(i, i + MAX);
+          onProgress?.(`Submitting batch claim ${i/MAX + 1}/${Math.ceil(selected.length / MAX)}…`);
+          let gas: bigint | undefined;
+          try {
+            gas = await publicClient?.estimateGas({
+              account: account as `0x${string}`,
+              address: distAddr as `0x${string}`,
+              abi: EPOCH_DIST_ABI,
+              functionName: 'claimMany',
+              args: [slice.map(x => x.token), slice.map(x => x.epoch as bigint)],
+            });
+          } catch {
+            gas = 200_000n + BigInt(slice.length) * 120_000n;
+          }
+          console.debug('[claimMany] dist', distAddr, 'n=', slice.length, 'epoch=', slice[0]?.epoch?.toString());
+          const hash = await writeContractAsync({
+            address: distAddr as `0x${string}`,
+            abi: EPOCH_DIST_ABI,
+            functionName: 'claimMany',
+            args: [slice.map(x => x.token), slice.map(x => x.epoch as bigint)],
+            ...(gas ? { gas } : {}),
+          });
+          await publicClient?.waitForTransactionReceipt({ hash });
+        }
+        onSuccess?.(); return;
+      }
+
+  
+      // Fallback: your existing single-token loop (works even if epoch is omitted because your hook handles it)
+      for (let i = 0; i < tokens.length; i++) {
+        const t = tokens[i] as `0x${string}`;
+        onProgress?.(tokens.length > 1 ? `Claiming ${i + 1}/${tokens.length} tokens…` : "Claiming token…");
         await claimReward(
-          t as `0x${string}`,
-          (receipt: any) => { if (i === n - 1) onSuccess?.(receipt); },
+          t,
+          (receipt: any) => { if (i === tokens.length - 1) onSuccess?.(receipt); },
           (e: any) => { onError?.(e); },
           (m?: string) => onProgress?.(m)
         );
@@ -525,6 +638,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       throw e;
     }
   }
+  
 
   // --------- Claim all (only currently-visible tokens) ----------
   const handleClaimAll = async () => {
@@ -534,7 +648,12 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     setIsProcessing(true);
     setProgressStep("Preparing claim…");
     try {
-      const selected = rows.filter(r => r.amountBN > 0n).map(r => r.address);
+      // include dust that rounds to 0.000000 in UI
+      const selected = rows
+      .filter((r: RewardTokenRow & { rawBN?: bigint }) => (r.rawBN ?? 0n) > 0n)
+      .map(r => r.address);
+
+
       await claimSelected(selected, {
         onProgress: (msg) => setProgressStep(msg ?? ""),
         onSuccess: (receipt) => {
