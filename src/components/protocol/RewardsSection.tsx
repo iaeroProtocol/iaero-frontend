@@ -476,7 +476,6 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
                 gradient,
                 epoch: (p.epoch ?? lastEpoch), // prefer per-item epoch, else default
                 // carry rawBN for selection (TS: ok to widen with "as any")
-                // @ts-expect-error custom field for internal use
                 rawBN,
               });
     }
