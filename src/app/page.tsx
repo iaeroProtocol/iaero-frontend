@@ -18,6 +18,7 @@ import RewardsSection from '@/components/protocol/RewardsSection';
 import ToastNotification from '@/components/protocol/ToastNotification';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import Image from 'next/image';
 
 // Custom Discord icon component (since Lucide doesn't have Discord)
 const DiscordIcon = ({ className }: { className?: string }) => (
@@ -30,24 +31,6 @@ const DiscordIcon = ({ className }: { className?: string }) => (
 const XIcon = ({ className }: { className?: string }) => (
   <svg className={className} viewBox="0 0 24 24" fill="currentColor">
     <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-  </svg>
-);
-
-// NEW: Classic Aero Shield Logo Component
-const AeroShieldLogo = ({ className = "w-full h-full" }: { className?: string }) => (
-  <svg viewBox="0 0 200 200" className={className}>
-    <defs>
-      <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-        <stop offset="0%" style={{stopColor: '#06b6d4', stopOpacity: 1}} />
-        <stop offset="100%" style={{stopColor: '#8b5cf6', stopOpacity: 1}} />
-      </linearGradient>
-    </defs>
-    <path d="M 100 40 L 140 80 Q 145 100, 140 120 L 100 160 L 60 120 Q 55 100, 60 80 Z" 
-          fill="url(#shieldGrad)" opacity="0.3"/>
-    <path d="M 100 50 L 130 80 Q 135 100, 130 120 L 100 150 L 70 120 Q 65 100, 70 80 Z" 
-          fill="url(#shieldGrad)" opacity="0.6"/>
-    <path d="M 100 65 L 120 85 Q 123 100, 120 115 L 100 135 L 80 115 Q 77 100, 80 85 Z" 
-          fill="url(#shieldGrad)"/>
   </svg>
 );
 
@@ -91,9 +74,14 @@ export default function IaeroProtocolApp() {
          <div className="flex items-center justify-between">
            <div className="flex items-center space-x-8">
              <div className="flex items-center space-x-3">
-              {/* NEW: Classic Aero Shield Logo */}
-              <div className="w-18 h-18 flex-shrink-0">
-                <AeroShieldLogo />
+              <div className="w-12 h-12 flex-shrink-0">
+                <Image 
+                  src="/upscaled_iaero_pfp.png" 
+                  alt="iAERO Protocol Logo"
+                  width={48}
+                  height={48}
+                  className="w-full h-full object-contain"
+                />
               </div>
       
                <div>
