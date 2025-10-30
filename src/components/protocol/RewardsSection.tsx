@@ -598,13 +598,14 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
           onProgress?.(`Submitting batch claim ${i/MAX + 1}/${Math.ceil(selected.length / MAX)}…`);
           let gas: bigint | undefined;
           try {
-            gas = await publicClient?.estimateGas({
+            gas = await publicClient?.estimateContractGas({
               account: account as `0x${string}`,
               address: distAddr as `0x${string}`,
               abi: EPOCH_DIST_ABI,
               functionName: 'claimMany',
               args: [slice.map(x => x.token), slice.map(x => x.epoch as bigint)],
             });
+            
           } catch {
             gas = 200_000n + BigInt(slice.length) * 120_000n;
           }
