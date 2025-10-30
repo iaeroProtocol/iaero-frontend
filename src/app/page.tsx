@@ -73,16 +73,16 @@ export default function IaeroProtocolApp() {
        <div className="w-full px-4 sm:px-6 lg:px-8 xl:px-12 2xl:px-16 py-4">
          <div className="flex items-center justify-between">
            <div className="flex items-center space-x-8">
-             <div className="flex items-center space-x-3">
-              <div className="w-12 h-12 flex-shrink-0">
-                <Image 
-                  src="/upscaled_iaero_pfp.png" 
-                  alt="iAERO Protocol Logo"
-                  width={48}
-                  height={48}
-                  className="w-full h-full object-contain"
-                />
-              </div>
+            <div className="flex items-center">
+              <Image 
+                src="/banner_upscaled.png" 
+                alt="iAero Protocol - Liquid Staking on Base"
+                width={400}
+                height={120}
+                className="h-12 md:h-14 lg:h-16 w-auto object-contain"
+                priority
+              />
+            </div>
       
                <div>
                  <h1 className="text-xl md:text-2xl font-bold text-white">iAero Protocol</h1>
