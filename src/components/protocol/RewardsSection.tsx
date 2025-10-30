@@ -484,15 +484,16 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
   // Use rawBN so dust-level rewards that round to 0 still count
   const hasRewards = useMemo(
-    () => rows.some((r) => r.rawBN > 0n),
+    () => rows.some((r) => (r.rawBN ?? 0n) > 0n),
     [rows]
   );
 
   // Sum only what’s actually claimable
   const totalRewardsUSD = useMemo(
-    () => rows.filter((r) => r.rawBN > 0n).reduce((s, r) => s + r.usdValue, 0),
+    () => rows.filter((r) => (r.rawBN ?? 0n) > 0n).reduce((s, r) => s + r.usdValue, 0),
     [rows]
   );
+
 
 
   const dailyRewardsPretty = useMemo(() => {
