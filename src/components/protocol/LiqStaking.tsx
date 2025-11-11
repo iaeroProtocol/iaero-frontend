@@ -533,39 +533,42 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
     const txId = "claimLiqRewards";
     setTransactionLoading(txId, true);
     setLoading(true);
-    
+  
     try {
-      const liqStakingAddr = getAddr('LIQStakingDistributor');
+      const liqStakingAddr = getAddr("LIQStakingDistributor");
       if (!liqStakingAddr) throw new Error("LIQ Staking contract not initialized");
-
-      const claimTokens = rows.filter((r) => r.amountBN > 0n).map((r) => r.address);
-      
-      let hash;
-      if (claimTokens.length && typeof ABIS.LIQStakingDistributor.find((f: any) => f.name === 'claimMany') !== 'undefined') {
-        hash = await writeContractAsync({
-          address: liqStakingAddr,
+  
+      const claimTokens = rows
+        .filter((r) => r.amountBN > 0n)
+        .map((r) => r.address as `0x${string}`);
+  
+      if (claimTokens.length === 0) {
+        showToast("No rewards to claim", "info");
+        return;
+      }
+  
+      const MAX = 50;
+  
+      showToast(`Claiming ${claimTokens.length} reward tokens...`, "info");
+  
+      // 🔹 Claim in chunks of 50 to respect contract limit
+      for (let i = 0; i < claimTokens.length; i += MAX) {
+        const slice = claimTokens.slice(i, i + MAX);
+        const hash = await writeContractAsync({
+          address: liqStakingAddr as `0x${string}`,
           abi: ABIS.LIQStakingDistributor,
-          functionName: 'claimMany',
-          args: [claimTokens],
+          functionName: "claimMany",
+          args: [slice],
           gas: 700_000n,
         });
-        showToast(`Claiming ${claimTokens.length} reward tokens...`, "info");
-      } else {
-        hash = await writeContractAsync({
-          address: liqStakingAddr,
-          abi: ABIS.LIQStakingDistributor,
-          functionName: 'claimRewards',
-          gas: 350_000n,
-        });
-        showToast("Claiming rewards...", "info");
+        showToast(`Claiming chunk ${i / MAX + 1} of ${Math.ceil(claimTokens.length / MAX)}...`, "info");
+        await publicClient?.waitForTransactionReceipt({ hash });
       }
-
-      await publicClient?.waitForTransactionReceipt({ hash });
+  
       showToast("Rewards claimed!", "success");
-
-      // Refresh
+  
+      // Refresh state
       await Promise.all([loadStakingStats(), loadBalances()]);
-      // Trigger rewards reload
       setBaseRows([]);
     } catch (e: any) {
       console.error("Claim error:", e);
@@ -575,6 +578,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       setTransactionLoading(txId, false);
     }
   };
+  
   
   if (!connected || !networkSupported) {
     return (
