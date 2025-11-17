@@ -72,6 +72,12 @@ const msgFromError = (e: any, fallback = "Transaction failed") => {
 
 const ZERO = "0x0000000000000000000000000000000000000000";
 
+// Hide rows that are effectively dust
+const DUST_USD = 0.01; // hide if USD value < 1 cent AND raw amount is tiny
+const dustRawThreshold = (dec: number) => (dec >= 12 ? 10n ** BigInt(dec - 12) : 0n); 
+// e.g. for 18-dec tokens, threshold is 10^(18-12)=1e6 raw units (~1e-12 tokens)
+
+
 const formatTimeAgo = (t: number) => {
   const s = Math.floor((Date.now() - t) / 1000);
   if (s < 60) return "just now";
@@ -83,6 +89,10 @@ const formatTimeAgo = (t: number) => {
 const EPOCH_DIST_ABI = parseAbi([
   'function claimMany(address[] tokens, uint256[] epochs) external',
 ]); // minimal ABI
+
+const ERC20_ABI = parseAbi(['function balanceOf(address) view returns (uint256)']);
+const PREVIEW_ABI = parseAbi(['function previewClaim(address user, address token, uint256 epoch) view returns (uint256)']);
+
 
 // ---------- Component ----------
 export default function RewardsSection({ showToast, formatNumber }: RewardsSectionProps) {
@@ -211,6 +221,53 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
   }
 
   // --------- Off-chain per-staker rewards JSON ----------
+
+  async function preflight(
+    items,
+    account,
+    distributor,
+    publicClient,
+    showToast
+  ) {
+    try {
+      const calls = items.flatMap(it => ([
+        { address: distributor, abi: PREVIEW_ABI, functionName: 'previewClaim', args: [account, it.token, it.epoch] },
+        { address: it.token,    abi: ERC20_ABI,  functionName: 'balanceOf',     args: [distributor] }
+      ]));
+  
+      const res = await publicClient.multicall({ contracts: calls });
+      const keep = [], drop = [];
+  
+      for (let i = 0; i < items.length; i++) {
+        const preview = res[2 * i];
+        const bal     = res[2 * i + 1];
+        const p = preview.status === 'success' ? (preview.result as bigint) : 0n;
+        const b = bal.status === 'success' ? (bal.result as bigint) : 0n;
+  
+        if (p > 0n && p <= b) {
+          keep.push({ ...items[i], preview: p });              // <-- include preview on keep
+        } else {
+          drop.push({ ...items[i], preview: p, bal: b });      // keep diagnostics for toasts
+        }
+      }
+  
+      if (drop.length > 0) {
+        for (const d of drop) {
+          showToast?.(
+            `⏭️ Skipping ${d.symbol || d.token.slice(0, 6)} @ epoch ${d.epoch} — preview ${Number(d.preview) / 1e18} > distributor bal ${Number(d.bal) / 1e18}`,
+            "warning"
+          );
+        }
+      }
+  
+      return { keep, drop };
+    } catch (err) {
+      console.error("Preflight check failed:", err);
+      return { keep: items, drop: [] }; // fail-open: don't hide rows
+    }
+  }
+  
+
   const STAKER_REWARDS_URL =
     process.env.NEXT_PUBLIC_STAKER_REWARDS_URL
     || "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/staker_rewards.json";
@@ -336,16 +393,60 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       setRewardsLoading(true);
       try {
         const list = await fetchOffchainPending(account);
-        const normalized = normalizeOffchain(list);
-        setPending(normalized as any);
-
-        // Preload any prices present in the file
+        const normalized = normalizeOffchain(list) as Array<{
+          token: string; raw: string; amount: string; decimals: number; symbol?: string; priceUsd?: number; usd?: number; epoch?: bigint;
+        }>;
+      
+        // If we don't have what we need for on-chain validation, fall back to raw list.
+        if (!publicClient || !distAddr || !account) {
+          setPending(normalized as any);
+        } else {
+          // Only validate rows that have an explicit epoch (we claim per-epoch)
+          const toCheck = normalized
+            .filter(it => typeof it.epoch === 'bigint' && it.token)
+            .map(it => ({
+              token: it.token as `0x${string}`,
+              epoch: it.epoch as bigint,
+              symbol: it.symbol
+            }));
+      
+          const { keep } = await preflight(toCheck, account as `0x${string}`, distAddr as `0x${string}`, publicClient, showToast);
+      
+          // Build a map token-epoch -> preview so we can rewrite amounts and hide unfunded rows
+          const keepMap = new Map<string, bigint>();
+          for (const k of keep) keepMap.set(`${k.token.toLowerCase()}-${k.epoch.toString()}`, k.preview as bigint);
+      
+          // Filter normalized to only the claimable ones; rewrite raw/amount (and usd if price available)
+          const validated = normalized
+            .filter(it => {
+              const key = `${(it.token || '').toLowerCase()}-${String(it.epoch ?? '')}`;
+              return keepMap.has(key);
+            })
+            .map(it => {
+              const key = `${(it.token || '').toLowerCase()}-${String(it.epoch ?? '')}`;
+              const preview = keepMap.get(key)!;              // guaranteed by filter
+              const dec = Number(it.decimals ?? 18);
+              const human = Number(preview) / 10 ** dec;
+              const px = typeof it.priceUsd === 'number' ? it.priceUsd : undefined;
+              return {
+                ...it,
+                raw: preview.toString(),
+                amount: String(human),
+                // keep usd if the file provided one; otherwise recompute only if we have a price
+                ...(px !== undefined ? { usd: human * px } : {})
+              };
+            });
+      
+          setPending(validated as any);
+        }
+      
+        // Preload any prices present in the file (unchanged)
         const preloaded: Record<string, number> = {};
         for (const it of normalized) {
-                    if (it.token && typeof it.priceUsd === "number" && isFinite(it.priceUsd)) {
-                      preloaded[it.token] = it.priceUsd;
-                    }
-                  }
+          if (it.token && typeof it.priceUsd === "number" && isFinite(it.priceUsd)) {
+            preloaded[it.token] = it.priceUsd;
+          }
+        }
         if (Object.keys(preloaded).length) setPriceByAddr(prev => ({ ...prev, ...preloaded }));
       } catch (e) {
         console.error("load off-chain pending rewards failed", e);
@@ -454,12 +555,21 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
         const frac = (parts[1] || '').padEnd(decimals, '0').slice(0, decimals);
         amountBN = BigInt(whole + (decimals ? frac : ''));
       } catch {}
-      // rawBN for selection/claim (ensures dust isn't filtered out)
+
+      // rawBN first (we’ll use it for dust filtering)
       let rawBN: bigint = 0n;
       try { rawBN = BigInt(p.raw || '0'); } catch {}
+
       const humanFloat = Number(p.amount || '0') || 0;
       const price = (typeof p.priceUsd === 'number' ? p.priceUsd : (priceByAddr[addr] ?? 0));
       const usdValue = typeof p.usd === 'number' ? p.usd : (humanFloat * price);
+
+      // --------- DUST FILTER ---------
+      // Hide if both USD value is tiny AND raw amount is tiny
+      const rawDust = dustRawThreshold(decimals);
+      if ((usdValue < DUST_USD) && (rawBN <= rawDust)) continue;
+      // --------------------------------
+
 
       let icon = '💰', gradient = 'from-slate-600 to-slate-700';
       if (symbol === 'AERO') { icon = '🚀'; gradient = 'from-blue-500 to-cyan-500'; }
@@ -520,16 +630,56 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     setIsRefreshing(true);
     try {
       const list = await fetchOffchainPending(account);
-      setPending(normalizeOffchain(list) as any);
-
-      // preload any prices
+      const normalized = normalizeOffchain(list) as Array<{
+        token: string; raw: string; amount: string; decimals: number; symbol?: string; priceUsd?: number; usd?: number; epoch?: bigint;
+      }>;
+  
+      if (!publicClient || !distAddr) {
+        setPending(normalized as any);
+      } else {
+        const toCheck = normalized
+          .filter(it => typeof it.epoch === 'bigint' && it.token)
+          .map(it => ({
+            token: it.token as `0x${string}`,
+            epoch: it.epoch as bigint,
+            symbol: it.symbol
+          }));
+  
+        const { keep } = await preflight(toCheck, account as `0x${string}`, distAddr as `0x${string}`, publicClient, showToast);
+  
+        const keepMap = new Map<string, bigint>();
+        for (const k of keep) keepMap.set(`${k.token.toLowerCase()}-${k.epoch.toString()}`, k.preview as bigint);
+  
+        const validated = normalized
+          .filter(it => {
+            const key = `${(it.token || '').toLowerCase()}-${String(it.epoch ?? '')}`;
+            return keepMap.has(key);
+          })
+          .map(it => {
+            const key = `${(it.token || '').toLowerCase()}-${String(it.epoch ?? '')}`;
+            const preview = keepMap.get(key)!;
+            const dec = Number(it.decimals ?? 18);
+            const human = Number(preview) / 10 ** dec;
+            const px = typeof it.priceUsd === 'number' ? it.priceUsd : undefined;
+            return {
+              ...it,
+              raw: preview.toString(),
+              amount: String(human),
+              ...(px !== undefined ? { usd: human * px } : {})
+            };
+          });
+  
+        setPending(validated as any);
+      }
+  
+      // Preload any prices in the file (unchanged)
       const preloaded: Record<string, number> = {};
       for (const it of list) {
         const k = (it.token || "").toLowerCase();
         if (k && typeof it.priceUsd === "number" && isFinite(it.priceUsd)) preloaded[k] = it.priceUsd;
       }
       if (Object.keys(preloaded).length) setPriceByAddr(prev => ({ ...prev, ...preloaded }));
-
+  
       showToast("Rewards refreshed", "info");
     } catch {
       showToast("Failed to refresh rewards", "error");
@@ -537,6 +687,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       setIsRefreshing(false);
     }
   };
+  
 
   // --------- Gas sanity check ----------
   const checkGasBalance = async (): Promise<boolean> => {
@@ -565,17 +716,18 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     }: { onProgress?: (m?: string) => void; onSuccess?: (r?: any) => void; onError?: (e: any) => void }
   ) {
     try {
+      // Build the candidate (token, epoch) set from currently-visible rows
       const selected = rows
-      // use rawBN to include dust-level rewards
-      .filter((r: RewardTokenRow & { rawBN?: bigint }) =>
-        (r.rawBN ?? 0n) > 0n && tokens.includes(r.address) && r.address !== ZERO
-      )
-      .map(r => ({
-        token: r.address as `0x${string}`,
-        epoch: (typeof r.epoch === 'bigint' ? r.epoch : lastEpoch) as bigint,
-        hadExplicitEpoch: typeof r.epoch === 'bigint',
-      }));
-
+        // keep dust-level by rawBN
+        .filter((r: RewardTokenRow & { rawBN?: bigint }) =>
+          (r.rawBN ?? 0n) > 0n && tokens.includes(r.address) && r.address !== ZERO
+        )
+        .map(r => ({
+          token: r.address as `0x${string}`,
+          epoch: (typeof r.epoch === 'bigint' ? r.epoch : lastEpoch) as bigint,
+          hadExplicitEpoch: typeof r.epoch === 'bigint',
+          symbol: r.symbol,
+        }));
 
       const missingEpochs = selected.some(x => !x.hadExplicitEpoch);
       if (missingEpochs && lastEpoch) {
@@ -587,15 +739,32 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
         onSuccess?.();
         return;
       }
-  
-      const haveAllEpochs = selected.length > 0 && selected.every(x => typeof x.epoch === 'bigint');
-  
-      // Prefer single on-chain batch if we have epochs for every token
+
+      // ---------- NEW: preflight guard ----------
+      // Skip any (token, epoch) where preview > distributor balance (prevents ERC20: transfer amount exceeds balance)
+      const { keep, drop } = await preflight(
+        selected.map(x => ({ token: x.token, epoch: x.epoch, symbol: x.symbol })), // pass minimal fields
+        account as `0x${string}`,
+        distAddr as `0x${string}`,
+        publicClient,
+        showToast
+      );
+
+      if (keep.length === 0) {
+        onProgress?.('No claimable after preflight.');
+        onSuccess?.();
+        return;
+      }
+      // ------------------------------------------
+
+      const haveAllEpochs = keep.length > 0 && keep.every(x => typeof x.epoch === 'bigint');
+
+      // Prefer on-chain batch when we have epochs for every token (should be true now)
       const MAX = 50;
-      if (distAddr && haveAllEpochs && selected.length > 1) {
-        for (let i = 0; i < selected.length; i += MAX) {
-          const slice = selected.slice(i, i + MAX);
-          onProgress?.(`Submitting batch claim ${i/MAX + 1}/${Math.ceil(selected.length / MAX)}…`);
+      if (distAddr && haveAllEpochs) {
+        for (let i = 0; i < keep.length; i += MAX) {
+          const slice = keep.slice(i, i + MAX);
+          onProgress?.(`Submitting batch claim ${Math.floor(i / MAX) + 1}/${Math.ceil(keep.length / MAX)}…`);
           let gas: bigint | undefined;
           try {
             gas = await publicClient?.estimateContractGas({
@@ -605,11 +774,11 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
               functionName: 'claimMany',
               args: [slice.map(x => x.token), slice.map(x => x.epoch as bigint)],
             });
-            
           } catch {
+            // conservative fallback gas
             gas = 200_000n + BigInt(slice.length) * 120_000n;
           }
-          console.debug('[claimMany] dist', distAddr, 'n=', slice.length, 'epoch=', slice[0]?.epoch?.toString());
+          console.debug('[claimMany] dist', distAddr, 'n=', slice.length, 'epoch0=', slice[0]?.epoch?.toString());
           const hash = await writeContractAsync({
             address: distAddr as `0x${string}`,
             abi: EPOCH_DIST_ABI,
@@ -619,11 +788,11 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
           });
           await publicClient?.waitForTransactionReceipt({ hash });
         }
-        onSuccess?.(); return;
+        onSuccess?.();
+        return;
       }
 
-  
-      // Fallback: your existing single-token loop (works even if epoch is omitted because your hook handles it)
+      // Fallback (unlikely now): previous single-token loop
       for (let i = 0; i < tokens.length; i++) {
         const t = tokens[i] as `0x${string}`;
         onProgress?.(tokens.length > 1 ? `Claiming ${i + 1}/${tokens.length} tokens…` : "Claiming token…");
@@ -639,6 +808,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       throw e;
     }
   }
+
   
 
   // --------- Claim all (only currently-visible tokens) ----------
@@ -671,11 +841,9 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
           // refresh from off-chain file
           void (async () => {
-            try {
-              const list = await fetchOffchainPending(account!);
-              setPending(normalizeOffchain(list) as any);
-            } catch {}
+            try { await handleRefresh(); } catch {}
           })();
+          
         },
         onError: (e) => showToast(msgFromError(e, "Claim failed"), "error"),
       });
@@ -709,11 +877,9 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
           // refresh from off-chain file
           void (async () => {
-            try {
-              const list = await fetchOffchainPending(account!);
-              setPending(normalizeOffchain(list) as any);
-            } catch {}
+            try { await handleRefresh(); } catch {}
           })();
+          
         },
         onError: (e) => showToast(msgFromError(e, `${symbol} claim failed`), "error"),
       });
