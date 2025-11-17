@@ -227,8 +227,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     items: PreflightItem[],
     account: `0x${string}`,
     distributor: `0x${string}`,
-    publicClient: any,
-    showToast?: (m: string, t: "success" | "error" | "info" | "warning") => void
+    publicClient: NonNullable<ReturnType<typeof usePublicClient>>
   ): Promise<{
     keep: Array<PreflightItem & { preview: bigint }>;
     drop: Array<PreflightItem & { preview: bigint; bal: bigint }>;
@@ -258,9 +257,8 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
   
       if (drop.length > 0) {
         for (const d of drop) {
-          showToast?.(
-            `⏭️ Skipping ${d.symbol || d.token.slice(0, 6)} @ epoch ${d.epoch} — preview ${Number(d.preview) / 1e18} > distributor bal ${Number(d.bal) / 1e18}`,
-            "warning"
+          console.warn(
+            `[rewards] skipping ${d.symbol || d.token} @ epoch ${d.epoch} — preview=${Number(d.preview)/1e18} bal=${Number(d.bal)/1e18}`
           );
         }
       }
@@ -419,7 +417,9 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
               symbol: it.symbol
             }));
       
-          const { keep } = await preflight(toCheck, account as `0x${string}`, distAddr as `0x${string}`, publicClient, showToast);
+          const { keep } = await preflight(toCheck, account as `0x${string}`, distAddr as `0x${string}`, publicClient);
+
+
       
           // Build a map token-epoch -> preview so we can rewrite amounts and hide unfunded rows
           const keepMap = new Map<string, bigint>();
@@ -654,7 +654,8 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
             symbol: it.symbol
           }));
   
-        const { keep } = await preflight(toCheck, account as `0x${string}`, distAddr as `0x${string}`, publicClient, showToast);
+        const { keep } = await preflight(toCheck, account as `0x${string}`, distAddr as `0x${string}`, publicClient);
+
   
         const keepMap = new Map<string, bigint>();
         for (const k of keep) keepMap.set(`${k.token.toLowerCase()}-${k.epoch.toString()}`, k.preview as bigint);
@@ -756,7 +757,6 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
         account as `0x${string}`,
         distAddr as `0x${string}`,
         publicClient,
-        showToast
       );
 
       if (keep.length === 0) {
