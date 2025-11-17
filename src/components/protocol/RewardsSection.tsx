@@ -221,14 +221,18 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
   }
 
   // --------- Off-chain per-staker rewards JSON ----------
+  type PreflightItem = { token: `0x${string}`; epoch: bigint; symbol?: string };
 
   async function preflight(
-    items,
-    account,
-    distributor,
-    publicClient,
-    showToast
-  ) {
+    items: PreflightItem[],
+    account: `0x${string}`,
+    distributor: `0x${string}`,
+    publicClient: any,
+    showToast?: (m: string, t: "success" | "error" | "info" | "warning") => void
+  ): Promise<{
+    keep: Array<PreflightItem & { preview: bigint }>;
+    drop: Array<PreflightItem & { preview: bigint; bal: bigint }>;
+  }> {
     try {
       const calls = items.flatMap(it => ([
         { address: distributor, abi: PREVIEW_ABI, functionName: 'previewClaim', args: [account, it.token, it.epoch] },
@@ -236,7 +240,8 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       ]));
   
       const res = await publicClient.multicall({ contracts: calls });
-      const keep = [], drop = [];
+      const keep: Array<PreflightItem & { preview: bigint }> = [];
+      const drop: Array<PreflightItem & { preview: bigint; bal: bigint }> = [];
   
       for (let i = 0; i < items.length; i++) {
         const preview = res[2 * i];
@@ -245,9 +250,9 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
         const b = bal.status === 'success' ? (bal.result as bigint) : 0n;
   
         if (p > 0n && p <= b) {
-          keep.push({ ...items[i], preview: p });              // <-- include preview on keep
+          keep.push({ ...items[i], preview: p });
         } else {
-          drop.push({ ...items[i], preview: p, bal: b });      // keep diagnostics for toasts
+          drop.push({ ...items[i], preview: p, bal: b });
         }
       }
   
@@ -263,9 +268,11 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       return { keep, drop };
     } catch (err) {
       console.error("Preflight check failed:", err);
-      return { keep: items, drop: [] }; // fail-open: don't hide rows
+      // fail-open: don't hide rows
+      return { keep: items.map(it => ({ ...it, preview: 0n })), drop: [] };
     }
   }
+  
   
 
   const STAKER_REWARDS_URL =
@@ -282,6 +289,8 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     symbol?: string;
     epoch?: number | string;
   };
+
+ 
 
   function normalizeOffchain(list: PendingJsonItem[]) {
     return list.map((it) => {
