@@ -8,6 +8,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { parseAbi } from 'viem';
+import type { PublicClient, Transport, Chain } from 'viem';
+
 import {
   Gift,
   TrendingUp,
@@ -227,7 +229,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     items: PreflightItem[],
     account: `0x${string}`,
     distributor: `0x${string}`,
-    publicClient: NonNullable<ReturnType<typeof usePublicClient>>
+    publicClient: PublicClient<Transport, Chain>,
   ): Promise<{
     keep: Array<PreflightItem & { preview: bigint }>;
     drop: Array<PreflightItem & { preview: bigint; bal: bigint }>;
