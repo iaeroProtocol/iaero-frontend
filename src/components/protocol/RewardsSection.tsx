@@ -229,18 +229,24 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     items: PreflightItem[],
     account: `0x${string}`,
     distributor: `0x${string}`,
-    publicClient: PublicClient<Transport, Chain>,
   ): Promise<{
     keep: Array<PreflightItem & { preview: bigint }>;
     drop: Array<PreflightItem & { preview: bigint; bal: bigint }>;
   }> {
     try {
+
+      const pc = publicClient as unknown as PublicClient<Transport, Chain> | undefined;
+      if (!pc) {
+        console.warn('[rewards] preflight skipped (no publicClient)');
+        // fail-open: don’t hide rows
+        return { keep: items.map(it => ({ ...it, preview: 0n })), drop: [] };
+      }
       const calls = items.flatMap(it => ([
         { address: distributor, abi: PREVIEW_ABI, functionName: 'previewClaim', args: [account, it.token, it.epoch] },
         { address: it.token,    abi: ERC20_ABI,  functionName: 'balanceOf',     args: [distributor] }
       ]));
   
-      const res = await publicClient.multicall({ contracts: calls });
+      const res = await pc.multicall({ contracts: calls });
       const keep: Array<PreflightItem & { preview: bigint }> = [];
       const drop: Array<PreflightItem & { preview: bigint; bal: bigint }> = [];
   
@@ -419,7 +425,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
               symbol: it.symbol
             }));
       
-          const { keep } = await preflight(toCheck, account as `0x${string}`, distAddr as `0x${string}`, publicClient);
+          const { keep } = await preflight(toCheck, account as `0x${string}`, distAddr as `0x${string}`);
 
 
       
@@ -656,7 +662,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
             symbol: it.symbol
           }));
   
-        const { keep } = await preflight(toCheck, account as `0x${string}`, distAddr as `0x${string}`, publicClient);
+        const { keep } = await preflight(toCheck, account as `0x${string}`, distAddr as `0x${string}`);
 
   
         const keepMap = new Map<string, bigint>();
@@ -758,7 +764,6 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
         selected.map(x => ({ token: x.token, epoch: x.epoch, symbol: x.symbol })), // pass minimal fields
         account as `0x${string}`,
         distAddr as `0x${string}`,
-        publicClient,
       );
 
       if (keep.length === 0) {
