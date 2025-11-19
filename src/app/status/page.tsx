@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Activity, Server, Network, Trophy, Database, Search } from 'lucide-react';
+import { Activity, Server, Network, Trophy, Database, Search, ArrowUpDown } from 'lucide-react';
 
 const API_BASE = process.env.NEXT_PUBLIC_POINTS_API || '';
 
@@ -16,7 +16,6 @@ type Health = {
   targets: string[];
 };
 
-
 type Meta = {
   wallets: number;
   daily: number;
@@ -25,7 +24,11 @@ type Meta = {
   claimers: number;
 };
 
-type LbItem = { address: string; points: string };
+type LbItem = { 
+  address: string; 
+  points: string;
+  totalStaked: string; 
+};
 
 type WalletInfo = {
   address: string;
@@ -41,6 +44,9 @@ export default function StatusPage() {
   const [top, setTop] = useState<LbItem[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
+  // NEW: Sort state
+  const [sortBy, setSortBy] = useState<'points' | 'staked'>('points');
+
   // wallet lookup state
   const [addrInput, setAddrInput] = useState('');
   const [lookupLoading, setLookupLoading] = useState(false);
@@ -51,7 +57,6 @@ export default function StatusPage() {
     try {
       setErr(null);
 
-      // /health (required)
       const hRes = await fetch(`${API_BASE}/health`, { cache: 'no-store' });
       if (hRes.ok) {
         const h = (await hRes.json()) as Health;
@@ -60,19 +65,16 @@ export default function StatusPage() {
         setHealth(null);
       }
 
-      // /meta (optional)
       try {
         const mRes = await fetch(`${API_BASE}/meta`, { cache: 'no-store' });
         if (mRes.ok) {
           const m = (await mRes.json()) as Meta;
           if (m && typeof m === 'object') setMeta(m);
         }
-      } catch {
-        /* ignore */
-      }
+      } catch { /* ignore */ }
 
-      // /leaderboard
-      const lbRes = await fetch(`${API_BASE}/leaderboard?limit=10`, { cache: 'no-store' });
+      // UPDATED: Pass sort param
+      const lbRes = await fetch(`${API_BASE}/leaderboard?limit=10&sort=${sortBy}`, { cache: 'no-store' });
       if (lbRes.ok) {
         const lb = await lbRes.json();
         setTop(Array.isArray(lb) ? lb : []);
@@ -84,13 +86,13 @@ export default function StatusPage() {
     }
   };
 
+  // Refetch whenever sort changes
   useEffect(() => {
     fetchAll();
     const id = setInterval(fetchAll, 30_000);
     return () => clearInterval(id);
-  }, []);
+  }, [sortBy]); 
 
-  // numeric derivations
   const head = useMemo(() => {
     try { return BigInt(health?.head != null ? String(health.head) : '0'); }
     catch { return 0n; }
@@ -101,10 +103,8 @@ export default function StatusPage() {
     catch { return 0n; }
   }, [health]);
   
-  const lag = (health?.lag ?? Number(head - chk)) || 0; // keep this
+  const lag = (health?.lag ?? Number(head - chk)) || 0; 
   
-
-
   const progPct = useMemo(() => {
     const L = Number(lag || 0);
     if (!isFinite(L)) return 0;
@@ -112,9 +112,16 @@ export default function StatusPage() {
     return Math.max(0, Math.min(100, 100 - (L / 100) * 5));
   }, [lag]);
 
-  // wallet lookup
   const isHexAddress = (s: string) => /^0x[0-9a-fA-F]{40}$/.test(s.trim());
   const fmtTime = (unix: number) => (unix ? new Date(unix * 1000).toLocaleString() : '—');
+
+  const formatInteger = (val: string | number) => {
+    const n = typeof val === 'string' ? parseFloat(val) : val;
+    if (isNaN(n)) return '0';
+    return n.toLocaleString('en-US', {
+      maximumFractionDigits: 0 
+    });
+  };
 
   const doLookup = async () => {
     setLookupError(null);
@@ -134,7 +141,6 @@ export default function StatusPage() {
       }
       const data = (await r.json()) as WalletInfo;
       setResult(data);
-      // opportunistic refresh
       fetchAll();
     } catch (e: any) {
       setLookupError(String(e?.message || e));
@@ -145,6 +151,22 @@ export default function StatusPage() {
 
   const onEnter = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') doLookup();
+  };
+
+  // Helper for clickable headers
+  const SortHeader = ({ label, sortKey }: { label: string, sortKey: 'points' | 'staked' }) => {
+    const isActive = sortBy === sortKey;
+    return (
+      <th 
+        className={`py-2 pr-4 cursor-pointer hover:text-white transition-colors group ${isActive ? 'text-white' : ''}`}
+        onClick={() => setSortBy(sortKey)}
+      >
+        <div className={`flex items-center gap-1 ${sortKey === 'staked' ? 'justify-end' : ''}`}>
+          {label}
+          <ArrowUpDown className={`w-3 h-3 opacity-0 group-hover:opacity-50 ${isActive ? 'opacity-100' : ''}`} />
+        </div>
+      </th>
+    );
   };
 
   return (
@@ -158,9 +180,7 @@ export default function StatusPage() {
           </div>
         )}
 
-        {/* TOP: Leaderboard + Wallet Lookup */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Leaderboard (spans 2) */}
           <Card className="bg-slate-800/50 border-slate-700/50 lg:col-span-2">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-white">
@@ -168,23 +188,17 @@ export default function StatusPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {/* Outer keeps horizontal scroll if needed */}
               <div className="overflow-x-auto">
-                {/* Inner adds vertical scroll + height cap */}
                 <div className="overflow-y-auto max-h-[60vh] lg:max-h-[520px] rounded-md">
                 <table className="min-w-full text-left">
-                    <thead
-                    className="
-                        sticky top-0 z-10
-                        text-slate-300
-                        bg-slate-900/60 backdrop-blur
-                        supports-[backdrop-filter]:bg-slate-900/40
-                    "
-                    >
+                    <thead className="sticky top-0 z-10 text-slate-300 bg-slate-900/60 backdrop-blur supports-[backdrop-filter]:bg-slate-900/40">
                     <tr className="border-b border-slate-700/40">
                         <th className="py-2 pr-4">#</th>
                         <th className="py-2 pr-4">Address</th>
-                        <th className="py-2 pr-4">Points</th>
+                        
+                        {/* UPDATED: Clickable Headers */}
+                        <SortHeader label="Points" sortKey="points" />
+                        <SortHeader label="Total Staked" sortKey="staked" />
                     </tr>
                     </thead>
                     <tbody className="text-slate-200">
@@ -194,12 +208,13 @@ export default function StatusPage() {
                         <td className="py-2 pr-4">
                             <span className="font-mono break-all">{row.address}</span>
                         </td>
-                        <td className="py-2 pr-4">{row.points}</td>
+                        <td className="py-2 pr-4">{formatInteger(row.points)}</td>
+                        <td className="py-2 pr-4 text-right">{formatInteger(row.totalStaked)}</td>
                         </tr>
                     ))}
                     {top.length === 0 && (
                         <tr className="border-t border-slate-700/40">
-                        <td colSpan={3} className="py-4 text-slate-400">
+                        <td colSpan={4} className="py-4 text-slate-400">
                             No entries yet.
                         </td>
                         </tr>
@@ -211,7 +226,7 @@ export default function StatusPage() {
             </CardContent>
           </Card>
 
-          {/* Wallet Lookup */}
+          {/* Wallet Lookup Card (Unchanged) */}
           <Card className="bg-slate-800/50 border-slate-700/50">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-white">
@@ -263,7 +278,7 @@ export default function StatusPage() {
                         <td className="py-2 pr-4">
                           <span className="font-mono break-all">{result.address}</span>
                         </td>
-                        <td className="py-2 pr-4">{result.points}</td>
+                        <td className="py-2 pr-4">{formatInteger(result.points)}</td> 
                         <td className="py-2 pr-4">{String(result.lastBalance)}</td>
                         <td className="py-2 pr-4">{fmtTime(result.lastTimestamp)}</td>
                       </tr>
@@ -275,7 +290,7 @@ export default function StatusPage() {
           </Card>
         </div>
 
-        {/* SECONDARY: Chain/Targets + Head/Checkpoint + Sync */}
+        {/* Bottom cards remain unchanged */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <Card className="bg-slate-800/50 border-slate-700/50">
             <CardHeader className="pb-2">
@@ -342,7 +357,6 @@ export default function StatusPage() {
           </Card>
         </div>
 
-        {/* TERTIARY: Table Counts */}
         <div>
           <Card className="bg-slate-800/50 border-slate-700/50">
             <CardHeader className="pb-2">
