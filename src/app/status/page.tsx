@@ -115,12 +115,12 @@ export default function StatusPage() {
   const isHexAddress = (s: string) => /^0x[0-9a-fA-F]{40}$/.test(s.trim());
   const fmtTime = (unix: number) => (unix ? new Date(unix * 1000).toLocaleString() : '—');
 
-  // UPDATED: Helper includes temporary / 2 fix for totalStaked
+
   const formatInteger = (val: string | number) => {
     const rawN = typeof val === 'string' ? parseFloat(val) : val;
     
     // TEMPORARY FIX: Divide totalStaked by 2 to compensate for indexer double-counting
-    const n = rawN / 2;
+    const n = rawN;
 
     if (isNaN(n) || n < 0) return '0';
     return n.toLocaleString('en-US', {
