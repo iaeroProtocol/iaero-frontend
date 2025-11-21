@@ -2,7 +2,7 @@ import type { NextConfig } from 'next'
 
 const nextConfig: NextConfig = {
   // 👇 This makes `next build` produce a fully static site in /out
-  output: 'export',
+
 
   // Images: already fine for export (no Image Optimization server)
   images: { unoptimized: true },

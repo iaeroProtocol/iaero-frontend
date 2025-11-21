@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "pages:build": "npx @cloudflare/next-on-pages",   
+    "deploy": "npm run pages:build && wrangler pages deploy .vercel/output/static",
     "start": "next start",
     "lint": "next lint"
   },
@@ -44,6 +46,7 @@
     "wagmi": "^2.16.8"
   },
   "devDependencies": {
+    "@cloudflare/next-on-pages": "^1.13.16",
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4.1.12",
     "@types/node": "^24",
