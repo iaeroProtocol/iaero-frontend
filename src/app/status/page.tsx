@@ -36,7 +36,9 @@ type WalletInfo = {
   lastBalance: string | number | bigint;
   lastTimestamp: number;
   rank?: number | null;
+  totalStaked?: string; 
 };
+
 
 export default function StatusPage() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -115,6 +117,12 @@ export default function StatusPage() {
   const isHexAddress = (s: string) => /^0x[0-9a-fA-F]{40}$/.test(s.trim());
   const fmtTime = (unix: number) => (unix ? new Date(unix * 1000).toLocaleString() : '—');
 
+  const formatPoints = (v: string) => {
+    const int = v.split('.')[0];   // keep integer portion
+    return Number(int).toLocaleString('en-US');
+  };
+  
+
 
   const formatInteger = (val: string | number) => {
     const rawN = typeof val === 'string' ? parseFloat(val) : val;
@@ -131,21 +139,27 @@ export default function StatusPage() {
   const doLookup = async () => {
     setLookupError(null);
     setResult(null);
-
+  
     const a = addrInput.trim();
     if (!isHexAddress(a)) {
       setLookupError('Enter a valid 0x-address');
       return;
     }
+  
     setLookupLoading(true);
     try {
       const r = await fetch(`${API_BASE}/points/${a.toLowerCase()}`, { cache: 'no-store' });
-      if (!r.ok) {
-        const j = await r.json().catch(() => ({}));
-        throw new Error(j?.error || `Lookup failed (${r.status})`);
+      const body = await r.json().catch(() => null);
+  
+      if (!r.ok || !body) {
+        const errMsg = (body as any)?.error || `Lookup failed (${r.status})`;
+        throw new Error(errMsg);
       }
-      const data = (await r.json()) as WalletInfo;
+  
+      const data = body as WalletInfo;
       setResult(data);
+  
+      // optional: keep meta/leaderboard fresh
       fetchAll();
     } catch (e: any) {
       setLookupError(String(e?.message || e));
@@ -153,6 +167,7 @@ export default function StatusPage() {
       setLookupLoading(false);
     }
   };
+  
 
   const onEnter = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') doLookup();
@@ -213,7 +228,7 @@ export default function StatusPage() {
                         <td className="py-2 pr-4">
                             <span className="font-mono break-all">{row.address}</span>
                         </td>
-                        <td className="py-2 pr-4">{formatInteger(row.points)}</td>
+                        <td className="py-2 pr-4">{formatPoints(row.points)}</td>
                         <td className="py-2 pr-4 text-right">{formatInteger(row.totalStaked)}</td>
                         </tr>
                     ))}
@@ -271,6 +286,7 @@ export default function StatusPage() {
                         <th className="py-2 pr-4">Rank</th> 
                         <th className="py-2 pr-4">Address</th>
                         <th className="py-2 pr-4">Points</th>
+                        <th className="py-2 pr-4">Total Staked</th>
                         <th className="py-2 pr-4">Last Balance (wei)</th>
                         <th className="py-2 pr-4">Last Timestamp</th>
                       </tr>
@@ -283,11 +299,22 @@ export default function StatusPage() {
                         <td className="py-2 pr-4">
                           <span className="font-mono break-all">{result.address}</span>
                         </td>
-                        <td className="py-2 pr-4">{formatInteger(result.points)}</td> 
+
+                        {/* Points column */}
+                        <td className="py-2 pr-4">
+                          {formatPoints(result.points)}
+                        </td>
+
+                        {/* Total Staked column */}
+                        <td className="py-2 pr-4">
+                          {result.totalStaked != null ? formatInteger(result.totalStaked) : '—'}
+                        </td>
+
                         <td className="py-2 pr-4">{String(result.lastBalance)}</td>
                         <td className="py-2 pr-4">{fmtTime(result.lastTimestamp)}</td>
                       </tr>
                     </tbody>
+
                   </table>
                 </div>
               )}
