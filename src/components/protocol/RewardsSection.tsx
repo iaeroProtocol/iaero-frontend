@@ -35,16 +35,67 @@ import { usePrices } from "@/components/contexts/PriceContext";
 // --------------------------------------------------------------------------
 // 1. CONFIGURATION & ABIS
 // --------------------------------------------------------------------------
-
-// 🚨 TODO: REPLACE THIS WITH YOUR ACTUAL DEPLOYED REWARD SWAPPER ADDRESS
 const SWAPPER_ADDRESS = "0x25f11f947309df89bf4d36da5d9a9fb5f1e186c1"; 
-
-// Registry Address
 const REGISTRY_ADDRESS = "0xd3e32B22Da6Bf601A5917ECd344a7Ec46BCA072c";
+
+// ✅ AERODROME CONFIGURATION
+const AERODROME_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43";
+const AERODROME_FACTORY = "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"; // Default V2 Factory
+
+const AERO_ADDR = "0x940181a94A35A4569E4529A3CDfB74e38FD98631";
+const IAERO_ADDR = "0x81034Fb34009115F215f5d5F564AAc9FfA46a1Dc";
+const USDC_ADDR = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+
+const AERODROME_ABI = [
+  {
+    inputs: [
+      { name: 'amountIn', type: 'uint256' },
+      { name: 'amountOutMin', type: 'uint256' },
+      {
+        name: 'routes',
+        type: 'tuple[]',
+        components: [
+          { name: 'from', type: 'address' },
+          { name: 'to', type: 'address' },
+          { name: 'stable', type: 'bool' },
+          { name: 'factory', type: 'address' }
+        ]
+      },
+      { name: 'to', type: 'address' },
+      { name: 'deadline', type: 'uint256' }
+    ],
+    name: 'swapExactTokensForTokens',
+    outputs: [{ name: 'amounts', type: 'uint256[]' }],
+    stateMutability: 'nonpayable',
+    type: 'function'
+  },
+  {
+    inputs: [
+      { name: 'amountIn', type: 'uint256' },
+      {
+        name: 'routes',
+        type: 'tuple[]',
+        components: [
+          { name: 'from', type: 'address' },
+          { name: 'to', type: 'address' },
+          { name: 'stable', type: 'bool' },
+          { name: 'factory', type: 'address' }
+        ]
+      }
+    ],
+    name: 'getAmountsOut',
+    outputs: [{ name: 'amounts', type: 'uint256[]' }],
+    stateMutability: 'view',
+    type: 'function'
+  }
+] as const;
 
 if (SWAPPER_ADDRESS.includes("YOUR_DEPLOYED")) {
     console.error("🚨 SWAPPER_ADDRESS not set in RewardsSection.tsx");
 }
+
+const REWARDS_JSON_URL = process.env.NEXT_PUBLIC_REWARDS_JSON_URL || "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/estimated_rewards_usd.json";
+const STAKER_REWARDS_JSON_URL = process.env.NEXT_PUBLIC_STAKER_REWARDS_JSON_URL || "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/staker_rewards.json";
 
 // [FIXED] Use JSON ABI to prevent 'Invalid ABI parameter' tuple errors
 const SWAPPER_ABI = [
@@ -150,6 +201,88 @@ interface TxHistory {
   totalValue: number;
   timestamp: number;
   txHash?: string;
+}
+
+// 1. Define the interface for your JSON structure
+interface JsonRewardItem {
+  token: string;      // The token contract address
+  symbol: string;
+  decimals: number;
+  amount: string;     // The raw amount string
+  epoch: number;      // CRITICAL: The timestamp
+  priceUsd: number;
+}
+
+interface JsonResponse {
+  address: string;
+  pending: JsonRewardItem[];
+}
+
+async function fetchRewardsFromJson(userAddress: string): Promise<JsonRewardItem[]> {
+  try {
+    console.log(`🌐 Fetching Rewards from: ${STAKER_REWARDS_JSON_URL}`);
+    const response = await fetch(STAKER_REWARDS_JSON_URL, { cache: "no-store" });
+    if (!response.ok) throw new Error(`Failed to fetch rewards JSON: ${response.status}`);
+    
+    const data = await response.json();
+    const targetAddr = userAddress.toLowerCase();
+
+    console.log("👤 Looking for user:", targetAddr);
+
+    // --- UNIVERSAL SEARCHER ---
+    // This helper function recursively searches for an object containing "address": "your_address"
+    // or looks for your address as a Key in a dictionary.
+    function findUser(obj: any): any {
+        if (!obj || typeof obj !== 'object') return null;
+
+        // 1. Direct Match (Dictionary Mode): Key is the address
+        if (obj[targetAddr]) return obj[targetAddr];
+
+        // 2. Object Match (Array/Object Mode): Object has "address" property matching ours
+        if (obj.address && typeof obj.address === 'string' && obj.address.toLowerCase() === targetAddr) {
+            return obj;
+        }
+
+        // 3. Recursive Search (Arrays)
+        if (Array.isArray(obj)) {
+            for (const item of obj) {
+                const found = findUser(item);
+                if (found) return found;
+            }
+        }
+        
+        // 4. Recursive Search (Object Values - e.g. { "users": [...] })
+        // We limit depth to avoid performance issues on massive files, but standard depth is fine.
+        // Only dive into objects that don't look like reward items themselves.
+        for (const key in obj) {
+            if (key === 'address' || key === 'pending') continue; 
+            if (typeof obj[key] === 'object') {
+                const found = findUser(obj[key]);
+                if (found) return found;
+            }
+        }
+
+        return null;
+    }
+    // ---------------------------
+
+    const userData = findUser(data);
+
+    if (userData) {
+        console.log("✅ Found user data!");
+        return userData.pending || [];
+    }
+
+    console.warn("❌ User not found in staker_rewards.json (Universal Search)");
+    // Debugging: print keys to help developer debug if it fails
+    if (typeof data === 'object') console.log("Keys at root:", Object.keys(data).slice(0, 10));
+    
+    return [];
+
+  } catch (e) {
+    console.error("Error fetching JSON rewards:", e);
+    return [];
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -368,7 +501,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       if (!publicClient) return [];
       try {
           const tokens = await publicClient.readContract({
-              address: REGISTRY_ADDRESS,
+              address: REGISTRY_ADDRESS as `0x${string}`,
               abi: REGISTRY_ABI,
               functionName: 'allTokens',
           });
@@ -401,7 +534,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       });
   }
 
-  const REWARDS_JSON_URL = process.env.NEXT_PUBLIC_REWARDS_JSON_URL || "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/estimated_rewards_usd.json";
+  
   async function fetchStakersWeeklyUSD(): Promise<bigint> {
     const r = await fetch(REWARDS_JSON_URL, { cache: "no-store" });
     if (!r.ok) throw new Error(`rewards json ${r.status}`);
@@ -433,7 +566,12 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
           const distBal = (distBalRes.status === 'success') ? (distBalRes.result as bigint) : 0n;
           const wallet  = (userBalRes.status === 'success') ? (userBalRes.result as bigint) : 0n;
 
-          if (claimable > distBal) claimable = 0n;
+          if (claimable > distBal) {
+            console.warn(`❌ Hiding ${it.symbol}: Protocol insolvent (Owes ${formatBigNumber(claimable, it.decimals)}, Has ${formatBigNumber(distBal, it.decimals)})`);
+            claimable = 0n;
+        } else if (claimable > 0n) {
+            console.log(`✅ Keep ${it.symbol}: Solvent (Owes ${formatBigNumber(claimable, it.decimals)})`);
+        }
 
           return { ...it, claimable, wallet, total: claimable + wallet };
       });
@@ -447,56 +585,103 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
   // --- DATA FETCHING & REFRESH ---
   const handleRefresh = useCallback(async () => {
-    if (!account || !publicClient) return;
-    setIsRefreshing(true);
-    setRewardsLoading(true);
-    try {
-      // 1. Get Token Universe from Registry
-      const rawTokens = await fetchRegistryTokens();
+      if (!account || !publicClient) return;
+
+      if (!distAddr) {
+          console.error("❌ Staking Distributor Address (EPOCH_DIST) not found in addresses.ts");
+          showToast("Contract configuration error", "error");
+          return;
+      }
+
+      setIsRefreshing(true);
+      setRewardsLoading(true);
       
-      // 2. Enrich with Metadata (Symbol/Decimals)
-      const enriched = await enrichTokens(rawTokens);
-      
-      // 3. Check On-Chain Data (Claimable + Wallet)
-      const { results } = await smartPreflight(
-          enriched, 
+      try {
+        console.log("🔄 Refreshing rewards from JSON...");
+
+        // 1. Fetch Raw JSON
+        const jsonRewards = await fetchRewardsFromJson(account);
+        
+        if (jsonRewards.length === 0) {
+          console.warn("No pending rewards found in JSON for this wallet");
+          setPending([]);
+          return;
+        }
+
+        // ✅ FIX 1: ENRICH TOKENS ON-CHAIN
+        // We ignore the 'decimals' from JSON and get the REAL decimals from the chain.
+        // This fixes the cbBTC 18 vs 8 decimal bug.
+        const tokenAddresses = jsonRewards.map(j => j.token);
+        const enrichedData = await enrichTokens(tokenAddresses);
+        
+        // Create a map for easy lookup: address -> decimals
+        const decimalMap: Record<string, number> = {};
+        enrichedData.forEach(t => {
+            decimalMap[t.address.toLowerCase()] = t.decimals;
+        });
+
+        // 2. Map JSON to Preflight Format (using CORRECT decimals)
+        const tokensToCheck = jsonRewards.map(item => {
+          const realDecimals = decimalMap[item.token.toLowerCase()] || item.decimals;
+          
+          // Debug cbBTC specifically
+          if (item.symbol === 'cbBTC') {
+              console.log(`🔍 cbBTC Correction: JSON says ${item.decimals}, Chain says ${realDecimals}`);
+          }
+
+          return {
+            address: item.token.toLowerCase(),
+            symbol: item.symbol,
+            decimals: realDecimals, // Use the on-chain decimals
+            epoch: BigInt(item.epoch), 
+            priceUsd: item.priceUsd
+          };
+        });
+
+        // 3. Check On-Chain Status
+        const { results } = await smartPreflight(
+          tokensToCheck, 
           account as `0x${string}`, 
           distAddr as `0x${string}`
-      );
+        );
 
-      // 4. Filter & Normalize
-      const validated = results.map((res: any) => {
-          if (!res || res.total === 0n) return null;
-          return {
-              address: res.address,  // ✅ Using 'address' consistently
-              symbol: res.symbol,
-              decimals: res.decimals,
-              raw: res.claimable.toString(),
-              claimableBN: res.claimable,
-              walletBN: res.wallet,
-              amountBN: res.claimable,
-              amount: (Number(res.claimable) / 10 ** res.decimals).toString(),
-              epoch: res.epoch || 0n,
-          };
-      }).filter(Boolean);
+        // 4. Filter & Normalize
+        const validated = results.map((res: any) => {
+            if (!res || res.total === 0n) return null;
+            return {
+                address: res.address,
+                symbol: res.symbol,
+                decimals: res.decimals,
+                raw: res.claimable.toString(),
+                claimableBN: res.claimable,
+                walletBN: res.wallet,
+                amountBN: res.claimable,
+                // Correct Amount Human Readable
+                amount: (Number(res.claimable) / 10 ** res.decimals).toString(),
+                epoch: res.epoch, 
+                priceUsd: res.priceUsd 
+            };
+        }).filter(Boolean);
 
-      setPending(validated);
-      
-      // 5. Prices
-      if (validated.length > 0) {
-          fetchPricesForAddrs(validated.map((p:any)=>p.address), chainId || 8453).then(setPriceByAddr);
+        console.log(`✅ Found ${validated.length} claimable tokens`);
+        setPending(validated);
+        
+        // 5. Fetch Prices
+        if (validated.length > 0) {
+          fetchPricesForAddrs(validated.map((p:any) => p.address), chainId || 8453)
+            .then(map => setPriceByAddr(prev => ({...prev, ...map})));
+        }
+        
+        showToast("Rewards refreshed", "info");
+
+      } catch(e) { 
+          console.error(e); 
+          showToast("Failed to refresh rewards", "error");
+          setPending([]); 
+      } finally { 
+          setRewardsLoading(false); 
+          setIsRefreshing(false);
       }
-      
-      showToast("Rewards refreshed", "info");
-
-    } catch(e) { 
-        console.error(e); 
-        showToast("Failed to refresh rewards", "error");
-        setPending([]); 
-    } finally { 
-        setRewardsLoading(false); 
-        setIsRefreshing(false);
-    }
   }, [account, publicClient, distAddr, showToast, chainId]);
 
   // --- EFFECTS ---
@@ -553,14 +738,23 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
 
   const rows: RewardTokenRow[] = useMemo(() => {
     return pending.map((p:any) => {
-        const addr = p.address;  // ✅ Using 'address'
-        const price = p.priceUsd || priceByAddr[addr] || 0;
+        const addr = p.address; 
+        
+        // ✅ FIX 2: PRIORITIZE LIVE PRICE
+        // If live price exists and is > 0, use it. Otherwise fallback to JSON price.
+        const livePrice = priceByAddr[addr];
+        const price = (livePrice && livePrice > 0) ? livePrice : (p.priceUsd || 0);
+
         const human = Number(p.amount);
-        const rawBN = BigInt(p.raw); // Total
+        const rawBN = BigInt(p.raw); 
         const decimals = p.decimals;
         const usdValue = human * price;
         
-        if (usdValue < DUST_USD && rawBN <= dustRawThreshold(decimals)) return null;
+        // Always show if claimable > 0, regardless of dust value
+        const isClaimable = (p.claimableBN || 0n) > 0n;
+        if (!isClaimable && usdValue < DUST_USD && rawBN <= dustRawThreshold(decimals)) {
+            return null;
+        }
 
         let icon = '💰', gradient = 'from-slate-600 to-slate-700';
         if (p.symbol === 'AERO') { icon = '🚀'; gradient = 'from-blue-500 to-cyan-500'; }
@@ -570,7 +764,7 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
             address: addr,
             symbol: p.symbol || 'TOKEN',
             decimals,
-            amountBN: rawBN, // Total (Claimable + Wallet)
+            amountBN: rawBN, 
             claimableBN: p.claimableBN || 0n,
             walletBN: p.walletBN || 0n,
             usdValue,
@@ -722,8 +916,12 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     return { validTokens, priceMap };
   };
 
-  // ✅ IMPROVED: More conservative rate limiting (8 req per batch, 1.5s delay)
-  const buildSwapPlan = async (
+
+  // ==============================================
+// REPLACE buildSwapPlan IN RewardsSection.tsx
+// ==============================================
+
+const buildSwapPlan = async (
     targetToken: string, 
     rewardsToProcess: Array<{ address: string; symbol: string; decimals: number; walletBN: bigint }>,
     priceMap: Record<string, number>
@@ -732,12 +930,16 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     const ZERO_EX_URL = "/api/0x/quote";
     const headers = {}; 
     const validRewards = rewardsToProcess.filter(r => (r.walletBN || 0n) > 0n);
-  
-    console.log(`\n🔄 Building swap plan for ${validRewards.length} tokens (rate-limited parallel)...`);
-    console.log(`Target token: ${targetToken}`);
-  
-    // ✅ STEP 1: Fetch all balances in parallel using multicall
-    console.log(`\n💰 Step 1: Checking balances (parallel)...`);
+
+    console.log(`\n🔄 Building swap plan for ${validRewards.length} tokens...`);
+    
+    // Check if target is iAERO (case-insensitive)
+    const isSweepingToIAERO = targetToken.toLowerCase() === IAERO_ADDR.toLowerCase();
+    if (isSweepingToIAERO) {
+        console.log("ℹ️  Target is iAERO - enabling higher slippage/routing tolerance (20%)");
+    }
+
+    // ... (Balance checking logic remains the same) ...
     const balanceCalls = validRewards.map(r => ({
       address: r.address as `0x${string}`,
       abi: ERC20_ABI,
@@ -747,183 +949,110 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     
     const balanceResults = await publicClient?.multicall({ contracts: balanceCalls });
     
-    // Filter out tokens with zero balance
     const tokensWithBalance = validRewards
       .map((reward, idx) => {
         const balResult = balanceResults?.[idx];
         const balance = balResult?.status === 'success' ? (balResult.result as bigint) : 0n;
-        
-        if (balance === 0n) {
-          console.log(`  ⏭️  Skipped ${reward.symbol}: Zero balance`);
-          return null;
-        }
-        
-        console.log(`  ✓ ${reward.symbol}: ${formatBigNumber(balance, reward.decimals, 4)}`);
+        if (balance === 0n) return null;
         return { ...reward, currentBalance: balance };
       })
       .filter(Boolean) as Array<{ address: string; symbol: string; decimals: number; walletBN: bigint; currentBalance: bigint }>;
     
-    if (tokensWithBalance.length === 0) {
-      console.log(`\n⚠️  No tokens with balance found`);
-      return [];
-    }
+    if (tokensWithBalance.length === 0) return [];
     
-    console.log(`\n✅ ${tokensWithBalance.length} tokens have balance`);
-    
-    // ✅ STEP 2: Fetch quotes in RATE-LIMITED batches with more conservative settings
-    console.log(`\n💱 Step 2: Fetching quotes (rate-limited parallel)...`);
-    const QUOTE_BATCH_SIZE = 5; // ⬇️ Reduced from 10 to be more conservative
-    const BATCH_DELAY_MS = 2000; // ⬆️ Increased from 1100ms for better rate limit safety
-    
+    const QUOTE_BATCH_SIZE = 5; 
+    const BATCH_DELAY_MS = 2000;
     const allQuoteResults: Array<any> = [];
     
     for (let i = 0; i < tokensWithBalance.length; i += QUOTE_BATCH_SIZE) {
       const batch = tokensWithBalance.slice(i, i + QUOTE_BATCH_SIZE);
-      const batchNum = Math.floor(i / QUOTE_BATCH_SIZE) + 1;
-      const totalBatches = Math.ceil(tokensWithBalance.length / QUOTE_BATCH_SIZE);
-      
-      console.log(`  📦 Quote batch ${batchNum}/${totalBatches} (${batch.length} tokens)...`);
-      
-      // Fetch this batch in parallel
       const batchPromises = batch.map(async (reward, idx) => {
         try {
+          // ✅ ADJUSTMENT: Allow higher slippage for iAERO targets to find routes
+          // 0.10 = 10%, 0.20 = 20%
+          const slippageParam = isSweepingToIAERO ? '0.20' : '0.10'; 
+          
           const params = new URLSearchParams({
             chainId: String(chainId || 8453),
             sellToken: reward.address,
             buyToken: targetToken,
             sellAmount: reward.currentBalance.toString(),
             taker: SWAPPER_ADDRESS,
-            slippagePercentage: '0.10'  // ← Tell 0x: "Consider routes with up to 10% impact"
+            slippagePercentage: slippageParam,
+            // Optional: Force disable 'RFQ' if it causes issues with obscure tokens
+            // includedSources: 'Uniswap_V3,Aerodrome,SushiSwap,Balancer_V2' 
           });
-    
+          
           const res = await fetch(`${ZERO_EX_URL}?${params}`, { headers });
           
           if (!res.ok) {
-            const errorText = await res.text().catch(() => "Unknown error");
-            return {
-              success: false,
-              reward,
-              error: `HTTP ${res.status}: ${errorText}`,
-              step: 'quote_fetch'
-            };
+              const errText = await res.text();
+              return { success: false, reward, error: `HTTP ${res.status}: ${errText}`, step: 'quote_fetch' };
           }
           
           const quote = await res.json();
+          if (quote.code || quote.reason) return { success: false, reward, error: quote.reason, step: 'quote_validation' };
+          if (!quote.transaction?.data) return { success: false, reward, error: 'No tx data', step: 'quote_invalid' };
           
-          if (quote.code || quote.reason) {
-            return {
-              success: false,
-              reward,
-              error: quote.reason || quote.code,
-              step: 'quote_validation'
-            };
-          }
-          
-          if (!quote.transaction?.data) {
-            return {
-              success: false,
-              reward,
-              error: 'No transaction data in quote',
-              step: 'quote_invalid'
-            };
-          }
-          
-          // Success!
-          return {
-            success: true,
-            reward,
-            quote,
-            currentBalance: reward.currentBalance
-          };
-          
+          return { success: true, reward, quote, currentBalance: reward.currentBalance };
         } catch (e: any) {
-          return {
-            success: false,
-            reward,
-            error: e.message,
-            step: 'quote_exception'
-          };
+          return { success: false, reward, error: e.message, step: 'quote_exception' };
         }
       });
       
-      // Wait for this batch to complete
       const batchResults = await Promise.allSettled(batchPromises);
       allQuoteResults.push(...batchResults);
-      
-      // Wait before next batch (unless this was the last batch)
       if (i + QUOTE_BATCH_SIZE < tokensWithBalance.length) {
-        console.log(`  ⏱️  Waiting ${BATCH_DELAY_MS}ms before next batch...`);
         await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
       }
     }
     
-    // ✅ STEP 3: Process all results and build plan
-    console.log(`\n📊 Processing quote results...`);
-    let successCount = 0;
-    let failCount = 0;
-    
+    // ... (Processing results logic) ...
     allQuoteResults.forEach((result, idx) => {
-      if (result.status === 'rejected') {
-        // Promise itself failed (shouldn't happen with our error handling)
-        const reward = tokensWithBalance[idx];
-        console.error(`  ❌ ${reward.symbol}: Promise rejected:`, result.reason);
-        trackFailedToken(reward.address, reward.symbol, `Promise rejected: ${result.reason}`, 'quote_promise_error');
-        failCount++;
-        return;
-      }
-      
+      if (result.status === 'rejected') return;
       const data = result.value;
       
       if (!data.success) {
-        // Quote fetch failed
-        console.warn(`  ❌ ${data.reward.symbol}: ${data.error}`);
+        // Log the specific error for debugging
+        console.warn(`❌ Quote failed for ${data.reward.symbol}: ${data.error}`);
         trackFailedToken(data.reward.address, data.reward.symbol, data.error, data.step);
-        failCount++;
         return;
       }
       
-      // Success - add to plan
       try {
         const encodedData = encodeAbiParameters(
           [{ type: 'address' }, { type: 'bytes' }],
           [data.quote.transaction.to, data.quote.transaction.data]
         );
-      
         const priceUSD = priceMap[data.reward.address.toLowerCase()] || 0;
         
-        const slippageDecision = calculateSmartSlippage(
-          data.quote,
-          data.reward,
-          priceUSD
-        );
-      
+        const slippageDecision = calculateSmartSlippage(data.quote, data.reward, priceUSD);
+        
+        // ✅ OVERRIDE: If we are sweeping to iAERO, we might accept higher impact/slippage
+        // If smart slippage says "No" but we are sweeping to iAERO, force it (up to 20%)
+        if (isSweepingToIAERO && !slippageDecision.shouldSwap && slippageDecision.slippageBps < 2000) {
+            console.log(`⚠️ Allowing higher slippage for ${data.reward.symbol} -> iAERO sweep`);
+            slippageDecision.shouldSwap = true;
+            slippageDecision.slippageBps = 2000; // Cap at 20%
+        }
+
         if (!slippageDecision.shouldSwap) {
-          console.log(`  ⏭️  ${data.reward.symbol}: ${slippageDecision.reason}`);
-          trackFailedToken(
-            data.reward.address,
-            data.reward.symbol,
-            slippageDecision.reason,
-            'slippage_too_high'
-          );
-          failCount++;
+          trackFailedToken(data.reward.address, data.reward.symbol, slippageDecision.reason, 'slippage_too_high');
           return;
         }
         
-        // ✅ FIX 2: Pre-apply slippage to quotedOut
         const optimisticBuyAmount = BigInt(data.quote.buyAmount);
         const slippageAmount = (optimisticBuyAmount * BigInt(slippageDecision.slippageBps)) / 10000n;
         const minAmountOut = optimisticBuyAmount - slippageAmount;
-        
-        console.log(`  📊 Quote: ${formatBigNumber(optimisticBuyAmount, 6, 2)} → Min: ${formatBigNumber(minAmountOut, 6, 2)} (${slippageDecision.slippageBps / 100}% slippage)`);
         
         plan.push({
           kind: RouterKind.AGGREGATOR,
           tokenIn: data.reward.address,
           outToken: targetToken,
-          useAll: true,  //Handle FOT tokens
+          useAll: true, 
           amountIn: data.currentBalance,
           quotedIn: data.currentBalance,
-          quotedOut: minAmountOut,  // Use pre-slippage amount
+          quotedOut: minAmountOut, 
           slippageBps: 0,
           data: encodedData,
           viaPermit2: false,
@@ -932,18 +1061,10 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
           permitDeadline: 0n,
           permitNonce: 0n
         });
-        
-        console.log(`  ✅ ${data.reward.symbol}: ~${formatBigNumber(minAmountOut, 6, 2)} ${targetToken === '0x833589fCD6eDb6E08f4c7c32D4f71b54bda02913' ? 'USDC' : 'iAERO'}`);
-        successCount++;
-        
       } catch (e: any) {
-        console.error(`  ❌ ${data.reward.symbol}: Failed to encode:`, e.message);
-        trackFailedToken(data.reward.address, data.reward.symbol, `Encoding failed: ${e.message}`, 'quote_encoding');
-        failCount++;
+        trackFailedToken(data.reward.address, data.reward.symbol, e.message, 'quote_encoding');
       }
     });
-    
-    console.log(`\n✅ Plan complete: ${successCount} success, ${failCount} failed (${plan.length} total swaps)\n`);
     return plan;
   };
 
@@ -1035,9 +1156,28 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     
       setProgressStep("Fetching token list from registry...");
       
-      console.log(`\n📋 Step 1: Fetching registry tokens...`);
+      // 1. Fetch Registry Tokens
+      console.log(`\n📋 Step 1: Fetching tokens (Registry + JSON)...`);
       const registryTokens = await fetchRegistryTokens();
       console.log(`Found ${registryTokens.length} tokens in registry`);
+      
+      // 2. Fetch JSON Tokens (This ensures we see what we just claimed)
+      let jsonTokens: string[] = [];
+      try {
+          const jsonData = await fetchRewardsFromJson(account || "");
+          jsonTokens = jsonData.map(j => j.token);
+          console.log(`Found ${jsonTokens.length} tokens in JSON file`);
+      } catch (e) {
+          console.warn("Could not merge JSON tokens into swap flow", e);
+      }
+
+      // 3. Merge and Deduplicate
+      const allTokens = Array.from(new Set([
+          ...registryTokens.map(t => t.toLowerCase()), 
+          ...jsonTokens.map(t => t.toLowerCase())
+      ]));
+
+      console.log(`Total unique tokens to check: ${allTokens.length}`);
       
       console.log(`\n📊 Step 2: Enriching token data...`);
       const enriched = await enrichTokens(registryTokens);
@@ -1365,7 +1505,6 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
       }
 
       // 2. Swap
-      const IAERO_ADDR = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"; 
       await executeSwapFlow(IAERO_ADDR);
       
       await handleRefresh(); 
@@ -1388,90 +1527,262 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
     } finally { setIsProcessing(false); setProgressStep(""); }
   };
 
-  async function preflight(items: any[], account: `0x${string}`, distributor: `0x${string}`) {
+  const handleSweepToIAERO = async () => {
+    if (!account) return;
+    if (SWAPPER_ADDRESS.includes("YOUR_DEPLOYED")) { showToast("Swapper not configured!", "error"); return; }
+    
+    setIsProcessing(true);
     try {
-      const pc = publicClient as unknown as PublicClient<Transport, Chain> | undefined;
-      if (!pc) return { keep: items.map(it => ({ ...it, preview: 0n })), drop: [] };
+      // ---------------------------------------------------------
+      // STEP 1: Sweep rewards to AERO (using 0x Aggregator)
+      // ---------------------------------------------------------
+      console.log("🔄 Step 1: Sweeping rewards to AERO...");
+      setProgressStep("Step 1/2: Sweeping rewards to AERO...");
       
-      const calls = items.flatMap(it => ([
-        { address: distributor, abi: PREVIEW_ABI, functionName: 'previewClaim', args: [account, it.address, it.epoch] },
-        { address: it.address as `0x${string}`,    abi: ERC20_ABI,  functionName: 'balanceOf',     args: [distributor] }
-      ]));
+      const startAERO = await publicClient?.readContract({
+          address: AERO_ADDR as `0x${string}`,
+          abi: ERC20_ABI,
+          functionName: 'balanceOf',
+          args: [account as `0x${string}`]
+      }) as bigint || 0n;
+
+      await executeSwapFlow(AERO_ADDR);
       
-      const res = await pc.multicall({ contracts: calls });
-      const keep: any[] = [], drop: any[] = [];
+      // ---------------------------------------------------------
+      // STEP 2: Wait for AERO Balance Update
+      // ---------------------------------------------------------
+      console.log("🔄 Waiting for AERO balance to update...");
+      setProgressStep("Waiting for blockchain to index...");
       
-      for (let i = 0; i < items.length; i++) {
-        const previewRes = res[2 * i];
-        const balRes = res[2 * i + 1];
-        
-        const p = previewRes.status === 'success' ? (previewRes.result as bigint) : 0n;
-        const b = balRes.status === 'success' ? (balRes.result as bigint) : 0n;
-  
-        // Keep if claimable > 0 and distributor has enough funds
-        if (p > 0n && p <= b) {
-            keep.push({ ...items[i], preview: p }); 
-        } else {
-            drop.push({ ...items[i], preview: p, bal: b });
-        }
+      let aeroBalance = 0n;
+      let attempts = 0;
+      const maxAttempts = 10;
+
+      while (attempts < maxAttempts) {
+          await new Promise(r => setTimeout(r, 2000));
+          aeroBalance = await publicClient?.readContract({
+              address: AERO_ADDR as `0x${string}`,
+              abi: ERC20_ABI,
+              functionName: 'balanceOf',
+              args: [account as `0x${string}`]
+          }) as bigint || 0n;
+
+          if (aeroBalance > startAERO) break;
+          attempts++;
       }
-      return { keep, drop };
-    } catch (err) {
-      console.error("Preflight check failed:", err);
-      return { keep: items.map(it => ({ ...it, preview: 0n })), drop: [] };
+
+      if (aeroBalance <= 0n) {
+          console.warn("⚠️ No AERO balance found. Aborting Step 2.");
+          showToast("Sweep partial: Rewards moved to AERO, but balance didn't update.", "warning");
+          return;
+      }
+
+      console.log(`💰 AERO Balance to Swap: ${formatBigNumber(aeroBalance, 18, 4)}`);
+
+      // ---------------------------------------------------------
+      // STEP 3: Direct Swap (AERO -> iAERO) on Aerodrome
+      // ---------------------------------------------------------
+      console.log("🔄 Step 3: Swapping AERO -> iAERO via Aerodrome...");
+      setProgressStep("Step 2/2: Aerodrome Swap (AERO->iAERO)...");
+
+      // A. Approve Router
+      const currentAllowance = await publicClient?.readContract({
+          address: AERO_ADDR as `0x${string}`,
+          abi: ERC20_FULL_ABI,
+          functionName: 'allowance',
+          args: [account as `0x${string}`, AERODROME_ROUTER as `0x${string}`],
+      }) as bigint;
+
+      if (currentAllowance < aeroBalance) {
+          console.log("📝 Approving Aerodrome Router...");
+          const approveHash = await writeContractAsync({
+              address: AERO_ADDR as `0x${string}`,
+              abi: ERC20_FULL_ABI,
+              functionName: 'approve',
+              args: [AERODROME_ROUTER as `0x${string}`, aeroBalance],
+          });
+          await publicClient?.waitForTransactionReceipt({ hash: approveHash });
+          console.log("✅ Approved");
+      }
+
+      // B. Define Route with Explicit Casting
+      const routes = [
+          { 
+            from: AERO_ADDR as `0x${string}`, 
+            to: IAERO_ADDR as `0x${string}`, 
+            stable: false, 
+            factory: AERODROME_FACTORY as `0x${string}` 
+          }
+      ];
+
+      // C. Calculate Min Output
+      let amountOutMin = 0n;
+      try {
+          const amounts = await publicClient?.readContract({
+              address: AERODROME_ROUTER as `0x${string}`,
+              abi: AERODROME_ABI,
+              functionName: 'getAmountsOut',
+              args: [aeroBalance, routes]
+          }) as readonly bigint[]; // viem returns readonly
+          
+          if (amounts && amounts.length > 0) {
+              const expected = amounts[amounts.length - 1];
+              amountOutMin = (expected * 9500n) / 10000n; 
+              console.log(`📊 Expected: ${formatBigNumber(expected, 18, 4)} iAERO`);
+          }
+      } catch (err) {
+          console.warn("⚠️ Quote failed, defaulting to 0 min output", err);
+      }
+
+      // D. Execute Swap
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200); 
+      
+      const hash = await writeContractAsync({
+          address: AERODROME_ROUTER as `0x${string}`,
+          abi: AERODROME_ABI,
+          functionName: 'swapExactTokensForTokens',
+          args: [aeroBalance, amountOutMin, routes, account as `0x${string}`, deadline],
+      });
+
+      await publicClient?.waitForTransactionReceipt({ hash });
+      
+      showToast("Successfully swept all rewards to iAERO!", "success");
+      await handleRefresh(); 
+
+    } catch (e: any) {
+      if (!e.message?.includes("User rejected")) { 
+          console.error(e); 
+          showToast(msgFromError(e, "Sweep failed"), "error"); 
+      }
+    } finally { 
+      setIsProcessing(false); 
+      setProgressStep(""); 
     }
+  };
+
+  async function preflight(items: any[], account: `0x${string}`, distributor: `0x${string}`) {
+      try {
+        const pc = publicClient as unknown as PublicClient<Transport, Chain> | undefined;
+        if (!pc) return { keep: items.map(it => ({ ...it, preview: 0n })), drop: [] };
+        
+        const calls = items.flatMap(it => ([
+          { address: distributor, abi: PREVIEW_ABI, functionName: 'previewClaim', args: [account, it.address, it.epoch] },
+          { address: it.address as `0x${string}`,     abi: ERC20_ABI,  functionName: 'balanceOf',      args: [distributor] }
+        ]));
+        
+        const res = await pc.multicall({ contracts: calls });
+        const keep: any[] = [], drop: any[] = [];
+        
+        for (let i = 0; i < items.length; i++) {
+          const previewRes = res[2 * i];
+          const balRes = res[2 * i + 1];
+          
+          const p = previewRes.status === 'success' ? (previewRes.result as bigint) : 0n;
+          const b = balRes.status === 'success' ? (balRes.result as bigint) : 0n;
+
+          if (p > 0n) {
+              // ✅ SMART FILTERING:
+              // If distributor has enough funds (b >= p), add to 'keep'.
+              // If distributor is broke, add to 'drop'.
+              if (b >= p) {
+                  keep.push({ ...items[i], preview: p });
+              } else {
+                  console.warn(`⚠️ Skipping ${items[i].symbol}: Distributor empty (Need ${p}, has ${b})`);
+                  drop.push({ ...items[i], preview: p, bal: b, reason: 'Protocol Insufficient Funds' });
+              }
+          }
+        }
+        return { keep, drop };
+      } catch (err) {
+        console.error("Preflight check failed:", err);
+        return { keep: items.map(it => ({ ...it, preview: 0n })), drop: [] };
+      }
   }
 
   // --------- Render ----------
   async function claimSelected(tokens: string[], { onProgress, onSuccess, onError }: any) {
-    try {
-      const selected = rows.filter((r: any) => (r.rawBN ?? 0n) > 0n && tokens.includes(r.address) && r.address !== ZERO).map(r => ({
-          address: r.address as `0x${string}`,  // ✅ Using 'address'
-          epoch: (typeof r.epoch === 'bigint' ? r.epoch : lastEpoch) as bigint,
-          hadExplicitEpoch: typeof r.epoch === 'bigint',
-          symbol: r.symbol,
-        }));
+      try {
+        // 1. Prepare the list of tokens to check
+        const selected = rows
+          .filter((r: any) => (r.rawBN ?? 0n) > 0n && tokens.includes(r.address) && r.address !== ZERO)
+          .map(r => {
+              const epochToUse = typeof r.epoch === 'bigint' ? r.epoch : (lastEpoch || 0n);
+              return {
+                  address: r.address as `0x${string}`,
+                  epoch: epochToUse, 
+                  hadExplicitEpoch: true, 
+                  symbol: r.symbol,
+              };
+          });
 
-      const missingEpochs = selected.some(x => !x.hadExplicitEpoch);
-      if (missingEpochs && lastEpoch) showToast(`Using funded epoch ${lastEpoch.toString()} for batch claim.`, "info");
-      if (selected.length === 0) { onProgress?.('No claimable rewards.'); onSuccess?.(); return; }
+        const missingEpochs = selected.some(x => !x.hadExplicitEpoch);
+        if (missingEpochs && lastEpoch) showToast(`Using funded epoch ${lastEpoch.toString()} for batch claim.`, "info");
+        
+        if (selected.length === 0) { onProgress?.('No claimable rewards.'); onSuccess?.(); return; }
 
-      const { keep } = await preflight(selected.map(x => ({ address: x.address, epoch: x.epoch, symbol: x.symbol })), account as `0x${string}`, distAddr as `0x${string}`);
-      if (keep.length === 0) { onProgress?.('No claimable after preflight.'); onSuccess?.(); return; }
+        // 2. Run Smart Preflight (Filter out empty distributor wallets)
+        // ✅ CHANGE: Destructure 'drop' to see what failed
+        const { keep, drop } = await preflight(selected, account as `0x${string}`, distAddr as `0x${string}`);
 
-      const haveAllEpochs = keep.length > 0 && keep.every(x => typeof x.epoch === 'bigint');
-      const MAX = 50;
-      if (distAddr && haveAllEpochs) {
-        for (let i = 0; i < keep.length; i += MAX) {
-          const slice = keep.slice(i, i + MAX);
-          onProgress?.(`Submitting batch claim ${Math.floor(i / MAX) + 1}/${Math.ceil(keep.length / MAX)}…`);
-          let gas: bigint | undefined;
-          try {
-            gas = await publicClient?.estimateContractGas({
-              account: account as `0x${string}`,
+        // ✅ CHANGE: Notify user if tokens were dropped
+        if (drop.length > 0) {
+            const skippedNames = drop.map((d: any) => d.symbol).join(", ");
+            // Warn the user, but don't throw an error. We will proceed with the 'keep' list.
+            showToast(`Skipping ${drop.length} tokens (Protocol Wallet Empty): ${skippedNames}`, "warning");
+        }
+
+        // ✅ CHANGE: If nothing is left to claim, exit gracefully
+        if (keep.length === 0) { 
+            onProgress?.('No tokens available with sufficient protocol liquidity.'); 
+            onSuccess?.(); 
+            return; 
+        }
+
+        // 3. Execute Claim (Only for 'keep' items)
+        const haveAllEpochs = keep.every(x => typeof x.epoch === 'bigint');
+        const MAX = 50;
+
+        if (distAddr && haveAllEpochs) {
+          for (let i = 0; i < keep.length; i += MAX) {
+            const slice = keep.slice(i, i + MAX);
+            
+            onProgress?.(`Submitting batch claim ${Math.floor(i / MAX) + 1}/${Math.ceil(keep.length / MAX)}…`);
+            
+            let gas: bigint | undefined;
+            try {
+              gas = await publicClient?.estimateContractGas({
+                account: account as `0x${string}`,
+                address: distAddr as `0x${string}`,
+                abi: EPOCH_DIST_ABI,
+                functionName: 'claimMany',
+                args: [slice.map(x => x.address), slice.map(x => x.epoch as bigint)],
+              });
+            } catch { gas = 200_000n + BigInt(slice.length) * 120_000n; }
+            
+            const hash = await writeContractAsync({
               address: distAddr as `0x${string}`,
               abi: EPOCH_DIST_ABI,
               functionName: 'claimMany',
               args: [slice.map(x => x.address), slice.map(x => x.epoch as bigint)],
+              ...(gas ? { gas } : {}),
             });
-          } catch { gas = 200_000n + BigInt(slice.length) * 120_000n; }
-          const hash = await writeContractAsync({
-            address: distAddr as `0x${string}`,
-            abi: EPOCH_DIST_ABI,
-            functionName: 'claimMany',
-            args: [slice.map(x => x.address), slice.map(x => x.epoch as bigint)],
-            ...(gas ? { gas } : {}),
-          });
-          await publicClient?.waitForTransactionReceipt({ hash });
+            await publicClient?.waitForTransactionReceipt({ hash });
+          }
+          onSuccess?.();
+          return;
         }
-        onSuccess?.();
-        return;
-      }
-      for (let i = 0; i < tokens.length; i++) {
-        onProgress?.(tokens.length > 1 ? `Claiming ${i + 1}/${tokens.length} tokens…` : "Claiming token…");
-        await claimReward(tokens[i] as `0x${string}`, (receipt: any) => { if (i === tokens.length - 1) onSuccess?.(receipt); }, (e: any) => { onError?.(e); }, (m?: string) => onProgress?.(m));
-      }
-    } catch (e) { onError?.(e); throw e; }
+
+        // Fallback: Claim one by one (using 'keep' list)
+        for (let i = 0; i < keep.length; i++) {
+          onProgress?.(keep.length > 1 ? `Claiming ${i + 1}/${keep.length} tokens…` : "Claiming token…");
+          await claimReward(
+              keep[i].address, 
+              (receipt: any) => { if (i === keep.length - 1) onSuccess?.(receipt); }, 
+              (e: any) => { onError?.(e); }, 
+              (m?: string) => onProgress?.(m)
+          );
+        }
+      } catch (e) { onError?.(e); throw e; }
   }
 
   const handleClaimAll = async () => {
@@ -1694,15 +2005,31 @@ export default function RewardsSection({ showToast, formatNumber }: RewardsSecti
                   <Coins className="w-4 h-4 text-yellow-400" />
                   Swap Tools
               </h4>
-              <Button 
-                  variant="outline" 
-                  onClick={handleSwapAllRewards}
-                  disabled={isProcessing}
-                  className="w-full border-slate-700 bg-slate-900/50 hover:bg-slate-800 text-slate-300"
-              >
-                  {isProcessing && progressStep.includes("Fetching") ? <Loader2 className="w-4 h-4 animate-spin mr-2"/> : <Wallet className="w-4 h-4 mr-2" />}
-                  Sweep Wallet: Swap all known rewards to USDC
-              </Button>
+              <div className="grid grid-cols-2 gap-3">
+                  <Button 
+                      onClick={handleSwapAllRewards}
+                      disabled={isProcessing}
+                      // Added: h-auto, py-6, whitespace-normal, leading-tight
+                      className="h-auto py-6 whitespace-normal leading-tight bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white border-0"
+                  >
+                      <div className="flex flex-col items-center gap-1">
+                        {isProcessing && progressStep.includes("Fetching") ? <Loader2 className="w-5 h-5 animate-spin mb-1"/> : <RefreshCw className="w-5 h-5 mb-1" />}
+                        <span>Sweep ALL reward tokens in wallet to USDC</span>
+                      </div>
+                  </Button>
+                  
+                  <Button 
+                      onClick={handleSweepToIAERO}
+                      disabled={isProcessing}
+                      // Added: h-auto, py-6, whitespace-normal, leading-tight
+                      className="h-auto py-6 whitespace-normal leading-tight bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white border-0"
+                  >
+                      <div className="flex flex-col items-center gap-1">
+                        {isProcessing && progressStep.includes("Fetching") ? <Loader2 className="w-5 h-5 animate-spin mb-1"/> : <TrendingUp className="w-5 h-5 mb-1" />}
+                        <span>Sweep ALL reward tokens in wallet to iAERO</span>
+                      </div>
+                  </Button>
+              </div>
           </div>
 
           {txHistory.length > 0 && (
