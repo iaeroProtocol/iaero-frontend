@@ -160,7 +160,14 @@ export async function fetchPricesClient() {
 
     // 1) Try your Cloudflare Worker / CG proxy (cheap & fast)
     try {
-      const r = await fetch("https://iaero-price-proxy.iaero.workers.dev");
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      
+      const r = await fetch("https://api.iaero.finance", {
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      
       if (r.ok) {
         const j = await r.json();
         aeroUsd = Number(j?.["aerodrome-finance"]?.usd) || 0;
