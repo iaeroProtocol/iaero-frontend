@@ -1,13 +1,11 @@
-export const runtime = 'edge';
-
 // src/app/api/0x/quote/route.ts
 import { type NextRequest, NextResponse } from "next/server";
-import { getRequestContext } from '@cloudflare/next-on-pages';
+
+export const runtime = 'edge';
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
-  const { env } = getRequestContext();
-  const ZERO_EX_API_KEY = env.ZERO_EX_API_KEY;
+  const ZERO_EX_API_KEY = process.env.ZERO_EX_API_KEY;
 
   if (!ZERO_EX_API_KEY) {
     return NextResponse.json({ error: "Missing API Key" }, { status: 500 });
