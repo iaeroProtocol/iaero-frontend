@@ -95,8 +95,17 @@ if (SWAPPER_ADDRESS.includes("YOUR_DEPLOYED")) {
 
 const REWARDS_JSON_URL = process.env.NEXT_PUBLIC_REWARDS_JSON_URL || "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/estimated_rewards_usd.json";
 const STAKER_REWARDS_JSON_URL = process.env.NEXT_PUBLIC_STAKER_REWARDS_JSON_URL || "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/staker_rewards.json";
+const SPAM_BLOCKLIST_URL = process.env.NEXT_PUBLIC_SPAM_BLOCKLIST_URL || 
+  "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/spam_tokens_base.json";
 
-// [FIXED] Use JSON ABI to prevent 'Invalid ABI parameter' tuple errors
+// Cache for spam blocklist (avoid fetching every time)
+let spamBlocklistCache: {
+  addresses: Set<string>;
+  patterns: string[];
+  lastFetch: number;
+} | null = null;
+
+const BLOCKLIST_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const SWAPPER_ABI = [
   {
     name: 'executePlanFromCaller',
@@ -170,6 +179,294 @@ const formatTimeAgo = (t: number) => {
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
 };
+
+/**
+ * Fetches the spam token blocklist from GitHub
+ * Caches results to avoid repeated fetches
+ */
+async function fetchSpamBlocklist(): Promise<{ addresses: Set<string>; patterns: string[] }> {
+  // Return cache if still valid
+  if (spamBlocklistCache && (Date.now() - spamBlocklistCache.lastFetch) < BLOCKLIST_CACHE_TTL) {
+    return spamBlocklistCache;
+  }
+
+  try {
+    console.log("📋 Fetching spam token blocklist...");
+    const response = await fetch(SPAM_BLOCKLIST_URL, { cache: "no-store" });
+    
+    if (!response.ok) {
+      console.warn(`⚠️ Failed to fetch blocklist: ${response.status}`);
+      return { addresses: new Set(), patterns: [] };
+    }
+
+    const data = await response.json();
+    
+    const addresses = new Set<string>(
+      (data.tokens || []).map((t: { address: string }) => t.address.toLowerCase())
+    );
+    
+    const patterns = data.symbolPatterns || [];
+
+    spamBlocklistCache = {
+      addresses,
+      patterns,
+      lastFetch: Date.now()
+    };
+
+    console.log(`✅ Loaded blocklist: ${addresses.size} addresses, ${patterns.length} patterns`);
+    return spamBlocklistCache;
+
+  } catch (e) {
+    console.error("Error fetching spam blocklist:", e);
+    return { addresses: new Set(), patterns: [] };
+  }
+}
+
+/**
+ * Reports newly-discovered spam tokens to the API for blocklist update
+ */
+async function reportSpamTokens(
+  tokens: Array<{ address: string; symbol: string; reason: string }>
+): Promise<void> {
+  if (tokens.length === 0) return;
+  
+  try {
+    console.log(`📤 Reporting ${tokens.length} spam token(s) to blocklist...`);
+    
+    const response = await fetch('/api/spam-report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(tokens)
+    });
+    
+    if (response.ok) {
+      const result = await response.json();
+      if (result.added > 0) {
+        console.log(`✅ Added ${result.added} new spam token(s) to blocklist`);
+      }
+      if (result.duplicates > 0) {
+        console.log(`ℹ️ ${result.duplicates} token(s) already in blocklist`);
+      }
+    } else {
+      console.warn('⚠️ Failed to report spam tokens:', await response.text());
+    }
+  } catch (e) {
+    // Don't throw - this is a background operation
+    console.warn('⚠️ Could not report spam tokens:', e);
+  }
+}
+
+/**
+ * Checks if a token is spam based on blocklist or heuristics
+ */
+function isSpamToken(
+  address: string, 
+  symbol: string, 
+  blocklist: { addresses: Set<string>; patterns: string[] }
+): boolean {
+  const addrLower = address.toLowerCase();
+  
+  // 1. Direct address match
+  if (blocklist.addresses.has(addrLower)) {
+    return true;
+  }
+  
+  // 2. Symbol pattern match (heuristic)
+  const symbolLower = symbol.toLowerCase();
+  for (const pattern of blocklist.patterns) {
+    if (symbolLower.includes(pattern.toLowerCase())) {
+      return true;
+    }
+  }
+  
+  // 3. Cyrillic characters (fake USDC often uses Cyrillic 'С' instead of 'C')
+  if (/[\u0400-\u04FF]/.test(symbol)) {
+    return true;
+  }
+  
+  // 4. Telegram links in symbol
+  if (symbol.includes('t.me') || symbol.includes('telegram')) {
+    return true;
+  }
+  
+  // 5. "claim" with date pattern
+  if (/claim.*\d{2}\.\d{2}\.\d{2}/i.test(symbol)) {
+    return true;
+  }
+  
+  return false;
+}
+
+/**
+ * Isolates problem tokens in a failed batch by exclusion testing
+ * Returns: { workingPlan: swaps that work together, problemTokens: tokens that need individual execution }
+ */
+async function isolateProblemTokensInBatch(
+  failedPlan: any[],
+  recipient: string,
+  publicClient: PublicClient<Transport, Chain> | undefined,
+  account: string,
+  swapperAddress: string,
+  swapperAbi: readonly any[]
+): Promise<{ workingPlan: any[]; problemTokens: any[] }> {
+  console.log(`\n🔍 === PROBLEM TOKEN ISOLATION ===`);
+  console.log(`Analyzing ${failedPlan.length} swaps to find problematic token(s)...`);
+
+  // If no publicClient, can't isolate - return all as problem tokens
+  if (!publicClient) {
+    console.warn('⚠️ No publicClient available for isolation');
+    return { workingPlan: [], problemTokens: failedPlan };
+  }
+
+  const problemTokens: any[] = [];
+  let remainingPlan = [...failedPlan];
+
+  let attempts = 0;
+  const maxAttempts = failedPlan.length;
+
+  while (attempts < maxAttempts && remainingPlan.length > 1) {
+    attempts++;
+    
+    // Try to simulate the current remaining plan as a batch
+    try {
+      await publicClient.estimateContractGas({
+        address: swapperAddress as `0x${string}`,
+        abi: swapperAbi,
+        functionName: 'executePlanFromCaller',
+        args: [remainingPlan, recipient as `0x${string}`],
+        account: account as `0x${string}`,
+      });
+      
+      console.log(`✅ Found working batch with ${remainingPlan.length} tokens`);
+      break;
+      
+    } catch (batchError) {
+      console.log(`❌ Batch of ${remainingPlan.length} still fails, isolating...`);
+      
+      let foundProblem = false;
+      
+      for (let i = 0; i < remainingPlan.length; i++) {
+        const testPlan = remainingPlan.filter((_, idx) => idx !== i);
+        const excludedSwap = remainingPlan[i];
+        
+        if (testPlan.length === 0) continue;
+        
+        try {
+          await publicClient.estimateContractGas({
+            address: swapperAddress as `0x${string}`,
+            abi: swapperAbi,
+            functionName: 'executePlanFromCaller',
+            args: [testPlan, recipient as `0x${string}`],
+            account: account as `0x${string}`,
+          });
+          
+          console.log(`🎯 Found problem token: ${excludedSwap.tokenIn}`);
+          problemTokens.push(excludedSwap);
+          remainingPlan = testPlan;
+          foundProblem = true;
+          break;
+          
+        } catch (exclusionError: any) {
+          console.log(`    Exclusion test ${i} failed:`, exclusionError.message?.substring(0, 100));
+          continue;
+        }
+      }
+      
+      if (!foundProblem) {
+        console.log(`⚠️ Could not isolate single problem token - multiple issues`);
+        problemTokens.push(...remainingPlan);
+        remainingPlan = [];
+        break;
+      }
+    }
+  }
+
+  console.log(`\n📊 Isolation Results:`);
+  console.log(`   Working batch: ${remainingPlan.length} tokens`);
+  console.log(`   Problem tokens: ${problemTokens.length} tokens`);
+  
+  if (problemTokens.length > 0) {
+    console.log(`   Problem token addresses:`);
+    problemTokens.forEach(t => console.log(`      • ${t.tokenIn}`));
+  }
+
+  return { workingPlan: remainingPlan, problemTokens };
+}
+
+/**
+ * Executes problem tokens individually with higher slippage
+ */
+async function executeProblemTokensIndividually(
+  problemTokens: any[],
+  recipient: string,
+  publicClient: PublicClient<Transport, Chain> | undefined,
+  writeContractAsync: ReturnType<typeof useWriteContract>['writeContractAsync'],
+  showToast: (msg: string, type: "success" | "error" | "info" | "warning") => void,
+  swapperAddress: string,
+  swapperAbi: readonly any[]
+): Promise<number> {
+  console.log(`\n🔄 === EXECUTING PROBLEM TOKENS INDIVIDUALLY ===`);
+  
+  if (!publicClient) {
+    console.warn('⚠️ No publicClient available');
+    return 0;
+  }
+  
+  let successCount = 0;
+  const PROBLEM_TOKEN_SLIPPAGE_BPS = 1000; // 10% slippage for problem tokens (increased from 5%)
+  
+  for (const swap of problemTokens) {
+    console.log(`\n  Attempting individual swap: ${swap.tokenIn}`);
+    
+    const modifiedSwap = {
+      ...swap,
+      slippageBps: Math.max(swap.slippageBps, PROBLEM_TOKEN_SLIPPAGE_BPS)
+    };
+    
+    console.log(`    Original slippage: ${swap.slippageBps / 100}%`);
+    console.log(`    Boosted slippage: ${modifiedSwap.slippageBps / 100}%`);
+    
+    try {
+      let gas: bigint;
+      try {
+        gas = await publicClient.estimateContractGas({
+          address: swapperAddress as `0x${string}`,
+          abi: swapperAbi,
+          functionName: 'executePlanFromCaller',
+          args: [[modifiedSwap], recipient as `0x${string}`],
+          account: recipient as `0x${string}`,
+        });
+        gas = (gas * 150n) / 100n;
+      } catch (gasErr) {
+        console.log(`    ❌ Gas estimation failed even with higher slippage - skipping`);
+        continue;
+      }
+      
+      const hash = await writeContractAsync({
+        address: swapperAddress as `0x${string}`,
+        abi: swapperAbi,
+        functionName: 'executePlanFromCaller',
+        args: [[modifiedSwap], recipient as `0x${string}`],
+        gas
+      });
+      
+      await publicClient.waitForTransactionReceipt({ hash });
+      console.log(`    ✅ Individual swap succeeded!`);
+      successCount++;
+      
+    } catch (e: any) {
+      console.log(`    ❌ Individual swap failed: ${e.message?.substring(0, 100)}`);
+    }
+  }
+  
+  if (successCount > 0) {
+    showToast(`Recovered ${successCount}/${problemTokens.length} problem tokens`, "info");
+  }
+  
+  return successCount;
+}
+
+
 
 // --------------------------------------------------------------------------
 // 3. TYPES
@@ -843,16 +1140,20 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     
     // Filter tokens with valid prices
     const validTokens: typeof tokens = [];
-    const scamTokens: typeof tokens = [];
+    const scamTokens: Array<{ address: string; symbol: string; reason: string }> = [];
     
-    const MIN_SWAP_VALUE_USD = 0.1; // Don't bother swapping less than 50 cents
-
+    const MIN_SWAP_VALUE_USD = 0.1;
+  
     for (const token of tokens) {
       const price = priceMap[token.address.toLowerCase()];
       
       if (!price || price <= 0 || !isFinite(price)) {
         console.log(`  ❌ ${token.symbol}: No valid price (likely scam token)`);
-        scamTokens.push(token);
+        scamTokens.push({
+          address: token.address,
+          symbol: token.symbol,
+          reason: 'No price data from any source'
+        });
         trackFailedToken(
           token.address, 
           token.symbol, 
@@ -860,7 +1161,6 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           'pre_screening'
         );
       } else {
-        // ✅ NEW: Calculate USD value and filter dust
         const usdValue = (Number(token.walletBN) / 10 ** token.decimals) * price;
         
         if (usdValue < MIN_SWAP_VALUE_USD) {
@@ -882,6 +1182,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     console.log(`   Valid tokens: ${validTokens.length}`);
     console.log(`   Filtered out: ${scamTokens.length}`);
     
+    // ✅ NEW: Report scam tokens to blocklist API (background, non-blocking)
     if (scamTokens.length > 0) {
       console.log(`\n📋 Scam tokens filtered:`);
       scamTokens.forEach(t => console.log(`   • ${t.symbol} (${t.address})`));
@@ -890,6 +1191,9 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         `Filtered out ${scamTokens.length} token(s) with no price data`,
         "info"
       );
+      
+      // Report in background - don't await
+      reportSpamTokens(scamTokens).catch(() => {});
     }
     
     return { validTokens, priceMap };
@@ -1282,6 +1586,10 @@ const buildSwapPlan = async (
   const scanForSwapCandidates = async () => {
       console.log(`\n📋 Scanning for valid swap candidates...`);
       setFailedTokens([]); 
+      setProgressStep("Loading spam blocklist...");
+      
+      const blocklist = await fetchSpamBlocklist();
+      
       setProgressStep("Scanning wallet for rewards...");
       
       // 1. Fetch Registry
@@ -1303,9 +1611,57 @@ const buildSwapPlan = async (
 
       if (allTokens.length === 0) throw new Error("No tokens found in Registry or JSON");
 
-      // 4. Enrich & Balance Check
-      const enriched = await enrichTokens(allTokens);
-      const balanceCalls = enriched.map(t => ({
+      // Pre-filter known spam (by address)
+      const preFilteredTokens = allTokens.filter(addr => {
+        if (blocklist.addresses.has(addr)) {
+          console.log(`🚫 Pre-filtered spam token: ${addr}`);
+          return false;
+        }
+        return true;
+      });
+      
+      console.log(`📊 Pre-filter: ${allTokens.length} → ${preFilteredTokens.length} tokens (removed ${allTokens.length - preFilteredTokens.length} known spam)`);
+
+      // 4. Enrich
+      const enriched = await enrichTokens(preFilteredTokens);
+      
+      // ✅ NEW: Collect spam tokens found by symbol pattern for reporting
+      const symbolSpamTokens: Array<{ address: string; symbol: string; reason: string }> = [];
+      
+      const symbolFiltered = enriched.filter(t => {
+        if (isSpamToken(t.address, t.symbol, blocklist)) {
+          console.log(`🚫 Symbol-pattern filtered: ${t.symbol} (${t.address})`);
+          
+          // Determine reason for reporting
+          let reason = 'Symbol pattern match';
+          if (/[\u0400-\u04FF]/.test(t.symbol)) {
+            reason = 'Contains Cyrillic characters (fake token)';
+          } else if (t.symbol.includes('t.me') || t.symbol.includes('telegram')) {
+            reason = 'Contains Telegram link (phishing)';
+          } else if (/claim.*\d{2}\.\d{2}\.\d{2}/i.test(t.symbol)) {
+            reason = 'Contains claim deadline (airdrop scam)';
+          }
+          
+          symbolSpamTokens.push({
+            address: t.address,
+            symbol: t.symbol,
+            reason
+          });
+          
+          return false;
+        }
+        return true;
+      });
+      
+      console.log(`📊 Symbol filter: ${enriched.length} → ${symbolFiltered.length} tokens`);
+      
+      // ✅ NEW: Report symbol-detected spam tokens (background, non-blocking)
+      if (symbolSpamTokens.length > 0) {
+        reportSpamTokens(symbolSpamTokens).catch(() => {});
+      }
+
+      // Rest of the function remains the same...
+      const balanceCalls = symbolFiltered.map(t => ({
           address: t.address as `0x${string}`,
           abi: ERC20_ABI,
           functionName: 'balanceOf' as const,
@@ -1315,10 +1671,9 @@ const buildSwapPlan = async (
       const balanceResults = await publicClient?.multicall({ contracts: balanceCalls });
       const rawCandidates: any[] = [];
       
-      enriched.forEach((t, idx) => {
+      symbolFiltered.forEach((t, idx) => {
           const balResult = balanceResults?.[idx];
           const bal = balResult?.status === 'success' ? (balResult.result as bigint) : 0n;
-          // Exclude iAERO - never swap it
           if (bal > 0n && t.address.toLowerCase() !== IAERO_ADDR.toLowerCase()) {
               rawCandidates.push({ address: t.address, symbol: t.symbol, decimals: t.decimals, walletBN: bal });
           }
@@ -1326,7 +1681,7 @@ const buildSwapPlan = async (
 
       if (rawCandidates.length === 0) throw new Error("No reward tokens found in your wallet");
       
-      // 5. Pre-screen (Price Check)
+      // 5. Pre-screen (this also reports spam now)
       const { validTokens, priceMap } = await preScreenTokens(rawCandidates);
       
       if (validTokens.length === 0) throw new Error("No valid tokens found (all filtered)");
@@ -1334,8 +1689,9 @@ const buildSwapPlan = async (
       return { validTokens, priceMap };
   };
 
+
   // ✅ PHASE 2: Execute Swap on a specific list (The heavy lifter)
-  const executeBatchSwap = async (tokensToSwap: any[], targetTokenAddr: string, priceMap: any) => {
+  const executeBatchSwap = async (tokensToSwap: any[], targetTokenAddr: string, priceMap: Record<string, number>) => {
       console.log(`\n🚀 Executing Swap on ${tokensToSwap.length} selected tokens...`);
       console.log(`⏰ Timestamp check: ${new Date().toISOString()}`);
       
@@ -1344,7 +1700,7 @@ const buildSwapPlan = async (
 
       const totalTokens = tokensToSwap.length;
       let successfulSwaps = 0;
-      let totalBatches = Math.ceil(totalTokens / BATCH_SIZE);
+      const totalBatches = Math.ceil(totalTokens / BATCH_SIZE);
 
       for (let batchNum = 0; batchNum < totalBatches; batchNum++) {
         const batchStart = batchNum * BATCH_SIZE;
@@ -1365,85 +1721,121 @@ const buildSwapPlan = async (
             continue;
           }
 
-          console.log('🔄 Re-fetching fresh quotes for execution...');
-          const passingTokenAddresses = passing.map(p => p.tokenIn);
-          const freshPlan = await buildSwapPlan(
-            targetTokenAddr, 
-            passingTokenAddresses.map(addr => {
-              // Find from batchTokens (has symbol/decimals), NOT batchPlan
-              const original = batchTokens.find(t => t.address.toLowerCase() === addr.toLowerCase());
-              return {
-                address: addr,
-                symbol: original?.symbol || 'UNKNOWN',
-                decimals: original?.decimals || 18,
-                walletBN: original?.walletBN || 0n,
-              };
-            }),
-            priceMap
-          );
-
-          if (freshPlan.length === 0) {
-            console.log('❌ No valid fresh quotes');
-            continue;
+          // ✅ OPTIMIZATION: Use passing swaps directly - no need to re-fetch quotes
+          // The time between quote and simulation is negligible
+          const planToValidate = passing;
+          
+          // ✅ Smart batch validation with problem token isolation
+          setProgressStep(`Batch ${batchNum + 1}/${totalBatches}: Validating batch...`);
+          
+          let planToExecute = planToValidate;
+          let problemTokensToRetry: any[] = [];
+          
+          try {
+            // First, try to validate the full batch
+            await publicClient?.estimateContractGas({
+              address: SWAPPER_ADDRESS as `0x${string}`,
+              abi: SWAPPER_ABI,
+              functionName: 'executePlanFromCaller',
+              args: [planToValidate, account as `0x${string}`],
+              account: account as `0x${string}`,
+            });
+            console.log('✅ Full batch validated');
+            
+          } catch (batchValidationError: any) {
+            console.log('❌ Batch validation failed, isolating problem tokens...');
+            
+            // Isolate problem tokens
+            const { workingPlan, problemTokens } = await isolateProblemTokensInBatch(
+              planToValidate,
+              account as `0x${string}`,
+              publicClient as PublicClient<Transport, Chain> | undefined,
+              account as `0x${string}`,
+              SWAPPER_ADDRESS,
+              SWAPPER_ABI
+            );
+            
+            planToExecute = workingPlan;
+            problemTokensToRetry = problemTokens;
+            
+            if (workingPlan.length === 0) {
+              console.log('⚠️ No working batch found, will try all tokens individually');
+              
+              // Execute all tokens individually with higher slippage
+              const individualSuccess = await executeProblemTokensIndividually(
+                planToValidate,
+                account as `0x${string}`,
+                publicClient as PublicClient<Transport, Chain> | undefined,
+                writeContractAsync,
+                showToast,
+                SWAPPER_ADDRESS,
+                SWAPPER_ABI
+              );
+              
+              successfulSwaps += individualSuccess;
+              continue; // Skip to next batch
+            }
           }
           
-          // ✅ FIX: Add 20% Gas Buffer to prevent "Out of Gas" or RPC rejection
-          let estimatedGas = 9000000n; // Default safe limit
-          try {
-            estimatedGas = await publicClient?.estimateContractGas({
+          // Execute the working batch (if any)
+          if (planToExecute.length > 0) {
+            setProgressStep(`Batch ${batchNum + 1}/${totalBatches}: Executing ${planToExecute.length} swaps...`);
+            
+            let estimatedGas = 9000000n;
+            try {
+              estimatedGas = await publicClient?.estimateContractGas({
+                address: SWAPPER_ADDRESS,
+                abi: SWAPPER_ABI,
+                functionName: 'executePlanFromCaller',
+                args: [planToExecute, account as `0x${string}`],  
+                account: account as `0x${string}`
+              }) || 5000000n;
+              
+              estimatedGas = (estimatedGas * 150n) / 100n;
+            } catch (e: any) {
+              console.warn("⚠️ Gas estimation failed, using default:", e.message);
+            }
+
+            const hash = await writeContractAsync({
               address: SWAPPER_ADDRESS,
               abi: SWAPPER_ABI,
               functionName: 'executePlanFromCaller',
-              args: [freshPlan, account as `0x${string}`],  
-              account: account as `0x${string}`
-            }) || 5000000n;
-            
-            // Add 20% buffer
-            estimatedGas = (estimatedGas * 150n) / 100n;
-          } catch (e: any) {
-            // ⚠️ CRITICAL: Gas estimation failure usually means the call WILL revert
-            const errMsg = String(e?.message || e);
-            console.error("❌ Gas estimation FAILED - call will likely revert:", errMsg);
-            
-            // Check for specific revert reasons
-            if (errMsg.includes('insufficient') || errMsg.includes('allowance')) {
-              showToast("Swap would fail: Insufficient balance or allowance", "error");
-              throw new Error("Gas estimation failed - insufficient funds/allowance");
-            }
-            if (errMsg.includes('revert') || errMsg.includes('#1002')) {
-              showToast("Swap would fail: Route expired or slippage too tight", "error"); 
-              throw new Error("Gas estimation failed - route/slippage issue");
-            }
-            
-            // Only continue with default for non-critical estimation issues
-            console.warn("⚠️ Proceeding with default gas (risky):", e);
+              args: [planToExecute, account as `0x${string}`],
+              gas: estimatedGas
+            });
+
+            await publicClient?.waitForTransactionReceipt({ hash });
+            successfulSwaps += planToExecute.length;
+            console.log(`  ✅ Batch executed: ${planToExecute.length} swaps`);
           }
-
-          setProgressStep(`Batch ${batchNum + 1}/${totalBatches}: Executing...`);
           
-          const hash = await writeContractAsync({
-            address: SWAPPER_ADDRESS,
-            abi: SWAPPER_ABI,
-            functionName: 'executePlanFromCaller',
-            args: [freshPlan, account as `0x${string}`],
-            gas: estimatedGas // ✅ Pass explicit gas limit
-          });
-
-          await publicClient?.waitForTransactionReceipt({ hash });
-          successfulSwaps += passing.length;
-          console.log(`  ✅ Batch ${batchNum + 1} executed successfully`);
+          // Execute problem tokens individually with higher slippage
+          if (problemTokensToRetry.length > 0) {
+            setProgressStep(`Batch ${batchNum + 1}/${totalBatches}: Retrying ${problemTokensToRetry.length} problem tokens...`);
+            
+            const individualSuccess = await executeProblemTokensIndividually(
+              problemTokensToRetry,
+              account as `0x${string}`,
+              publicClient as PublicClient<Transport, Chain> | undefined,
+              writeContractAsync,
+              showToast,
+              SWAPPER_ADDRESS,
+              SWAPPER_ABI
+            );
+            
+            successfulSwaps += individualSuccess;
+          }
           
         } catch (e: any) {
           console.error(`Batch ${batchNum + 1} failed:`, e);
           
-          // Detect typical "User Rejected" error to avoid scary toasts
           if (e.message?.includes("User rejected") || e.code === 4001) {
               showToast("Transaction rejected by user", "info");
           } else {
               showToast(`Batch ${batchNum + 1} failed - ${e.shortMessage || e.message}`, "warning");
           }
         }
-      }
+      }      
       return successfulSwaps;
   };
 
@@ -1839,7 +2231,7 @@ const buildSwapPlan = async (
         if (drop.length > 0) {
             const skippedNames = drop.map((d: any) => d.symbol).join(", ");
             // Warn the user, but don't throw an error. We will proceed with the 'keep' list.
-            showToast(`Skipping ${drop.length} tokens (Protocol Wallet Empty): ${skippedNames}`, "warning");
+            showToast(`Skipping ${drop.length} tokens: ${skippedNames}`, "warning");
         }
 
         // ✅ CHANGE: If nothing is left to claim, exit gracefully

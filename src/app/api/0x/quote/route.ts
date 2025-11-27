@@ -5,7 +5,7 @@ import { type NextRequest, NextResponse } from "next/server";
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
-  const ZERO_EX_API_KEY="966145b6-5d31-40d8-b689-10666524d40e"; // Server-side env var
+  const ZERO_EX_API_KEY=context.env.ZERO_EX_API_KEY; // Server-side env var
 
   if (!ZERO_EX_API_KEY) {
     return NextResponse.json({ error: "Missing API Key" }, { status: 500 });
