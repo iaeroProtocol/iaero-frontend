@@ -182,13 +182,40 @@ export default function IaeroProtocolApp() {
        </motion.div>
 
        {/* Stats Overview */}
-       <div className="mb-12">
+       <div className="mb-8">
          <StatsCards 
            stats={stats} 
            formatNumber={formatNumber}
            loading={loading?.stats}
          />
        </div>
+
+       {/* Buy Buttons */}
+       <motion.div 
+         initial={{ opacity: 0, y: 20 }}
+         animate={{ opacity: 1, y: 0 }}
+         transition={{ delay: 0.4 }}
+         className="flex flex-wrap justify-center gap-4 mb-12"
+       >
+         <a
+           href="https://aero.drome.eth.limo/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x81034fb34009115f215f5d5f564aac9ffa46a1dc&chain0=8453&chain1=8453"
+           target="_blank"
+           rel="noopener noreferrer"
+           className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-semibold rounded-xl shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 transition-all duration-300 hover:scale-105"
+         >
+           <Coins className="w-5 h-5" />
+           Buy iAERO
+         </a>
+         <a
+           href="https://aero.drome.eth.limo/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x7ee8964160126081cebc443a42482e95e393e6a8&chain0=8453&chain1=8453"
+           target="_blank"
+           rel="noopener noreferrer"
+           className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-semibold rounded-xl shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 transition-all duration-300 hover:scale-105"
+         >
+           <Sparkles className="w-5 h-5" />
+           Buy LIQ
+         </a>
+       </motion.div>
 
        {/* Main Protocol Interface */}
        <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50 w-full max-w-7xl mx-auto">
