@@ -190,31 +190,44 @@ export default function IaeroProtocolApp() {
          />
        </div>
 
-       {/* Buy Buttons */}
+       {/* Buy Buttons - aligned under middle two stats cards */}
        <motion.div 
          initial={{ opacity: 0, y: 20 }}
          animate={{ opacity: 1, y: 0 }}
          transition={{ delay: 0.4 }}
-         className="flex flex-wrap justify-center gap-4 mb-12"
+         className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-12"
        >
-         <a
-           href="https://aero.drome.eth.limo/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x81034fb34009115f215f5d5f564aac9ffa46a1dc&chain0=8453&chain1=8453"
-           target="_blank"
-           rel="noopener noreferrer"
-           className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-semibold rounded-xl shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 transition-all duration-300 hover:scale-105"
-         >
-           <Coins className="w-5 h-5" />
-           Buy iAERO
-         </a>
-         <a
-           href="https://aero.drome.eth.limo/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x7ee8964160126081cebc443a42482e95e393e6a8&chain0=8453&chain1=8453"
-           target="_blank"
-           rel="noopener noreferrer"
-           className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-semibold rounded-xl shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 transition-all duration-300 hover:scale-105"
-         >
-           <Sparkles className="w-5 h-5" />
-           Buy LIQ
-         </a>
+         {/* Empty spacer for first card column */}
+         <div className="hidden lg:block" />
+         
+         {/* Buy iAERO - under veAERO Owned card */}
+         <div className="flex justify-center">
+           <a
+             href="https://aero.drome.eth.limo/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x81034fb34009115f215f5d5f564aac9ffa46a1dc&chain0=8453&chain1=8453"
+             target="_blank"
+             rel="noopener noreferrer"
+             className="inline-flex items-center justify-center gap-2 px-10 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-sm font-semibold rounded-lg shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 transition-all duration-300 hover:scale-105 w-full max-w-[220px]"
+           >
+             <Coins className="w-4 h-4" />
+             Buy iAERO
+           </a>
+         </div>
+         
+         {/* Buy LIQ - under iAERO Price card */}
+         <div className="flex justify-center">
+           <a
+             href="https://aero.drome.eth.limo/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x7ee8964160126081cebc443a42482e95e393e6a8&chain0=8453&chain1=8453"
+             target="_blank"
+             rel="noopener noreferrer"
+             className="inline-flex items-center justify-center gap-2 px-10 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-sm font-semibold rounded-lg shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 transition-all duration-300 hover:scale-105 w-full max-w-[220px]"
+           >
+             <Sparkles className="w-4 h-4" />
+             Buy LIQ
+           </a>
+         </div>
+         
+         {/* Empty spacer for fourth card column */}
+         <div className="hidden lg:block" />
        </motion.div>
 
        {/* Main Protocol Interface */}
