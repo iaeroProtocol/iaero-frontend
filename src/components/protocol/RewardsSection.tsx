@@ -7,7 +7,7 @@ import { usePublicClient, useWriteContract } from 'wagmi';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { parseAbi, encodeAbiParameters, parseUnits } from 'viem';
+import { parseAbi, encodeAbiParameters, parseUnits, formatUnits } from 'viem';
 import type { PublicClient, Transport, Chain } from 'viem';
 
 import {
@@ -20,6 +20,9 @@ import {
   CheckCircle,
   Wallet,
   Coins,
+  AlertTriangle,
+  X,
+  XCircle,
 } from "lucide-react";
 
 import { useProtocol } from "@/components/contexts/ProtocolContext";
@@ -499,6 +502,40 @@ interface TxHistory {
   txHash?: string;
 }
 
+// Quote Preview Types (ported from sweeper)
+interface SwapQuote {
+  token: { address: string; symbol: string; decimals: number; walletBN: bigint };
+  buyAmount: bigint;
+  buyAmountFormatted: string;
+  transactionTo: string;
+  transactionData: string;
+  priceImpact: number;
+}
+
+interface QuotePreviewItem {
+  token: { address: string; symbol: string; decimals: number; walletBN: bigint };
+  inputValueUsd: number;
+  quotedOutputUsd: number;
+  lossPercent: number;
+  lossUsd: number;
+  quote: SwapQuote;
+  selected: boolean;
+  forceHighSlippage?: boolean;
+}
+
+interface FailedQuoteItem {
+  token: { address: string; symbol: string; decimals: number; walletBN: bigint };
+  error: string;
+}
+
+interface QuotePreviewData {
+  quotes: QuotePreviewItem[];
+  failedQuotes: FailedQuoteItem[];
+  outputToken: 'USDC' | 'AERO' | 'iAERO';
+  outputPrice: number;
+  outputDecimals: number;
+}
+
 // 1. Define the interface for your JSON structure
 interface JsonRewardItem {
   token: string;      // The token contract address
@@ -653,84 +690,61 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
   const [candidates, setCandidates] = useState<any[]>([]); // Tokens found during scan
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set()); // Tokens checked by user
   const [customAmounts, setCustomAmounts] = useState<Record<string, string>>({});
+  
+  // Quote preview modal state
+  const [showQuotePreview, setShowQuotePreview] = useState(false);
+  const [quotePreviewData, setQuotePreviewData] = useState<QuotePreviewData | null>(null);
 
-  function calculateSmartSlippage(
-    quote: any,
-    token: { symbol: string; address: string; decimals: number; walletBN: bigint },
-    priceUSD: number
-  ): { slippageBps: number; shouldSwap: boolean; reason: string } {
+  /**
+   * Simpler slippage calculation (ported from sweeper)
+   * Base slippage of 30 bps (0.3%), scales up with price impact, capped at 500 bps (5%)
+   */
+  function calculateSlippage(
+    priceImpactPercent: number,
+    forceHighSlippage: boolean = false
+  ): number {
+    const priceImpactBps = Math.ceil(priceImpactPercent * 100);
     
-    const priceImpact = Number(quote.estimatedPriceImpact || 0);
-    const valueUSD = (Number(token.walletBN) / 10 ** token.decimals) * priceUSD;
-    
-    console.log(`📊 ${token.symbol}:`);
-    console.log(`   Price Impact from 0x: ${(priceImpact * 100).toFixed(2)}%`);
-    console.log(`   Token Value: $${valueUSD.toFixed(2)}`);
-    
-    // Calculate base slippage from price impact
-    let baseSlippageBps: number;
-    
-    if (priceImpact < 0.005) {
-      // ✅ FIX: Very liquid tokens need 2% minimum (not 1%)
-      // This accounts for quote staleness and price volatility
-      baseSlippageBps = 200;  // Changed from 100 to 200
-      console.log(`   → Very liquid, base slippage: 2%`);
-    } else if (priceImpact < 0.01) {
-      baseSlippageBps = 250;  // Changed from 150 to 250
-      console.log(`   → Liquid, base slippage: 2.5%`);
-    } else if (priceImpact < 0.03) {
-      // Add 2% buffer (increased from 1%)
-      baseSlippageBps = Math.ceil((priceImpact + 0.02) * 10000);
-      console.log(`   → Medium liquidity, base slippage: ${baseSlippageBps / 100}% (impact + 2%)`);
-    } else if (priceImpact < 0.05) {
-      // Add 3% buffer (increased from 2%)
-      baseSlippageBps = Math.ceil((priceImpact + 0.03) * 10000);
-      console.log(`   → Low liquidity, base slippage: ${baseSlippageBps / 100}% (impact + 3%)`);
-    } else {
-      // Add 4% buffer (increased from 3%)
-      baseSlippageBps = Math.ceil((priceImpact + 0.04) * 10000);
-      console.log(`   → Very low liquidity, base slippage: ${baseSlippageBps / 100}% (impact + 4%)`);
+    if (forceHighSlippage) {
+      // Force mode: impact + 10%, min 5%, max 99%
+      return Math.min(9900, Math.max(500, priceImpactBps + 1000));
     }
     
-    // Rest of the function remains the same...
-    let maxAllowedSlippage: number;
-    
-    if (valueUSD >= 100) {
-      maxAllowedSlippage = 1500;
-      console.log(`   → High value ($${valueUSD.toFixed(2)}), max allowed: 15%`);
-    } else if (valueUSD >= 20) {
-      maxAllowedSlippage = 1000;
-      console.log(`   → Medium value ($${valueUSD.toFixed(2)}), max allowed: 10%`);
-    } else if (valueUSD >= 5) {
-      maxAllowedSlippage = 500;
-      console.log(`   → Low value ($${valueUSD.toFixed(2)}), max allowed: 5%`);
-    } else {
-      maxAllowedSlippage = 300;
-      console.log(`   → Dust value ($${valueUSD.toFixed(2)}), max allowed: 3%`);
-    }
-    
-    const finalSlippageBps = Math.min(baseSlippageBps, maxAllowedSlippage);
-    console.log(`   → Final slippage: ${finalSlippageBps / 100}%`);
-  
-    // Build proper reason string...
-    let reason: string;
-    const needsSlippage = baseSlippageBps;
-  
-    if (needsSlippage > maxAllowedSlippage) {
-      const impactPct = (priceImpact * 100).toFixed(1);
-      reason = `Value $${valueUSD.toFixed(2)} too low for ${impactPct}% impact (needs ${(needsSlippage / 100).toFixed(1)}% but max is ${maxAllowedSlippage / 100}%)`;
-    } else if (finalSlippageBps > 1000) {
-      reason = `High value ($${valueUSD.toFixed(2)}) - accepting ${finalSlippageBps / 100}% slippage (high MEV risk)`;
-    } else if (finalSlippageBps > 500) {
-      reason = `Medium value ($${valueUSD.toFixed(2)}) - using ${finalSlippageBps / 100}% slippage (moderate MEV risk)`;
-    } else {
-      reason = `Good liquidity ($${valueUSD.toFixed(2)}) - using ${finalSlippageBps / 100}% slippage`;
-    }
-  
-    const shouldSwap = needsSlippage <= maxAllowedSlippage;
-  
-    return { slippageBps: finalSlippageBps, shouldSwap, reason };
+    // Normal mode: base 0.3% + 1.5x impact, capped at 5%
+    return Math.min(500, Math.max(30, 30 + Math.ceil(priceImpactBps * 1.5)));
   }
+  
+  // Toggle quote selection in preview modal
+  const toggleQuoteSelection = useCallback((tokenAddress: string) => {
+    if (!quotePreviewData) return;
+    setQuotePreviewData(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        quotes: prev.quotes.map(q => 
+          q.token.address.toLowerCase() === tokenAddress.toLowerCase()
+            ? { ...q, selected: !q.selected }
+            : q
+        )
+      };
+    });
+  }, [quotePreviewData]);
+  
+  // Toggle force high slippage for a token
+  const toggleForceSlippage = useCallback((tokenAddress: string) => {
+    if (!quotePreviewData) return;
+    setQuotePreviewData(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        quotes: prev.quotes.map(q => 
+          q.token.address.toLowerCase() === tokenAddress.toLowerCase()
+            ? { ...q, forceHighSlippage: !q.forceHighSlippage }
+            : q
+        )
+      };
+    });
+  }, [quotePreviewData]);
 
   async function fetchPricesForAddrs(addrs: string[], chainId?: number): Promise<Record<string, number>> {
     const unique = Array.from(new Set(addrs.map(a => a.toLowerCase()).filter(Boolean)));
@@ -1447,25 +1461,16 @@ const buildSwapPlan = async (
         );
         const priceUSD = priceMap[data.reward.address.toLowerCase()] || 0;
         
-        // Pass the SWAP amount, not total wallet balance, for impact calc
-        const slippageDecision = calculateSmartSlippage(
-            data.quote, 
-            { ...data.reward, walletBN: data.currentBalance }, 
-            priceUSD
-        );
+        // Calculate price impact from quote
+        const priceImpact = Number(data.quote.estimatedPriceImpact || 0) * 100; // Convert to percentage
         
-        if (isSweepingToIAERO && !slippageDecision.shouldSwap && slippageDecision.slippageBps < 2000) {
-            slippageDecision.shouldSwap = true;
-            slippageDecision.slippageBps = 2000; 
-        }
-
-        if (!slippageDecision.shouldSwap) {
-          trackFailedToken(data.reward.address, data.reward.symbol, slippageDecision.reason, 'slippage_too_high');
-          return;
-        }
+        // Use simpler sweeper-style slippage (capped at 5% normally)
+        const slippageBps = calculateSlippage(priceImpact, false);
+        
+        console.log(`📊 ${data.reward.symbol}: impact=${priceImpact.toFixed(2)}%, slippage=${slippageBps/100}%`);
         
         const optimisticBuyAmount = BigInt(data.quote.buyAmount);
-        const slippageAmount = (optimisticBuyAmount * BigInt(slippageDecision.slippageBps)) / 10000n;
+        const slippageAmount = (optimisticBuyAmount * BigInt(slippageBps)) / 10000n;
         const minAmountOut = optimisticBuyAmount - slippageAmount;
         
         // ✅ CRITICAL FIX: Determine useAll based on amounts
@@ -1485,7 +1490,7 @@ const buildSwapPlan = async (
           amountIn: quoteSellAmount, 
           quotedIn: quoteSellAmount, 
           quotedOut: optimisticBuyAmount,  
-          slippageBps: slippageDecision.slippageBps,
+          slippageBps: slippageBps,
           data: encodedData,
           viaPermit2: false,
           permitSig: "0x",
@@ -1687,6 +1692,112 @@ const buildSwapPlan = async (
       if (validTokens.length === 0) throw new Error("No valid tokens found (all filtered)");
 
       return { validTokens, priceMap };
+  };
+
+  // ✅ Build quote preview for pre-trade modal
+  const buildQuotePreview = async (
+    tokensToSwap: any[], 
+    targetTokenAddr: string, 
+    priceMap: Record<string, number>,
+    outputTokenName: 'USDC' | 'AERO' | 'iAERO'
+  ): Promise<QuotePreviewData | null> => {
+    console.log(`\n📋 Building quote preview for ${tokensToSwap.length} tokens...`);
+    
+    const ZERO_EX_URL = "/api/0x/quote";
+    const INTER_REQUEST_DELAY_MS = 400;
+    
+    const successfulQuotes: QuotePreviewItem[] = [];
+    const failedQuotes: FailedQuoteItem[] = [];
+    
+    // Get output token price
+    const outputPrice = targetTokenAddr.toLowerCase() === USDC_ADDR.toLowerCase() ? 1 
+      : (priceMap[targetTokenAddr.toLowerCase()] || 1);
+    const outputDecimals = targetTokenAddr.toLowerCase() === USDC_ADDR.toLowerCase() ? 6 : 18;
+    
+    for (let i = 0; i < tokensToSwap.length; i++) {
+      const token = tokensToSwap[i];
+      setProgressStep(`Fetching quote ${i + 1}/${tokensToSwap.length}: ${token.symbol}...`);
+      
+      try {
+        const params = new URLSearchParams({
+          chainId: String(chainId || 8453),
+          sellToken: token.address,
+          buyToken: targetTokenAddr,
+          sellAmount: token.walletBN.toString(),
+          taker: SWAPPER_ADDRESS,
+          slippagePercentage: '0.10',
+        });
+        
+        const res = await fetch(`${ZERO_EX_URL}?${params}`);
+        
+        if (!res.ok) {
+          const errText = await res.text();
+          console.warn(`❌ Quote failed for ${token.symbol}: ${errText}`);
+          failedQuotes.push({ token, error: `HTTP ${res.status}` });
+          await new Promise(r => setTimeout(r, INTER_REQUEST_DELAY_MS));
+          continue;
+        }
+        
+        const quote = await res.json();
+        
+        if (quote.code || quote.reason || !quote.transaction?.data) {
+          failedQuotes.push({ token, error: quote.reason || 'No quote available' });
+          await new Promise(r => setTimeout(r, INTER_REQUEST_DELAY_MS));
+          continue;
+        }
+        
+        // Calculate values
+        const priceUSD = priceMap[token.address.toLowerCase()] || 0;
+        const inputValueUsd = (Number(token.walletBN) / 10 ** token.decimals) * priceUSD;
+        const buyAmountBigInt = BigInt(quote.buyAmount);
+        const quotedOutputUsd = (Number(buyAmountBigInt) / 10 ** outputDecimals) * outputPrice;
+        
+        // Price impact (as percentage)
+        const priceImpact = Number(quote.estimatedPriceImpact || 0) * 100;
+        const lossPercent = inputValueUsd > 0 ? Math.max(0, ((inputValueUsd - quotedOutputUsd) / inputValueUsd) * 100) : priceImpact;
+        const lossUsd = Math.max(0, inputValueUsd - quotedOutputUsd);
+        
+        successfulQuotes.push({
+          token,
+          inputValueUsd,
+          quotedOutputUsd,
+          lossPercent,
+          lossUsd,
+          quote: {
+            token,
+            buyAmount: buyAmountBigInt,
+            buyAmountFormatted: formatUnits(buyAmountBigInt, outputDecimals),
+            transactionTo: quote.transaction.to,
+            transactionData: quote.transaction.data,
+            priceImpact
+          },
+          selected: lossPercent < 10, // Auto-deselect if > 10% price impact
+          forceHighSlippage: false
+        });
+        
+        console.log(`  ✅ ${token.symbol}: $${inputValueUsd.toFixed(2)} → $${quotedOutputUsd.toFixed(2)} (${lossPercent.toFixed(2)}% impact)`);
+        
+      } catch (e: any) {
+        console.warn(`❌ Quote error for ${token.symbol}:`, e.message);
+        failedQuotes.push({ token, error: e.message || 'Quote failed' });
+      }
+      
+      await new Promise(r => setTimeout(r, INTER_REQUEST_DELAY_MS));
+    }
+    
+    console.log(`✅ Quote preview: ${successfulQuotes.length} success, ${failedQuotes.length} failed`);
+    
+    if (successfulQuotes.length === 0) {
+      return null;
+    }
+    
+    return {
+      quotes: successfulQuotes,
+      failedQuotes,
+      outputToken: outputTokenName,
+      outputPrice,
+      outputDecimals
+    };
   };
 
 
@@ -2082,7 +2193,8 @@ const buildSwapPlan = async (
     }
   };
 
-  // Runs when you click "Sweep to X" inside the modal
+  // Runs when you click "Sweep to X" inside the token selection modal
+  // Now shows quote preview before executing
   const handleConfirmSweep = async (mode: 'USDC' | 'iAERO') => {
     // Filter selected candidates
       const selectedCandidates = candidates.filter(t => selectedTokens.has(t.address));
@@ -2092,28 +2204,22 @@ const buildSwapPlan = async (
           return;
       }
 
-      // ✅ NEW: Apply custom amounts
+      // ✅ Apply custom amounts
       const tokensToSwap = selectedCandidates.map(t => {
           const customInput = customAmounts[t.address];
           if (customInput && customInput !== "") {
               try {
-                  // Remove commas just in case user pasted a formatted number
                   const cleanInput = customInput.replace(/,/g, '');
-                  
                   const newAmount = parseUnits(cleanInput, t.decimals);
-                  
-                  // Ensure amount is positive and doesn't exceed actual balance
                   if (newAmount > 0n) {
-                      // If user types more than they have, cap it at max balance
                       const safeAmount = newAmount > t.walletBN ? t.walletBN : newAmount;
-                      return { ...t, walletBN: safeAmount }; // Override balance
+                      return { ...t, walletBN: safeAmount };
                   }
               } catch (e) {
                   console.warn("Invalid custom amount for", t.symbol, e);
-                  // If parsing fails, we fall back to returning 't' (full balance) or skip
               }
           }
-          return t; // Default to full balance if input empty or invalid
+          return t;
       });
 
       setReviewModalOpen(false); 
@@ -2124,29 +2230,91 @@ const buildSwapPlan = async (
           const priceMap = await fetchPricesForAddrs(addresses, chainId || 8453);
           
           const targetToken = mode === 'iAERO' ? AERO_ADDR : USDC_ADDR;
+          const outputName = mode === 'iAERO' ? 'AERO' as const : 'USDC' as const;
 
-          const successfulSwaps = await executeBatchSwap(tokensToSwap, targetToken, priceMap);
-
-          if (successfulSwaps === 0) {
-              showToast("No swaps were executed successfully", "warning");
+          // Build quote preview instead of executing directly
+          setProgressStep("Fetching quotes...");
+          const preview = await buildQuotePreview(tokensToSwap, targetToken, priceMap, outputName);
+          
+          if (!preview || preview.quotes.length === 0) {
+              showToast("Failed to get quotes for any tokens", "error");
               return;
           }
-
-          if (mode === 'iAERO') {
-              await performAeroToIaeroStep(); 
-          } else {
-              showToast(`Successfully swept ${successfulSwaps} tokens to USDC!`, "success");
-          }
-
-          await handleRefresh();
+          
+          // Store the mode and price map for later execution
+          (preview as any)._mode = mode;
+          (preview as any)._priceMap = priceMap;
+          
+          setQuotePreviewData(preview);
+          setShowQuotePreview(true);
 
       } catch (e: any) {
           console.error(e);
-          showToast("Swap execution failed", "error");
+          showToast("Failed to fetch quotes", "error");
       } finally {
           setIsProcessing(false);
           setProgressStep("");
       }
+  };
+  
+  // Execute swaps from the quote preview modal
+  const handleExecuteFromPreview = async () => {
+    if (!quotePreviewData) return;
+    
+    const selectedQuotes = quotePreviewData.quotes.filter(q => q.selected);
+    if (selectedQuotes.length === 0) {
+      showToast("Please select at least one token to swap", "warning");
+      return;
+    }
+    
+    setShowQuotePreview(false);
+    setIsProcessing(true);
+    
+    try {
+      const mode = (quotePreviewData as any)._mode as 'USDC' | 'iAERO';
+      const priceMap = (quotePreviewData as any)._priceMap as Record<string, number>;
+      const targetToken = mode === 'iAERO' ? AERO_ADDR : USDC_ADDR;
+      
+      // Build tokens list from selected quotes
+      const tokensToSwap = selectedQuotes.map(sq => sq.token);
+      
+      // Update slippage based on forceHighSlippage flag
+      const slippageOverrides: Record<string, number> = {};
+      for (const sq of selectedQuotes) {
+        if (sq.forceHighSlippage) {
+          slippageOverrides[sq.token.address.toLowerCase()] = calculateSlippage(sq.quote.priceImpact, true);
+        }
+      }
+      
+      setProgressStep(`Approving ${tokensToSwap.length} tokens...`);
+      await ensureApprovals(tokensToSwap);
+      
+      // Execute using buildSwapPlan (which will re-fetch quotes for freshness)
+      const successfulSwaps = await executeBatchSwap(tokensToSwap, targetToken, priceMap);
+      
+      if (successfulSwaps === 0) {
+        showToast("No swaps were executed successfully", "warning");
+        return;
+      }
+      
+      if (mode === 'iAERO') {
+        await performAeroToIaeroStep();
+      } else {
+        showToast(`Successfully swept ${successfulSwaps} tokens to USDC!`, "success");
+      }
+      
+      await handleRefresh();
+      
+    } catch (e: any) {
+      if (!e.message?.includes("User rejected")) {
+        console.error(e);
+        showToast("Swap execution failed", "error");
+      }
+    } finally {
+      setIsProcessing(false);
+      setProgressStep("");
+      setQuotePreviewData(null);
+    }
   };
 
   async function preflight(items: any[], account: `0x${string}`, distributor: `0x${string}`) {
@@ -2701,6 +2869,213 @@ const buildSwapPlan = async (
                   >
                       Cancel
                   </Button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      
+      {/* QUOTE PREVIEW MODAL */}
+      <AnimatePresence>
+        {showQuotePreview && quotePreviewData && (
+          <motion.div 
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.95 }} animate={{ scale: 1 }} exit={{ scale: 0.95 }}
+              className="bg-slate-800 border border-slate-700 rounded-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden shadow-2xl"
+            >
+              {/* Modal Header */}
+              <div className="p-6 border-b border-slate-700 bg-gradient-to-r from-amber-500/10 to-orange-500/10">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
+                      <AlertTriangle className="w-7 h-7 text-white" />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-bold text-white">Review Swap Quotes</h3>
+                      <p className="text-sm text-slate-400">
+                        {quotePreviewData.quotes.length} quotes received, {quotePreviewData.failedQuotes.length} failed
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setShowQuotePreview(false);
+                      setQuotePreviewData(null);
+                    }}
+                    className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
+                  >
+                    <X className="w-5 h-5 text-slate-400" />
+                  </button>
+                </div>
+                
+                {/* Summary Stats */}
+                <div className="grid grid-cols-3 gap-4 mt-4">
+                  <div className="bg-slate-900/50 rounded-lg p-3">
+                    <p className="text-xs text-slate-400">Input Value</p>
+                    <p className="text-lg font-bold text-white">
+                      {formatUSD(quotePreviewData.quotes
+                        .filter(q => q.selected)
+                        .reduce((sum, q) => sum + q.inputValueUsd, 0))}
+                    </p>
+                  </div>
+                  <div className="bg-slate-900/50 rounded-lg p-3">
+                    <p className="text-xs text-slate-400">You'll Receive</p>
+                    <p className="text-lg font-bold text-emerald-400">
+                      {formatUSD(quotePreviewData.quotes
+                        .filter(q => q.selected)
+                        .reduce((sum, q) => sum + q.quotedOutputUsd, 0))}
+                    </p>
+                  </div>
+                  <div className="bg-slate-900/50 rounded-lg p-3">
+                    <p className="text-xs text-slate-400">Price Impact</p>
+                    {(() => {
+                      const selectedQuotes = quotePreviewData.quotes.filter(q => q.selected);
+                      const totalInput = selectedQuotes.reduce((sum, q) => sum + q.inputValueUsd, 0);
+                      const weightedImpact = totalInput > 0 
+                        ? selectedQuotes.reduce((sum, q) => sum + (q.lossPercent * q.inputValueUsd), 0) / totalInput
+                        : 0;
+                      return (
+                        <p className={`text-lg font-bold ${weightedImpact > 2 ? 'text-red-400' : weightedImpact > 0.5 ? 'text-yellow-400' : 'text-emerald-400'}`}>
+                          {weightedImpact > 0.01 ? `-${weightedImpact.toFixed(2)}%` : '~0%'}
+                        </p>
+                      );
+                    })()}
+                  </div>
+                </div>
+              </div>
+              
+              {/* Token List */}
+              <div className="overflow-y-auto max-h-[400px] p-4">
+                <table className="w-full">
+                  <thead className="text-xs text-slate-400 uppercase tracking-wider">
+                    <tr>
+                      <th className="text-left pb-3 pl-2">Include</th>
+                      <th className="text-left pb-3">Token</th>
+                      <th className="text-right pb-3">Input Value</th>
+                      <th className="text-right pb-3">You Receive</th>
+                      <th className="text-right pb-3 pr-2">Impact</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-700/50">
+                    {quotePreviewData.quotes.map((quoteData, idx) => (
+                      <tr 
+                        key={idx} 
+                        className={`hover:bg-slate-700/30 transition-colors ${!quoteData.selected ? 'opacity-50' : ''}`}
+                      >
+                        <td className="py-3 pl-2">
+                          <input
+                            type="checkbox"
+                            checked={quoteData.selected}
+                            onChange={() => toggleQuoteSelection(quoteData.token.address)}
+                            className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-emerald-500 focus:ring-emerald-500"
+                          />
+                        </td>
+                        <td className="py-3">
+                          <div className="flex items-center gap-2">
+                            {quoteData.lossPercent > 5 ? (
+                              <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                            ) : quoteData.lossPercent > 1 ? (
+                              <AlertTriangle className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+                            ) : (
+                              <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                            )}
+                            <span className="font-medium text-white">{quoteData.token.symbol}</span>
+                          </div>
+                        </td>
+                        <td className="py-3 text-right">
+                          <span className="text-slate-300">{formatUSD(quoteData.inputValueUsd)}</span>
+                        </td>
+                        <td className="py-3 text-right">
+                          <span className="text-emerald-400 font-medium">{formatUSD(quoteData.quotedOutputUsd)}</span>
+                        </td>
+                        <td className="py-3 text-right pr-2">
+                          <div className="flex items-center justify-end gap-2">
+                            <span className={`font-medium ${
+                              quoteData.lossPercent > 5 ? 'text-red-400' : 
+                              quoteData.lossPercent > 1 ? 'text-yellow-400' : 
+                              'text-emerald-400'
+                            }`}>
+                              {quoteData.lossPercent > 0.01 ? `-${quoteData.lossPercent.toFixed(2)}%` : '~0%'}
+                            </span>
+                            {/* Force toggle for high-impact tokens (>5%) */}
+                            {quoteData.lossPercent > 5 && quoteData.selected && (
+                              <button
+                                onClick={() => toggleForceSlippage(quoteData.token.address)}
+                                className={`text-xs px-2 py-0.5 rounded transition-colors ${
+                                  quoteData.forceHighSlippage
+                                    ? 'bg-orange-500/30 text-orange-300 border border-orange-500/50'
+                                    : 'bg-slate-700 text-slate-400 hover:bg-slate-600 hover:text-slate-300'
+                                }`}
+                                title={quoteData.forceHighSlippage 
+                                  ? `Slippage unlocked to ~${Math.ceil(quoteData.lossPercent + 10)}%` 
+                                  : 'Click to allow higher slippage for this swap'}
+                              >
+                                {quoteData.forceHighSlippage ? '⚠️ Forced' : 'Force'}
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                    
+                    {/* Failed quotes */}
+                    {quotePreviewData.failedQuotes.map((fq, idx) => (
+                      <tr key={`failed-${idx}`} className="opacity-50">
+                        <td className="py-3 pl-2">
+                          <input type="checkbox" disabled className="w-4 h-4 rounded border-slate-600 bg-slate-800" />
+                        </td>
+                        <td className="py-3">
+                          <div className="flex items-center gap-2">
+                            <XCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                            <span className="font-medium text-white">{fq.token.symbol}</span>
+                          </div>
+                          <p className="text-xs text-red-400 mt-1 truncate max-w-[150px]" title={fq.error}>
+                            {fq.error}
+                          </p>
+                        </td>
+                        <td className="py-3 text-right">
+                          <span className="text-slate-500">—</span>
+                        </td>
+                        <td className="py-3 text-right">
+                          <span className="text-slate-500">—</span>
+                        </td>
+                        <td className="py-3 text-right pr-2">
+                          <span className="text-slate-500">—</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              
+              {/* Modal Footer */}
+              <div className="p-4 border-t border-slate-700 bg-slate-900/50">
+                <div className="flex gap-3">
+                  <Button
+                    variant="ghost"
+                    className="flex-1 text-slate-400 hover:text-white hover:bg-slate-800"
+                    onClick={() => {
+                      setShowQuotePreview(false);
+                      setQuotePreviewData(null);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    className="flex-1 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white"
+                    onClick={handleExecuteFromPreview}
+                    disabled={quotePreviewData.quotes.filter(q => q.selected).length === 0 || isProcessing}
+                  >
+                    {isProcessing ? (
+                      <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Executing...</>
+                    ) : (
+                      <>Execute {quotePreviewData.quotes.filter(q => q.selected).length} Swaps</>
+                    )}
+                  </Button>
+                </div>
               </div>
             </motion.div>
           </motion.div>
