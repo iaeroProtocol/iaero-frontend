@@ -91,41 +91,52 @@ export default function IaeroProtocolApp() {
              </div>
              
              <nav className="hidden md:flex items-center space-x-6">
-               <a 
-                 href="https://docs.iaero.finance" 
-                 target="_blank" 
-                 rel="noopener noreferrer"
-                 className="text-slate-300 hover:text-white transition-colors text-sm lg:text-base flex items-center gap-2"
-               >
-                 <BookOpen className="w-4 h-4" />
-                 <span>Docs</span>
-               </a>
-               <a 
-                 href="https://discord.gg/YypP6DG3" 
-                 target="_blank" 
-                 rel="noopener noreferrer"
-                 className="text-slate-300 hover:text-white transition-colors"
-                 aria-label="Join our Discord"
-               >
-                 <DiscordIcon className="w-5 h-5" />
-               </a>
-               <a 
-                 href="https://x.com/iaeroProtocol" 
-                 target="_blank" 
-                 rel="noopener noreferrer"
-                 className="text-slate-300 hover:text-white transition-colors"
-                 aria-label="Follow us on X"
-               >
-                 <XIcon className="w-5 h-5" />
-               </a>
-               <a 
-                 href="/status"
-                 className="text-slate-300 hover:text-white transition-colors text-sm lg:text-base flex items-center gap-2"
-               >
-                 <TrendingUp className="w-4 h-4" />
-                 <span>Points</span>
-               </a>
-             </nav>
+              {/* Token Sweeper - Prominent Link */}
+              <a 
+                href="https://sweeper.iaero.finance" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-sm font-semibold rounded-lg shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 transition-all duration-300 hover:scale-105"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>Token Sweeper</span>
+              </a>
+              
+              <a 
+                href="https://docs.iaero.finance" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="text-slate-300 hover:text-white transition-colors text-sm lg:text-base flex items-center gap-2"
+              >
+                <BookOpen className="w-4 h-4" />
+                <span>Docs</span>
+              </a>
+              <a 
+                href="https://discord.gg/YypP6DG3" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="text-slate-300 hover:text-white transition-colors"
+                aria-label="Join our Discord"
+              >
+                <DiscordIcon className="w-5 h-5" />
+              </a>
+              <a 
+                href="https://x.com/iaeroProtocol" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="text-slate-300 hover:text-white transition-colors"
+                aria-label="Follow us on X"
+              >
+                <XIcon className="w-5 h-5" />
+              </a>
+              <a 
+                href="/status"
+                className="text-slate-300 hover:text-white transition-colors text-sm lg:text-base flex items-center gap-2"
+              >
+                <TrendingUp className="w-4 h-4" />
+                <span>Points</span>
+              </a>
+            </nav>
            </div>
            
            <WalletConnection />
@@ -150,35 +161,46 @@ export default function IaeroProtocolApp() {
          </p>
          
          {/* Social Links for Mobile */}
-         <div className="flex md:hidden items-center justify-center gap-4 mt-6">
-           <a 
-             href="https://docs.iaero.finance" 
-             target="_blank" 
-             rel="noopener noreferrer"
-             className="text-slate-300 hover:text-white transition-colors p-2 rounded-lg bg-slate-800/50 backdrop-blur"
-             aria-label="Documentation"
-           >
-             <BookOpen className="w-5 h-5" />
-           </a>
-           <a 
-             href="https://discord.gg/Tb9Z4Jvq" 
-             target="_blank" 
-             rel="noopener noreferrer"
-             className="text-slate-300 hover:text-white transition-colors p-2 rounded-lg bg-slate-800/50 backdrop-blur"
-             aria-label="Join our Discord"
-           >
-             <DiscordIcon className="w-5 h-5" />
-           </a>
-           <a 
-             href="https://x.com/iaeroProtocol" 
-             target="_blank" 
-             rel="noopener noreferrer"
-             className="text-slate-300 hover:text-white transition-colors p-2 rounded-lg bg-slate-800/50 backdrop-blur"
-             aria-label="Follow us on X"
-           >
-             <XIcon className="w-5 h-5" />
-           </a>
-         </div>
+          <div className="flex md:hidden items-center justify-center gap-3 mt-6 flex-wrap">
+            {/* Token Sweeper - Mobile */}
+            <a 
+              href="https://sweeper.iaero.finance" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-sm font-semibold rounded-lg shadow-lg shadow-emerald-500/20 transition-all duration-300"
+            >
+              <Sparkles className="w-4 h-4" />
+              <span>Token Sweeper</span>
+            </a>
+            
+            <a 
+              href="https://docs.iaero.finance" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="text-slate-300 hover:text-white transition-colors p-2 rounded-lg bg-slate-800/50 backdrop-blur"
+              aria-label="Documentation"
+            >
+              <BookOpen className="w-5 h-5" />
+            </a>
+            <a 
+              href="https://discord.gg/Tb9Z4Jvq" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="text-slate-300 hover:text-white transition-colors p-2 rounded-lg bg-slate-800/50 backdrop-blur"
+              aria-label="Join our Discord"
+            >
+              <DiscordIcon className="w-5 h-5" />
+            </a>
+            <a 
+              href="https://x.com/iaeroProtocol" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="text-slate-300 hover:text-white transition-colors p-2 rounded-lg bg-slate-800/50 backdrop-blur"
+              aria-label="Follow us on X"
+            >
+              <XIcon className="w-5 h-5" />
+            </a>
+          </div>
        </motion.div>
 
        {/* Stats Overview */}
