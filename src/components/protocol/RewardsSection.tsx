@@ -262,6 +262,23 @@ interface FailedQuoteItem {
   error: string;
 }
 
+// Discriminated union for quote batch results
+type QuoteBatchResult = 
+  | {
+      success: true;
+      token: TokenForSwap;
+      inputValueUsd: number;
+      quotedOutputUsd: number;
+      lossPercent: number;
+      lossUsd: number;
+      quote: SwapQuote;
+    }
+  | {
+      success: false;
+      token: TokenForSwap;
+      error: string;
+    };
+
 interface QuotePreviewData {
   quotes: QuotePreviewItem[];
   failedQuotes: FailedQuoteItem[];
@@ -1219,7 +1236,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       setProgressStep(`Fetching quotes (${batchNum + 1}/${totalBatches})...`);
       
       // Fetch main quotes AND reference quotes in parallel for this batch
-      const batchPromises = batchTokens.map(async (token) => {
+      const batchPromises: Promise<QuoteBatchResult>[] = batchTokens.map(async (token): Promise<QuoteBatchResult> => {
         try {
           // Main quote (full amount)
           const mainQuote = await fetch0xQuote(
@@ -1304,6 +1321,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       
       for (const result of batchResults) {
         if (result.success) {
+          // TypeScript now knows result has all success properties
           successfulQuotes.push({
             token: result.token,
             inputValueUsd: result.inputValueUsd,
@@ -1315,6 +1333,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             forceHighSlippage: false
           });
         } else {
+          // TypeScript now knows result has error property
           failedQuotes.push({ token: result.token, error: result.error });
         }
       }
@@ -1575,7 +1594,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
 
   /**
    * Execute problem tokens individually with higher slippage
-   * Includes just-in-time quote refresh for tokens that fail
+   * Uses default gas when estimation fails (like production)
    */
   const executeProblemTokensIndividually = async (
     problemTokens: SwapStep[],
@@ -1586,7 +1605,8 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     
     let successCount = 0;
     const successfulAddresses: string[] = [];
-    const BOOSTED_SLIPPAGE = 1000; // 10% for problem tokens (higher for rewards tokens)
+    const BOOSTED_SLIPPAGE = 1000; // 10% for problem tokens
+    const DEFAULT_GAS = 500000n;   // Default gas when estimation fails (like production)
     
     for (const swap of problemTokens) {
       console.log(`\n  Attempting: ${swap.tokenIn}`);
@@ -1601,9 +1621,10 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       };
       
       try {
-        let gas: bigint;
-        let retryWithFreshQuote = false;
+        let gas: bigint = DEFAULT_GAS;
+        let usedDefaultGas = false;
         
+        // Try gas estimation first
         try {
           gas = await publicClient!.estimateContractGas({
             address: SWAPPER_ADDRESS,
@@ -1616,79 +1637,71 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           gas = (gas * 150n) / 100n;
         } catch (gasError: any) {
           const gasErrorMsg = String(gasError.message || gasError);
-          console.log(`    ❌ Gas estimation failed`);
-          console.log(`    📋 Error details: ${gasErrorMsg.substring(0, 200)}`);
+          console.log(`    ⚠️ Gas estimation failed, trying JIT refresh...`);
           
-          // If it's an aggregator swap failure, try JIT quote refresh
-          if (gasErrorMsg.includes('agg swap fail') || gasErrorMsg.includes('#1002')) {
-            console.log(`    🔄 Attempting just-in-time quote refresh...`);
-            retryWithFreshQuote = true;
-          } else if (gasErrorMsg.includes('slippage') || gasErrorMsg.includes('too little')) {
-            console.log(`    💡 Slippage exceeded - try increasing slippage`);
-          } else if (gasErrorMsg.includes('insufficient')) {
-            console.log(`    💡 Insufficient balance or liquidity`);
-          }
-          
-          if (!retryWithFreshQuote) {
-            trackFailedToken(swap.tokenIn, 'UNKNOWN', `Gas estimation failed: ${gasErrorMsg.substring(0, 100)}`, 'individual_gas');
-            continue;
+          // Try JIT quote refresh for aggregator failures
+          if (targetTokenAddr && (gasErrorMsg.includes('agg swap fail') || gasErrorMsg.includes('#1002'))) {
+            try {
+              console.log(`    📡 Fetching fresh quote...`);
+              const freshQuote = await fetch0xQuote(
+                chainId || 8453,
+                swap.tokenIn,
+                targetTokenAddr,
+                swap.amountIn,
+                SWAPPER_ADDRESS
+              );
+              
+              if (freshQuote?.transaction?.to && freshQuote?.transaction?.data) {
+                const freshEncodedData = encodeAbiParameters(
+                  [{ type: 'address' }, { type: 'bytes' }],
+                  [freshQuote.transaction.to, freshQuote.transaction.data]
+                );
+                
+                modifiedSwap = {
+                  ...modifiedSwap,
+                  quotedOut: BigInt(freshQuote.buyAmount),
+                  data: freshEncodedData as `0x${string}`
+                };
+                
+                console.log(`    ✅ Got fresh quote, new output: ${freshQuote.buyAmount}`);
+                
+                // Try gas estimation with fresh quote
+                try {
+                  gas = await publicClient!.estimateContractGas({
+                    address: SWAPPER_ADDRESS,
+                    abi: SWAPPER_ABI,
+                    functionName: 'executePlanFromCaller',
+                    args: [[modifiedSwap], recipient],
+                    account: recipient,
+                  });
+                  console.log(`    ⛽ Fresh quote gas estimate: ${gas.toString()}`);
+                  gas = (gas * 150n) / 100n;
+                } catch {
+                  // Fresh quote gas estimation also failed - use default
+                  console.log(`    ⚠️ Fresh quote gas estimation failed, using default: ${DEFAULT_GAS.toString()}`);
+                  gas = DEFAULT_GAS;
+                  usedDefaultGas = true;
+                }
+              } else {
+                console.log(`    ⚠️ Fresh quote invalid, using default gas: ${DEFAULT_GAS.toString()}`);
+                gas = DEFAULT_GAS;
+                usedDefaultGas = true;
+              }
+            } catch (quoteError: any) {
+              console.log(`    ⚠️ JIT refresh failed, using default gas: ${DEFAULT_GAS.toString()}`);
+              gas = DEFAULT_GAS;
+              usedDefaultGas = true;
+            }
+          } else {
+            // Not an agg swap fail - just use default gas
+            console.log(`    ⚠️ Gas estimation failed, using default: ${DEFAULT_GAS.toString()}`);
+            gas = DEFAULT_GAS;
+            usedDefaultGas = true;
           }
         }
         
-        // JIT Quote Refresh - get fresh quote right before execution
-        if (retryWithFreshQuote && targetTokenAddr) {
-          try {
-            console.log(`    📡 Fetching fresh quote...`);
-            const freshQuote = await fetch0xQuote(
-              chainId || 8453,
-              swap.tokenIn,
-              targetTokenAddr,
-              swap.amountIn,
-              SWAPPER_ADDRESS
-            );
-            
-            if (freshQuote?.transaction?.to && freshQuote?.transaction?.data) {
-              const freshEncodedData = encodeAbiParameters(
-                [{ type: 'address' }, { type: 'bytes' }],
-                [freshQuote.transaction.to, freshQuote.transaction.data]
-              );
-              
-              modifiedSwap = {
-                ...modifiedSwap,
-                quotedOut: BigInt(freshQuote.buyAmount),
-                data: freshEncodedData as `0x${string}`
-              };
-              
-              console.log(`    ✅ Got fresh quote, new output: ${freshQuote.buyAmount}`);
-              
-              // Try gas estimation again with fresh quote
-              try {
-                gas = await publicClient!.estimateContractGas({
-                  address: SWAPPER_ADDRESS,
-                  abi: SWAPPER_ABI,
-                  functionName: 'executePlanFromCaller',
-                  args: [[modifiedSwap], recipient],
-                  account: recipient,
-                });
-                console.log(`    ⛽ Fresh quote gas estimate: ${gas.toString()}`);
-                gas = (gas * 150n) / 100n;
-              } catch (retryGasError: any) {
-                const retryErrorMsg = String(retryGasError.message || retryGasError);
-                console.log(`    ❌ Fresh quote also failed: ${retryErrorMsg.substring(0, 100)}`);
-                trackFailedToken(swap.tokenIn, 'UNKNOWN', `JIT refresh failed: ${retryErrorMsg.substring(0, 100)}`, 'jit_gas');
-                continue;
-              }
-            } else {
-              console.log(`    ❌ Fresh quote invalid`);
-              trackFailedToken(swap.tokenIn, 'UNKNOWN', 'Fresh quote returned invalid data', 'jit_quote');
-              continue;
-            }
-          } catch (quoteError: any) {
-            console.log(`    ❌ Failed to get fresh quote: ${quoteError.message?.substring(0, 100)}`);
-            trackFailedToken(swap.tokenIn, 'UNKNOWN', `Quote refresh failed: ${quoteError.message?.substring(0, 100)}`, 'jit_quote');
-            continue;
-          }
-        }
+        // KEY DIFFERENCE FROM BEFORE: Always try the transaction, even with default gas
+        console.log(`    🚀 Submitting transaction${usedDefaultGas ? ' (with default gas)' : ''}...`);
         
         const hash = await writeContractAsync({
           address: SWAPPER_ADDRESS,
@@ -1711,8 +1724,13 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         
       } catch (e: any) {
         const errorMsg = String(e.message || e);
-        console.log(`    ❌ Execution failed: ${errorMsg.substring(0, 100)}`);
-        trackFailedToken(swap.tokenIn, 'UNKNOWN', errorMsg.substring(0, 100), 'individual_exec');
+        // Don't track user rejections as failures
+        if (errorMsg.includes('User rejected') || errorMsg.includes('user denied')) {
+          console.log(`    ⏸️ User rejected transaction`);
+        } else {
+          console.log(`    ❌ Execution failed: ${errorMsg.substring(0, 100)}`);
+          trackFailedToken(swap.tokenIn, 'UNKNOWN', errorMsg.substring(0, 100), 'individual_exec');
+        }
       }
     }
     
@@ -2139,20 +2157,31 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           setProgressStep(`Batch ${batchNum}/${totalBatches}: Executing ${planToExecute.length} swaps...`);
           
           try {
-            const gas = await publicClient.estimateContractGas({
-              address: SWAPPER_ADDRESS,
-              abi: SWAPPER_ABI,
-              functionName: 'executePlanFromCaller',
-              args: [planToExecute, account as Address],
-              account: account as Address,
-            });
+            // Try gas estimation, fall back to default if it fails
+            let gas: bigint;
+            const DEFAULT_BATCH_GAS = 300000n + BigInt(planToExecute.length) * 200000n;
+            
+            try {
+              gas = await publicClient.estimateContractGas({
+                address: SWAPPER_ADDRESS,
+                abi: SWAPPER_ABI,
+                functionName: 'executePlanFromCaller',
+                args: [planToExecute, account as Address],
+                account: account as Address,
+              });
+              gas = (gas * 130n) / 100n;
+            } catch (gasEstError: any) {
+              // Gas estimation failed - use default and try anyway (like production)
+              console.log(`  ⚠️ Gas estimation failed, using default: ${DEFAULT_BATCH_GAS.toString()}`);
+              gas = DEFAULT_BATCH_GAS;
+            }
             
             const hash = await writeContractAsync({
               address: SWAPPER_ADDRESS,
               abi: SWAPPER_ABI,
               functionName: 'executePlanFromCaller',
               args: [planToExecute, account as Address],
-              gas: (gas * 130n) / 100n
+              gas
             });
             
             const receipt = await publicClient.waitForTransactionReceipt({ hash });
@@ -2169,27 +2198,34 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             
           } catch (execError: any) {
             const errorMsg = execError.message || String(execError);
-            console.error(`  ❌ Batch ${batchNum} execution failed:`, errorMsg.slice(0, 100));
             
-            if (errorMsg.includes('reverted on-chain') || errorMsg.includes('Transaction reverted')) {
-              for (const swap of planToExecute) {
-                failedTokensMap.set(swap.tokenIn.toLowerCase(), 'Transaction reverted');
-                totalFailed++;
-              }
+            // Don't treat user rejection as failure
+            if (errorMsg.includes('User rejected') || errorMsg.includes('user denied')) {
+              console.log(`  ⏸️ User rejected batch transaction`);
+              // Don't mark as failed, just skip
             } else {
-              // Try individual execution as fallback
-              const { successCount, successfulAddresses } = await executeProblemTokensIndividually(planToExecute, account as Address, targetTokenAddr);
+              console.error(`  ❌ Batch ${batchNum} execution failed:`, errorMsg.slice(0, 100));
               
-              for (const addr of successfulAddresses) {
-                successfulTokens.add(addr);
-              }
-              totalSuccess += successCount;
-              
-              for (const swap of planToExecute) {
-                const addr = swap.tokenIn.toLowerCase();
-                if (!successfulAddresses.includes(addr)) {
-                  failedTokensMap.set(addr, 'Individual execution failed');
+              if (errorMsg.includes('reverted on-chain') || errorMsg.includes('Transaction reverted')) {
+                for (const swap of planToExecute) {
+                  failedTokensMap.set(swap.tokenIn.toLowerCase(), 'Transaction reverted');
                   totalFailed++;
+                }
+              } else {
+                // Try individual execution as fallback
+                const { successCount, successfulAddresses } = await executeProblemTokensIndividually(planToExecute, account as Address, targetTokenAddr);
+                
+                for (const addr of successfulAddresses) {
+                  successfulTokens.add(addr);
+                }
+                totalSuccess += successCount;
+                
+                for (const swap of planToExecute) {
+                  const addr = swap.tokenIn.toLowerCase();
+                  if (!successfulAddresses.includes(addr)) {
+                    failedTokensMap.set(addr, 'Individual execution failed');
+                    totalFailed++;
+                  }
                 }
               }
             }
