@@ -50,6 +50,19 @@ const IAERO_ADDR = "0x81034Fb34009115F215f5d5F564AAc9FfA46a1Dc" as Address;
 const USDC_ADDR = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address;
 const USDC_DECIMALS = 6;
 
+// ✅ STAKING DISTRIBUTOR - auto-stake after sweep to iAERO
+const STAKING_DISTRIBUTOR = "0x781A80fA817b5a146C440F03EF8643f4aca6588A" as Address;
+
+const STAKING_ABI = [
+  {
+    name: 'stake',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [],
+    outputs: []
+  }
+] as const;
+
 // Validation check (will log error if not configured)
 if (SWAPPER_ADDRESS.includes("YOUR_DEPLOYED")) {
     console.error("🚨 SWAPPER_ADDRESS not set in RewardsSection.tsx");
@@ -236,49 +249,33 @@ interface SwapStep {
   permitNonce: bigint;
 }
 
-// Tuple type matching the contract's expected format for type-safe viem calls
-// This satisfies viem's strict ABI type inference while maintaining compile-time safety
-type SwapStepTuple = readonly [
-  number,           // kind (uint8)
-  Address,          // tokenIn
-  Address,          // outToken
-  boolean,          // useAll
-  bigint,           // amountIn
-  bigint,           // quotedIn
-  bigint,           // quotedOut
-  number,           // slippageBps (uint16)
-  `0x${string}`,    // data
-  boolean,          // viaPermit2
-  `0x${string}`,    // permitSig
-  bigint,           // permitAmount
-  bigint,           // permitDeadline
-  bigint            // permitNonce
-];
+// Type assertion helpers for viem contract calls
+// Viem's strict ABI inference expects specific object shapes that are structurally
+// compatible with SwapStep but not directly assignable. These helpers validate
+// the SwapStep structure at compile time while satisfying viem's type requirements.
 
-// Convert SwapStep object to tuple for contract calls
-// Provides compile-time validation that all fields exist and have correct types
-function swapStepToTuple(step: SwapStep): SwapStepTuple {
-  return [
-    step.kind,
-    step.tokenIn,
-    step.outToken,
-    step.useAll,
-    step.amountIn,
-    step.quotedIn,
-    step.quotedOut,
-    step.slippageBps,
-    step.data,
-    step.viaPermit2,
-    step.permitSig,
-    step.permitAmount,
-    step.permitDeadline,
-    step.permitNonce
-  ] as const;
-}
+type SwapPlanArgs = [plan: readonly Record<string, unknown>[], recipient: Address];
 
-// Convert array of SwapSteps to tuples
-function swapPlanToTuples(plan: SwapStep[]): readonly SwapStepTuple[] {
-  return plan.map(swapStepToTuple);
+// Validates SwapStep has all required fields, then returns args for viem
+function makeSwapArgs(steps: SwapStep[], recipient: Address): SwapPlanArgs {
+  // TypeScript validates that each step has all SwapStep fields
+  const validated = steps.map(s => ({
+    kind: s.kind,
+    tokenIn: s.tokenIn,
+    outToken: s.outToken,
+    useAll: s.useAll,
+    amountIn: s.amountIn,
+    quotedIn: s.quotedIn,
+    quotedOut: s.quotedOut,
+    slippageBps: s.slippageBps,
+    data: s.data,
+    viaPermit2: s.viaPermit2,
+    permitSig: s.permitSig,
+    permitAmount: s.permitAmount,
+    permitDeadline: s.permitDeadline,
+    permitNonce: s.permitNonce,
+  }));
+  return [validated, recipient] as SwapPlanArgs;
 }
 
 // Quote Preview Types (ported from sweeper)
@@ -1503,7 +1500,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           address: SWAPPER_ADDRESS,
           abi: SWAPPER_ABI,
           functionName: 'executePlanFromCaller',
-          args: [[swapStepToTuple(swap)], recipient],
+          args: makeSwapArgs([swap], recipient),
           account: recipient,
         });
         
@@ -1586,7 +1583,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           address: SWAPPER_ADDRESS,
           abi: SWAPPER_ABI,
           functionName: 'executePlanFromCaller',
-          args: [swapPlanToTuples(remainingPlan), recipient],
+          args: makeSwapArgs(remainingPlan, recipient),
           account: recipient,
         });
         
@@ -1609,7 +1606,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
               address: SWAPPER_ADDRESS,
               abi: SWAPPER_ABI,
               functionName: 'executePlanFromCaller',
-              args: [swapPlanToTuples(testPlan), recipient],
+              args: makeSwapArgs(testPlan, recipient),
               account: recipient,
             });
             
@@ -1675,7 +1672,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             address: SWAPPER_ADDRESS,
             abi: SWAPPER_ABI,
             functionName: 'executePlanFromCaller',
-            args: [[swapStepToTuple(modifiedSwap)], recipient],
+            args: makeSwapArgs([modifiedSwap], recipient),
             account: recipient,
           });
           console.log(`    ⛽ Gas estimate: ${gas.toString()}`);
@@ -1716,7 +1713,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                     address: SWAPPER_ADDRESS,
                     abi: SWAPPER_ABI,
                     functionName: 'executePlanFromCaller',
-                    args: [[swapStepToTuple(modifiedSwap)], recipient],
+                    args: makeSwapArgs([modifiedSwap], recipient),
                     account: recipient,
                   });
                   console.log(`    ⛽ Fresh quote gas estimate: ${gas.toString()}`);
@@ -1752,7 +1749,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           address: SWAPPER_ADDRESS,
           abi: SWAPPER_ABI,
           functionName: 'executePlanFromCaller',
-          args: [[swapStepToTuple(modifiedSwap)], recipient],
+          args: makeSwapArgs([modifiedSwap], recipient),
           gas
         });
         
@@ -2145,7 +2142,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             address: SWAPPER_ADDRESS,
             abi: SWAPPER_ABI,
             functionName: 'executePlanFromCaller',
-            args: [swapPlanToTuples(passing), account as Address],
+            args: makeSwapArgs(passing, account as Address),
             account: account as Address,
           });
           console.log(`  ✅ Batch ${batchNum} validated (gas: ${batchGas.toString()})`);
@@ -2211,7 +2208,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                 address: SWAPPER_ADDRESS,
                 abi: SWAPPER_ABI,
                 functionName: 'executePlanFromCaller',
-                args: [swapPlanToTuples(planToExecute), account as Address],
+                args: makeSwapArgs(planToExecute, account as Address),
                 account: account as Address,
               });
               gas = (gas * 130n) / 100n;
@@ -2225,7 +2222,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
               address: SWAPPER_ADDRESS,
               abi: SWAPPER_ABI,
               functionName: 'executePlanFromCaller',
-              args: [swapPlanToTuples(planToExecute), account as Address],
+              args: makeSwapArgs(planToExecute, account as Address),
               gas
             });
             
@@ -2386,7 +2383,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
 
     console.log(`💰 AERO Balance to Swap: ${formatBigNumber(aeroBalance, 18, 4)}`);
     console.log("🔄 Step 3: Swapping AERO -> iAERO via Aerodrome Router...");
-    setProgressStep("Step 2/2: Aerodrome Swap (AERO->iAERO)...");
+    setProgressStep("Step 2/3: Aerodrome Swap (AERO->iAERO)...");
 
     const currentAllowance = await publicClient?.readContract({
       address: AERO_ADDR,
@@ -2432,7 +2429,61 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     });
 
     await publicClient?.waitForTransactionReceipt({ hash });
-    showToast("Successfully swept all rewards to iAERO!", "success");
+    
+    // Step 4: Stake iAERO to Staking Distributor
+    console.log("🔄 Step 4: Staking iAERO to Staking Distributor...");
+    setProgressStep("Step 3/3: Staking iAERO...");
+    
+    // Get iAERO balance
+    const iAeroBalance = await publicClient?.readContract({
+      address: IAERO_ADDR,
+      abi: ERC20_ABI,
+      functionName: 'balanceOf',
+      args: [account as Address],
+    }) as bigint;
+    
+    if (!iAeroBalance || iAeroBalance <= 0n) {
+      showToast("Swept to iAERO but no balance to stake", "warning");
+      return;
+    }
+    
+    console.log(`💰 iAERO Balance to Stake: ${formatBigNumber(iAeroBalance, 18, 4)}`);
+    
+    // Check allowance
+    const stakingAllowance = await publicClient?.readContract({
+      address: IAERO_ADDR,
+      abi: ERC20_FULL_ABI,
+      functionName: 'allowance',
+      args: [account as Address, STAKING_DISTRIBUTOR],
+    }) as bigint;
+    
+    // Approve if needed
+    if (stakingAllowance < iAeroBalance) {
+      console.log("📝 Approving iAERO for staking...");
+      setProgressStep("Approving iAERO for staking...");
+      const approveHash = await writeContractAsync({
+        address: IAERO_ADDR,
+        abi: ERC20_FULL_ABI,
+        functionName: 'approve',
+        args: [STAKING_DISTRIBUTOR, iAeroBalance],
+      });
+      await publicClient?.waitForTransactionReceipt({ hash: approveHash });
+      console.log("✅ iAERO approved for staking");
+    }
+    
+    // Stake
+    console.log("🎯 Calling stake()...");
+    setProgressStep("Staking iAERO...");
+    const stakeHash = await writeContractAsync({
+      address: STAKING_DISTRIBUTOR,
+      abi: STAKING_ABI,
+      functionName: 'stake',
+    });
+    
+    await publicClient?.waitForTransactionReceipt({ hash: stakeHash });
+    console.log("✅ Successfully staked iAERO!");
+    
+    showToast("Successfully swept and staked iAERO!", "success");
   };
 
   // ============================================================================
@@ -3055,7 +3106,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                 </Button>
                 
                 <Button variant="secondary" onClick={handleClaimAndCompound} disabled={!hasRewards || isProcessing} className="bg-slate-700 text-purple-200 hover:bg-slate-600 border border-slate-600">
-                  <TrendingUp className="w-4 h-4 mr-2" />Compound (iAERO)
+                  <TrendingUp className="w-4 h-4 mr-2" />Compound & Stake
                 </Button>
               </div>
             </>
@@ -3105,7 +3156,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                 >
                   <div className="flex flex-col items-center gap-1">
                     <TrendingUp className="w-5 h-5 mb-1" />
-                    <span className="text-xs">Sweep ALL to iAERO</span>
+                    <span className="text-xs">Sweep ALL to iAERO & Stake</span>
                   </div>
                 </Button>
               </div>
@@ -3254,7 +3305,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                     onClick={() => handleConfirmSweep('iAERO')}
                     disabled={selectedTokens.size === 0}
                   >
-                    Sweep to iAERO
+                    Sweep to iAERO & Stake
                   </Button>
                 </div>
                 <Button 
