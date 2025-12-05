@@ -1,6 +1,7 @@
 // ==============================================
 // src/components/protocol/RewardsSection.tsx
 // IMPROVED VERSION - Ported swap logic from Token Sweeper page.tsx
+// WITH POST-TRADE RESULTS MODAL
 // ==============================================
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -8,7 +9,7 @@ import { usePublicClient, useWriteContract } from 'wagmi';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { parseAbi, encodeAbiParameters, decodeAbiParameters, parseUnits, formatUnits } from 'viem';
+import { parseAbi, encodeAbiParameters, parseUnits, formatUnits } from 'viem';
 import type { PublicClient, Transport, Chain, Address } from 'viem';
 
 import {
@@ -24,6 +25,10 @@ import {
   AlertTriangle,
   X,
   XCircle,
+  ExternalLink,
+  ArrowRight,
+  Trophy,
+  Zap,
 } from "lucide-react";
 
 import { useProtocol } from "@/components/contexts/ProtocolContext";
@@ -58,7 +63,7 @@ const STAKING_ABI = [
     name: 'stake',
     type: 'function',
     stateMutability: 'nonpayable',
-    inputs: [],
+    inputs: [{ name: 'amount', type: 'uint256' }],
     outputs: []
   }
 ] as const;
@@ -323,6 +328,41 @@ interface QuotePreviewData {
   outputDecimals: number;
   _mode?: 'USDC' | 'iAERO';
   _priceMap?: Record<string, number>;
+}
+
+// ============================================================================
+// POST-TRADE RESULT TYPES
+// ============================================================================
+interface TradeResultItem {
+  address: string;
+  symbol: string;
+  decimals: number;
+  inputAmount: string;
+  inputValueUsd: number;
+  outputAmount?: string;
+  outputValueUsd?: number;
+  status: 'success' | 'failed' | 'skipped';
+  reason?: string;
+  txHash?: string;
+}
+
+interface PostTradeData {
+  mode: 'USDC' | 'iAERO';
+  outputToken: string;
+  outputDecimals: number;
+  totalInputUsd: number;
+  totalOutputUsd: number;
+  totalReceived: string;
+  totalReceivedFormatted: string;
+  successCount: number;
+  failedCount: number;
+  skippedCount: number;
+  results: TradeResultItem[];
+  txHashes: string[];
+  timestamp: number;
+  didStake?: boolean;
+  stakedAmount?: string;
+  userCancelled?: boolean;
 }
 
 interface JsonRewardItem {
@@ -714,6 +754,10 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
   // Quote preview modal state
   const [showQuotePreview, setShowQuotePreview] = useState(false);
   const [quotePreviewData, setQuotePreviewData] = useState<QuotePreviewData | null>(null);
+  
+  // POST-TRADE RESULTS MODAL STATE
+  const [showPostTradeModal, setShowPostTradeModal] = useState(false);
+  const [postTradeData, setPostTradeData] = useState<PostTradeData | null>(null);
 
   // --- INTERNAL HELPERS ---
 
@@ -1629,27 +1673,33 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
   };
 
   /**
-   * Execute problem tokens individually with higher slippage
-   * Uses default gas when estimation fails (like production)
+   * Execute problem tokens individually with higher slippage and fresh quotes
+   * Uses default gas when estimation fails
    */
   const executeProblemTokensIndividually = async (
     problemTokens: SwapStep[],
     recipient: Address,
-    targetTokenAddr?: Address  // Pass target token for JIT refresh
+    targetTokenAddr?: Address,
+    tradeResults?: TradeResultItem[],
+    txHashes?: string[]
   ): Promise<{ successCount: number; successfulAddresses: string[] }> => {
     console.log(`\n🔄 === EXECUTING PROBLEM TOKENS INDIVIDUALLY ===`);
     
     let successCount = 0;
     const successfulAddresses: string[] = [];
     const BOOSTED_SLIPPAGE = 1000; // 10% for problem tokens
-    const DEFAULT_GAS = 500000n;   // Default gas when estimation fails (like production)
+    const DEFAULT_GAS = 500000n;   // Default gas when estimation fails
     
     for (const swap of problemTokens) {
+      // Find quote data for this token
+      const quoteData = quotePreviewData?.quotes.find(
+        q => q.token.address.toLowerCase() === swap.tokenIn.toLowerCase()
+      );
+      
       console.log(`\n  Attempting: ${swap.tokenIn}`);
       console.log(`    Original slippage: ${swap.slippageBps} bps`);
       console.log(`    Boosted slippage: ${Math.max(swap.slippageBps, BOOSTED_SLIPPAGE)} bps`);
       console.log(`    Amount: ${swap.amountIn.toString()}`);
-      console.log(`    Quoted out: ${swap.quotedOut.toString()}`);
       
       let modifiedSwap = {
         ...swap,
@@ -1657,10 +1707,39 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       };
       
       try {
-        let gas: bigint = DEFAULT_GAS;
-        let usedDefaultGas = false;
+        // ALWAYS try to get a fresh quote first
+        if (targetTokenAddr) {
+          try {
+            console.log(`    📡 Fetching fresh quote...`);
+            const freshQuote = await fetch0xQuote(
+              chainId || 8453,
+              swap.tokenIn,
+              targetTokenAddr,
+              swap.amountIn,
+              SWAPPER_ADDRESS
+            );
+            
+            if (freshQuote?.transaction?.to && freshQuote?.transaction?.data) {
+              const freshEncodedData = encodeAbiParameters(
+                [{ type: 'address' }, { type: 'bytes' }],
+                [freshQuote.transaction.to, freshQuote.transaction.data]
+              );
+              
+              modifiedSwap = {
+                ...modifiedSwap,
+                quotedOut: BigInt(freshQuote.buyAmount),
+                data: freshEncodedData as `0x${string}`
+              };
+              
+              console.log(`    ✅ Got fresh quote, new output: ${freshQuote.buyAmount}`);
+            }
+          } catch (quoteError: any) {
+            console.log(`    ⚠️ Fresh quote failed, using original: ${quoteError.message?.substring(0, 50)}`);
+          }
+        }
         
-        // Try gas estimation first
+        // Try gas estimation
+        let gas: bigint = DEFAULT_GAS;
         try {
           gas = await publicClient!.estimateContractGas({
             address: SWAPPER_ADDRESS,
@@ -1672,72 +1751,11 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           console.log(`    ⛽ Gas estimate: ${gas.toString()}`);
           gas = (gas * 150n) / 100n;
         } catch (gasError: any) {
-          const gasErrorMsg = String(gasError.message || gasError);
-          console.log(`    ⚠️ Gas estimation failed, trying JIT refresh...`);
-          
-          // Try JIT quote refresh for aggregator failures
-          if (targetTokenAddr && (gasErrorMsg.includes('agg swap fail') || gasErrorMsg.includes('#1002'))) {
-            try {
-              console.log(`    📡 Fetching fresh quote...`);
-              const freshQuote = await fetch0xQuote(
-                chainId || 8453,
-                swap.tokenIn,
-                targetTokenAddr,
-                swap.amountIn,
-                SWAPPER_ADDRESS
-              );
-              
-              if (freshQuote?.transaction?.to && freshQuote?.transaction?.data) {
-                const freshEncodedData = encodeAbiParameters(
-                  [{ type: 'address' }, { type: 'bytes' }],
-                  [freshQuote.transaction.to, freshQuote.transaction.data]
-                );
-                
-                modifiedSwap = {
-                  ...modifiedSwap,
-                  quotedOut: BigInt(freshQuote.buyAmount),
-                  data: freshEncodedData as `0x${string}`
-                };
-                
-                console.log(`    ✅ Got fresh quote, new output: ${freshQuote.buyAmount}`);
-                
-                // Try gas estimation with fresh quote
-                try {
-                  gas = await publicClient!.estimateContractGas({
-                    address: SWAPPER_ADDRESS,
-                    abi: SWAPPER_ABI,
-                    functionName: 'executePlanFromCaller',
-                    args: makeSwapArgs([modifiedSwap], recipient),
-                    account: recipient,
-                  });
-                  console.log(`    ⛽ Fresh quote gas estimate: ${gas.toString()}`);
-                  gas = (gas * 150n) / 100n;
-                } catch {
-                  // Fresh quote gas estimation also failed - use default
-                  console.log(`    ⚠️ Fresh quote gas estimation failed, using default: ${DEFAULT_GAS.toString()}`);
-                  gas = DEFAULT_GAS;
-                  usedDefaultGas = true;
-                }
-              } else {
-                console.log(`    ⚠️ Fresh quote invalid, using default gas: ${DEFAULT_GAS.toString()}`);
-                gas = DEFAULT_GAS;
-                usedDefaultGas = true;
-              }
-            } catch (quoteError: any) {
-              console.log(`    ⚠️ JIT refresh failed, using default gas: ${DEFAULT_GAS.toString()}`);
-              gas = DEFAULT_GAS;
-              usedDefaultGas = true;
-            }
-          } else {
-            // Not an agg swap fail - just use default gas
-            console.log(`    ⚠️ Gas estimation failed, using default: ${DEFAULT_GAS.toString()}`);
-            gas = DEFAULT_GAS;
-            usedDefaultGas = true;
-          }
+          console.log(`    ⚠️ Gas estimation failed, using default: ${DEFAULT_GAS.toString()}`);
+          gas = DEFAULT_GAS;
         }
         
-        // KEY DIFFERENCE FROM BEFORE: Always try the transaction, even with default gas
-        console.log(`    🚀 Submitting transaction${usedDefaultGas ? ' (with default gas)' : ''}...`);
+        console.log(`    🚀 Submitting transaction...`);
         
         const hash = await writeContractAsync({
           address: SWAPPER_ADDRESS,
@@ -1748,6 +1766,12 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         });
         
         console.log(`    ⏳ Waiting for tx: ${hash}`);
+        
+        // Track tx hash
+        if (txHashes) {
+          txHashes.push(hash);
+        }
+        
         const receipt = await publicClient!.waitForTransactionReceipt({ hash });
         
         if (receipt.status === 'reverted') {
@@ -1758,14 +1782,54 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         successCount++;
         successfulAddresses.push(swap.tokenIn.toLowerCase());
         
+        // Add to trade results
+        if (tradeResults && quoteData) {
+          tradeResults.push({
+            address: quoteData.token.address,
+            symbol: quoteData.token.symbol,
+            decimals: quoteData.token.decimals,
+            inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
+            inputValueUsd: quoteData.inputValueUsd,
+            outputAmount: formatUnits(modifiedSwap.quotedOut, quotePreviewData?.outputDecimals || 18),
+            outputValueUsd: Number(formatUnits(modifiedSwap.quotedOut, quotePreviewData?.outputDecimals || 18)) * (quotePreviewData?.outputPrice || 1),
+            status: 'success',
+            txHash: hash
+          });
+        }
+        
       } catch (e: any) {
         const errorMsg = String(e.message || e);
+        
         // Don't track user rejections as failures
         if (errorMsg.includes('User rejected') || errorMsg.includes('user denied')) {
           console.log(`    ⏸️ User rejected transaction`);
+          
+          if (tradeResults && quoteData) {
+            tradeResults.push({
+              address: quoteData.token.address,
+              symbol: quoteData.token.symbol,
+              decimals: quoteData.token.decimals,
+              inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
+              inputValueUsd: quoteData.inputValueUsd,
+              status: 'skipped',
+              reason: 'User rejected'
+            });
+          }
         } else {
           console.log(`    ❌ Execution failed: ${errorMsg.substring(0, 100)}`);
-          trackFailedToken(swap.tokenIn, 'UNKNOWN', errorMsg.substring(0, 100), 'individual_exec');
+          trackFailedToken(swap.tokenIn, quoteData?.token.symbol || 'UNKNOWN', errorMsg.substring(0, 100), 'individual_exec');
+          
+          if (tradeResults && quoteData) {
+            tradeResults.push({
+              address: quoteData.token.address,
+              symbol: quoteData.token.symbol,
+              decimals: quoteData.token.decimals,
+              inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
+              inputValueUsd: quoteData.inputValueUsd,
+              status: 'failed',
+              reason: parseSwapError(e).reason
+            });
+          }
         }
       }
     }
@@ -1785,6 +1849,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
    * 3. Simulate each swap individually
    * 4. Execute only passing swaps
    * 5. Isolate and retry failures
+   * 6. Show post-trade results modal
    */
   const executeConfirmedSwaps = async () => {
     if (!account || !publicClient || !quotePreviewData) return;
@@ -1818,9 +1883,22 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     const successfulTokens = new Set<string>();
     const failedTokensMap = new Map<string, string>();
     
-    // Pre-populate skipped tokens
+    // Initialize trade results tracking
+    const tradeResults: TradeResultItem[] = [];
+    const txHashes: string[] = [];
+    
+    // Pre-populate skipped tokens in results
     for (const sq of skippedHighImpact) {
       trackFailedToken(sq.token.address, sq.token.symbol, `${sq.lossPercent.toFixed(1)}% impact requires Force`, 'high_impact');
+      tradeResults.push({
+        address: sq.token.address,
+        symbol: sq.token.symbol,
+        decimals: sq.token.decimals,
+        inputAmount: formatUnits(sq.token.walletBN, sq.token.decimals),
+        inputValueUsd: sq.inputValueUsd,
+        status: 'skipped',
+        reason: `${sq.lossPercent.toFixed(1)}% price impact (requires Force)`
+      });
     }
     
     try {
@@ -1840,10 +1918,23 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       setProgressStep(`Checking approvals...`);
       const { approvalsNeeded, failedTokens: approvalFailures } = await ensureApprovals(tokensToSwap);
       
-      // Update failed count
+      // Update failed count and track in results
       for (const addr of approvalFailures) {
         failedTokensMap.set(addr, 'Approval failed');
         totalFailed++;
+        
+        const token = executableQuotes.find(q => q.token.address.toLowerCase() === addr);
+        if (token) {
+          tradeResults.push({
+            address: token.token.address,
+            symbol: token.token.symbol,
+            decimals: token.token.decimals,
+            inputAmount: formatUnits(token.token.walletBN, token.token.decimals),
+            inputValueUsd: token.inputValueUsd,
+            status: 'failed',
+            reason: 'Approval failed or rejected'
+          });
+        }
       }
       
       // Filter out approval failures
@@ -1930,6 +2021,16 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             failedTokensMap.set(sq.token.address.toLowerCase(), `Re-quote failed: ${error}`);
             trackFailedToken(sq.token.address, sq.token.symbol, `Re-quote failed: ${error}`, 'requote');
             totalFailed++;
+            
+            tradeResults.push({
+              address: sq.token.address,
+              symbol: sq.token.symbol,
+              decimals: sq.token.decimals,
+              inputAmount: formatUnits(sq.token.walletBN, sq.token.decimals),
+              inputValueUsd: sq.inputValueUsd,
+              status: 'failed',
+              reason: `Quote refresh failed: ${error}`
+            });
           }
         }
         
@@ -1951,6 +2052,10 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       setProgressStep('Building swap plan...');
       console.log(`\n🔧 Building plan for ${quotesToExecute.length} swaps...`);
       
+      // Create a map from tokenIn address to quote data for result tracking
+      const quoteByAddress = new Map<string, typeof quotesToExecute[0]>();
+      quotesToExecute.forEach(sq => quoteByAddress.set(sq.token.address.toLowerCase(), sq));
+      
       const swapPlan: SwapStep[] = quotesToExecute.map(sq => {
         const q = sq.quote;
         const encodedData = encodeAbiParameters(
@@ -1961,39 +2066,15 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         const slippageBps = calculateSlippage(sq.lossPercent, sq.forceHighSlippage);
         
         // Determine if we're swapping the full balance or a custom amount
-        // If walletBN >= fullBalanceBN, use useAll=true to sweep dust
-        // Otherwise respect the custom amount with useAll=false
         const isFullSweep = sq.token.walletBN >= sq.token.fullBalanceBN;
         
-        // Detailed logging for debugging
-        const isUSDC = sq.token.address.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
-        const isAERO = sq.token.address.toLowerCase() === AERO_ADDR.toLowerCase();
+        console.log(`  ${sq.token.symbol}: slippage=${slippageBps/100}%, impact=${sq.lossPercent.toFixed(2)}%, useAll=${isFullSweep}`);
         
-        if (isUSDC || isAERO) {
-          console.log(`  📋 ${sq.token.symbol} DETAILS:`);
-          console.log(`     Token Address: ${sq.token.address}`);
-          console.log(`     Output Token: ${targetTokenAddr}`);
-          console.log(`     Amount In: ${sq.token.walletBN.toString()} (${formatUnits(sq.token.walletBN, sq.token.decimals)})`);
-          console.log(`     Full Balance: ${sq.token.fullBalanceBN.toString()}`);
-          console.log(`     useAll: ${isFullSweep}`);
-          console.log(`     Quoted Output: ${q.buyAmount.toString()} (${q.buyAmountFormatted})`);
-          console.log(`     Input USD: $${sq.inputValueUsd.toFixed(2)}`);
-          console.log(`     Output USD: $${sq.quotedOutputUsd.toFixed(2)}`);
-          console.log(`     Loss: ${sq.lossPercent.toFixed(2)}%`);
-          console.log(`     Slippage: ${slippageBps} bps (${slippageBps/100}%)`);
-          console.log(`     Force mode: ${sq.forceHighSlippage}`);
-          console.log(`     Router/Agg: ${q.transactionTo}`);
-          console.log(`     Calldata length: ${q.transactionData.length} chars`);
-          console.log(`     Encoded data length: ${encodedData.length} chars`);
-        } else {
-          console.log(`  ${sq.token.symbol}: slippage=${slippageBps/100}%, impact=${sq.lossPercent.toFixed(2)}%, useAll=${isFullSweep}`);
-        }
-        
-        const swapStep = {
+        return {
           kind: RouterKind.AGGREGATOR,
           tokenIn: sq.token.address,
           outToken: targetTokenAddr,
-          useAll: isFullSweep,  // Respects custom amounts now
+          useAll: isFullSweep,
           amountIn: sq.token.walletBN,
           quotedIn: sq.token.walletBN,
           quotedOut: q.buyAmount,
@@ -2005,22 +2086,6 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           permitDeadline: 0n,
           permitNonce: 0n
         };
-        
-        // Extra debug for USDC
-        if (isUSDC) {
-          console.log(`     === SWAP STRUCT FOR USDC ===`);
-          console.log(`     kind: ${swapStep.kind}`);
-          console.log(`     tokenIn: ${swapStep.tokenIn}`);
-          console.log(`     outToken: ${swapStep.outToken}`);
-          console.log(`     useAll: ${swapStep.useAll}`);
-          console.log(`     amountIn: ${swapStep.amountIn.toString()}`);
-          console.log(`     quotedIn: ${swapStep.quotedIn.toString()}`);
-          console.log(`     quotedOut: ${swapStep.quotedOut.toString()}`);
-          console.log(`     slippageBps: ${swapStep.slippageBps}`);
-          console.log(`     data prefix: ${swapStep.data.substring(0, 100)}...`);
-        }
-        
-        return swapStep;
       });
 
       // ═══════════════════════════════════════════════════════════════
@@ -2029,74 +2094,6 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       const totalBatches = Math.ceil(swapPlan.length / EXECUTION_BATCH_SIZE);
       
       console.log(`\n🚀 Executing ${swapPlan.length} swaps in ${totalBatches} batch(es)...`);
-      
-      // DEBUG: Test if the aggregator call would work directly
-      for (const swap of swapPlan) {
-        const isUSDC = swap.tokenIn.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
-        if (isUSDC) {
-          console.log(`\n🔬 DEBUG: Testing USDC aggregator route directly...`);
-          
-          // Decode the data to get the aggregator address
-          try {
-            const decodedData = decodeAbiParameters(
-              [{ type: 'address', name: 'target' }, { type: 'bytes', name: 'calldata' }],
-              swap.data
-            );
-            const aggAddress = decodedData[0];
-            const aggCalldata = decodedData[1];
-            
-            console.log(`   Aggregator: ${aggAddress}`);
-            console.log(`   Calldata length: ${aggCalldata.length}`);
-            
-            // Try a direct call to the aggregator to see what happens
-            try {
-              const directCallResult = await publicClient.call({
-                to: aggAddress as Address,
-                data: aggCalldata as `0x${string}`,
-                account: SWAPPER_ADDRESS, // Simulate as if Swapper is calling
-              });
-              console.log(`   ✅ Direct aggregator call succeeded! Result length: ${directCallResult.data?.length || 0}`);
-            } catch (directError: any) {
-              console.log(`   ❌ Direct aggregator call failed: ${directError.message?.substring(0, 200)}`);
-              
-              // Check if it's a timing issue - re-fetch and try again
-              console.log(`   🔄 Re-fetching quote and testing again...`);
-              try {
-                const freshQuote = await fetch0xQuote(
-                  chainId || 8453,
-                  swap.tokenIn,
-                  swap.outToken,
-                  swap.amountIn,
-                  SWAPPER_ADDRESS
-                );
-                
-                if (freshQuote?.transaction?.data) {
-                  console.log(`   Fresh quote received, testing...`);
-                  const freshCallResult = await publicClient.call({
-                    to: freshQuote.transaction.to as Address,
-                    data: freshQuote.transaction.data as `0x${string}`,
-                    account: SWAPPER_ADDRESS,
-                  });
-                  console.log(`   ✅ Fresh quote call succeeded!`);
-                  
-                  // Update the swap with fresh data
-                  const freshEncodedData = encodeAbiParameters(
-                    [{ type: 'address' }, { type: 'bytes' }],
-                    [freshQuote.transaction.to, freshQuote.transaction.data]
-                  );
-                  swap.data = freshEncodedData as `0x${string}`;
-                  swap.quotedOut = BigInt(freshQuote.buyAmount);
-                  console.log(`   ✅ Updated swap with fresh quote data`);
-                }
-              } catch (refreshError: any) {
-                console.log(`   ❌ Fresh quote also failed: ${refreshError.message?.substring(0, 100)}`);
-              }
-            }
-          } catch (decodeError: any) {
-            console.log(`   ❌ Failed to decode swap data: ${decodeError.message}`);
-          }
-        }
-      }
       
       for (let batchStart = 0; batchStart < swapPlan.length; batchStart += EXECUTION_BATCH_SIZE) {
         const batchSwaps = swapPlan.slice(batchStart, batchStart + EXECUTION_BATCH_SIZE);
@@ -2115,10 +2112,16 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           failedTokensMap.set(swap.tokenIn.toLowerCase(), error);
           totalFailed++;
           
-          const token = quotesToExecute.find(q => q.token.address.toLowerCase() === swap.tokenIn.toLowerCase());
-          if (token) {
-            trackFailedToken(swap.tokenIn, token.token.symbol, error, 'simulation');
-          }
+          const quoteData = quoteByAddress.get(swap.tokenIn.toLowerCase());
+          tradeResults.push({
+            address: swap.tokenIn,
+            symbol: quoteData?.token.symbol || 'UNKNOWN',
+            decimals: quoteData?.token.decimals || 18,
+            inputAmount: formatUnits(swap.amountIn, quoteData?.token.decimals || 18),
+            inputValueUsd: quoteData?.inputValueUsd || 0,
+            status: 'failed',
+            reason: `Simulation failed: ${error}`
+          });
         }
         
         if (passing.length === 0) {
@@ -2152,13 +2155,8 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             console.log(`     ${idx+1}. ${swap.tokenIn} → slippage=${swap.slippageBps}bps, amount=${swap.amountIn.toString()}`);
           });
           
-          // Check if error indicates a specific issue
-          if (batchErrorMsg.includes('#1002') || batchErrorMsg.includes('agg swap fail')) {
-            console.log(`  💡 Aggregator route issue - one or more routes may have changed`);
-          } else if (batchErrorMsg.includes('gas')) {
-            console.log(`  💡 Gas estimation issue - batch may be too large`);
-          }
-          
+          // ALWAYS isolate problem tokens - simulation can pass but batch can still fail
+          // due to stale quotes, liquidity changes, or token interactions
           console.log(`  🔍 Isolating problem tokens...`);
           
           const { workingPlan, problemTokens } = await isolateProblemTokens(passing, account as Address);
@@ -2166,25 +2164,51 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           problemTokensToRetry = problemTokens;
           
           if (workingPlan.length === 0) {
-            console.log(`  ⚠️ No working batch found, trying all tokens individually`);
+            console.log(`  ⚠️ No working batch found, trying all tokens individually with fresh quotes`);
             
-            const { successCount, successfulAddresses } = await executeProblemTokensIndividually(passing, account as Address, targetTokenAddr);
+            // Try each token individually with JIT quote refresh
+            const { successCount, successfulAddresses } = await executeProblemTokensIndividually(
+              passing, 
+              account as Address, 
+              targetTokenAddr,
+              tradeResults,
+              txHashes
+            );
             
             for (const addr of successfulAddresses) {
               successfulTokens.add(addr);
             }
             totalSuccess += successCount;
             
-            // Mark failures
+            // Mark failures - find tokens that didn't succeed
             for (const swap of passing) {
               const addr = swap.tokenIn.toLowerCase();
               if (!successfulAddresses.includes(addr)) {
-                failedTokensMap.set(addr, 'Individual execution failed');
+                failedTokensMap.set(addr, 'Batch and individual execution failed');
                 totalFailed++;
+                
+                // Add to trade results if not already there
+                const existingResult = tradeResults.find(r => r.address.toLowerCase() === addr);
+                if (!existingResult) {
+                  const quoteData = quotesToExecute.find(q => q.token.address.toLowerCase() === addr);
+                  if (quoteData) {
+                    tradeResults.push({
+                      address: quoteData.token.address,
+                      symbol: quoteData.token.symbol,
+                      decimals: quoteData.token.decimals,
+                      inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
+                      inputValueUsd: quoteData.inputValueUsd,
+                      status: 'failed',
+                      reason: 'Execution failed after retry'
+                    });
+                  }
+                }
               }
             }
             
-            continue;
+            continue; // Move to next batch
+          } else {
+            console.log(`  ✅ Isolated: ${workingPlan.length} working, ${problemTokens.length} problematic`);
           }
         }
         
@@ -2207,7 +2231,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
               });
               gas = (gas * 130n) / 100n;
             } catch (gasEstError: any) {
-              // Gas estimation failed - use default and try anyway (like production)
+              // Gas estimation failed - use default and try anyway
               console.log(`  ⚠️ Gas estimation failed, using default: ${DEFAULT_BATCH_GAS.toString()}`);
               gas = DEFAULT_BATCH_GAS;
             }
@@ -2220,6 +2244,9 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
               gas
             });
             
+            // Track this transaction
+            txHashes.push(hash);
+            
             const receipt = await publicClient.waitForTransactionReceipt({ hash });
             
             if (receipt.status === 'reverted') {
@@ -2227,9 +2254,28 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             }
             
             console.log(`  ✅ Batch ${batchNum} executed: ${planToExecute.length} swaps`);
+            
+            // Mark all as successful and add to trade results
             for (const swap of planToExecute) {
-              successfulTokens.add(swap.tokenIn.toLowerCase());
+              const addr = swap.tokenIn.toLowerCase();
+              successfulTokens.add(addr);
               totalSuccess++;
+              
+              // Find quote data for this swap to get amounts
+              const quoteData = quotesToExecute.find(q => q.token.address.toLowerCase() === addr);
+              if (quoteData) {
+                tradeResults.push({
+                  address: quoteData.token.address,
+                  symbol: quoteData.token.symbol,
+                  decimals: quoteData.token.decimals,
+                  inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
+                  inputValueUsd: quoteData.inputValueUsd,
+                  outputAmount: quoteData.quote.buyAmountFormatted,
+                  outputValueUsd: quoteData.quotedOutputUsd,
+                  status: 'success',
+                  txHash: hash
+                });
+              }
             }
             
           } catch (execError: any) {
@@ -2238,29 +2284,93 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             // Don't treat user rejection as failure
             if (errorMsg.includes('User rejected') || errorMsg.includes('user denied')) {
               console.log(`  ⏸️ User rejected batch transaction`);
-              // Don't mark as failed, just skip
+              // Mark all as skipped
+              for (const swap of planToExecute) {
+                const quoteData = quotesToExecute.find(q => q.token.address.toLowerCase() === swap.tokenIn.toLowerCase());
+                if (quoteData) {
+                  tradeResults.push({
+                    address: quoteData.token.address,
+                    symbol: quoteData.token.symbol,
+                    decimals: quoteData.token.decimals,
+                    inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
+                    inputValueUsd: quoteData.inputValueUsd,
+                    status: 'skipped',
+                    reason: 'User rejected transaction'
+                  });
+                }
+              }
+            } else if (errorMsg.includes('reverted on-chain') || errorMsg.includes('Transaction reverted')) {
+              console.error(`  ❌ Batch ${batchNum} reverted, trying tokens individually...`);
+              
+              // Batch reverted - try each token individually with fresh quotes
+              const { successCount, successfulAddresses } = await executeProblemTokensIndividually(
+                planToExecute, 
+                account as Address, 
+                targetTokenAddr,
+                tradeResults,
+                txHashes
+              );
+              
+              for (const addr of successfulAddresses) {
+                successfulTokens.add(addr);
+              }
+              totalSuccess += successCount;
+              
+              // Mark failures
+              for (const swap of planToExecute) {
+                const addr = swap.tokenIn.toLowerCase();
+                if (!successfulAddresses.includes(addr)) {
+                  failedTokensMap.set(addr, 'Transaction reverted');
+                  totalFailed++;
+                  
+                  const quoteData = quotesToExecute.find(q => q.token.address.toLowerCase() === addr);
+                  if (quoteData && !tradeResults.find(r => r.address.toLowerCase() === addr)) {
+                    tradeResults.push({
+                      address: quoteData.token.address,
+                      symbol: quoteData.token.symbol,
+                      decimals: quoteData.token.decimals,
+                      inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
+                      inputValueUsd: quoteData.inputValueUsd,
+                      status: 'failed',
+                      reason: 'Transaction reverted'
+                    });
+                  }
+                }
+              }
             } else {
               console.error(`  ❌ Batch ${batchNum} execution failed:`, errorMsg.slice(0, 100));
               
-              if (errorMsg.includes('reverted on-chain') || errorMsg.includes('Transaction reverted')) {
-                for (const swap of planToExecute) {
-                  failedTokensMap.set(swap.tokenIn.toLowerCase(), 'Transaction reverted');
+              // Try individual execution as fallback
+              const { successCount, successfulAddresses } = await executeProblemTokensIndividually(
+                planToExecute, 
+                account as Address, 
+                targetTokenAddr,
+                tradeResults,
+                txHashes
+              );
+              
+              for (const addr of successfulAddresses) {
+                successfulTokens.add(addr);
+              }
+              totalSuccess += successCount;
+              
+              for (const swap of planToExecute) {
+                const addr = swap.tokenIn.toLowerCase();
+                if (!successfulAddresses.includes(addr)) {
+                  failedTokensMap.set(addr, 'Individual execution failed');
                   totalFailed++;
-                }
-              } else {
-                // Try individual execution as fallback
-                const { successCount, successfulAddresses } = await executeProblemTokensIndividually(planToExecute, account as Address, targetTokenAddr);
-                
-                for (const addr of successfulAddresses) {
-                  successfulTokens.add(addr);
-                }
-                totalSuccess += successCount;
-                
-                for (const swap of planToExecute) {
-                  const addr = swap.tokenIn.toLowerCase();
-                  if (!successfulAddresses.includes(addr)) {
-                    failedTokensMap.set(addr, 'Individual execution failed');
-                    totalFailed++;
+                  
+                  const quoteData = quotesToExecute.find(q => q.token.address.toLowerCase() === addr);
+                  if (quoteData && !tradeResults.find(r => r.address.toLowerCase() === addr)) {
+                    tradeResults.push({
+                      address: quoteData.token.address,
+                      symbol: quoteData.token.symbol,
+                      decimals: quoteData.token.decimals,
+                      inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
+                      inputValueUsd: quoteData.inputValueUsd,
+                      status: 'failed',
+                      reason: 'Execution failed'
+                    });
                   }
                 }
               }
@@ -2268,10 +2378,16 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           }
         }
         
-        // Execute problem tokens individually
+        // Execute problem tokens individually with fresh quotes
         if (problemTokensToRetry.length > 0) {
-          console.log(`  🔄 Trying ${problemTokensToRetry.length} problem tokens individually...`);
-          const { successCount, successfulAddresses } = await executeProblemTokensIndividually(problemTokensToRetry, account as Address, targetTokenAddr);
+          console.log(`  🔄 Trying ${problemTokensToRetry.length} problem tokens individually with fresh quotes...`);
+          const { successCount, successfulAddresses } = await executeProblemTokensIndividually(
+            problemTokensToRetry, 
+            account as Address, 
+            targetTokenAddr,
+            tradeResults,
+            txHashes
+          );
           
           for (const addr of successfulAddresses) {
             successfulTokens.add(addr);
@@ -2283,6 +2399,19 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             if (!successfulAddresses.includes(addr)) {
               failedTokensMap.set(addr, 'Individual execution failed');
               totalFailed++;
+              
+              const quoteData = quotesToExecute.find(q => q.token.address.toLowerCase() === addr);
+              if (quoteData && !tradeResults.find(r => r.address.toLowerCase() === addr)) {
+                tradeResults.push({
+                  address: quoteData.token.address,
+                  symbol: quoteData.token.symbol,
+                  decimals: quoteData.token.decimals,
+                  inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
+                  inputValueUsd: quoteData.inputValueUsd,
+                  status: 'failed',
+                  reason: 'Problem token - execution failed'
+                });
+              }
             }
           }
         }
@@ -2294,39 +2423,137 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       }
 
       // ═══════════════════════════════════════════════════════════════
-      // STEP 5: Finalize
+      // STEP 5: Finalize - Build results and show modal
       // ═══════════════════════════════════════════════════════════════
       setProgressStep('Finalizing...');
       
-      const balanceAfter = await publicClient.readContract({
-        address: targetTokenAddr,
-        abi: ERC20_ABI,
-        functionName: 'balanceOf',
-        args: [account as Address]
-      }) as bigint;
+      // Build unique results (dedupe by address)
+      const seenAddresses = new Set<string>();
+      const uniqueResults = tradeResults.filter(r => {
+        const addr = r.address.toLowerCase();
+        if (seenAddresses.has(addr)) return false;
+        seenAddresses.add(addr);
+        return true;
+      });
       
-      const totalReceived = balanceAfter - balanceBefore;
-      const totalReceivedUsd = Number(formatUnits(totalReceived, outputDecimals)) * outputPrice;
+      // FIX: Calculate totals from successful trade results, not balance diff
+      // Balance diff can be 0 due to RPC lag or if tokens were already swapped further
+      const successfulResults = uniqueResults.filter(r => r.status === 'success');
+      const totalOutputFromResults = successfulResults.reduce((sum, r) => {
+        return sum + (r.outputAmount ? parseFloat(r.outputAmount) : 0);
+      }, 0);
+      const totalOutputUsdFromResults = successfulResults.reduce((sum, r) => {
+        return sum + (r.outputValueUsd || 0);
+      }, 0);
+      const totalInputUsdFromResults = uniqueResults.reduce((sum, r) => sum + r.inputValueUsd, 0);
+      
+      // FIX: Check if nothing was actually executed (user likely rejected all)
+      if (totalSuccess === 0 && totalFailed === 0) {
+        // Mark all as skipped due to user cancellation
+        for (const sq of quotesToExecute) {
+          if (!tradeResults.find(r => r.address.toLowerCase() === sq.token.address.toLowerCase())) {
+            tradeResults.push({
+              address: sq.token.address,
+              symbol: sq.token.symbol,
+              decimals: sq.token.decimals,
+              inputAmount: formatUnits(sq.token.walletBN, sq.token.decimals),
+              inputValueUsd: sq.inputValueUsd,
+              status: 'skipped',
+              reason: 'User cancelled in wallet'
+            });
+          }
+        }
+        
+        setPostTradeData({
+          mode,
+          outputToken: mode === 'iAERO' ? 'AERO' : 'USDC',
+          outputDecimals,
+          totalInputUsd: totalInputUsdFromResults,
+          totalOutputUsd: 0,
+          totalReceived: '0',
+          totalReceivedFormatted: '0',
+          successCount: 0,
+          failedCount: 0,
+          skippedCount: quotesToExecute.length,
+          results: tradeResults,
+          txHashes: [],
+          timestamp: Date.now(),
+          userCancelled: true
+        });
+        setShowPostTradeModal(true);
+        setIsProcessing(false);
+        setProgressStep('');
+        setQuotePreviewData(null);
+        return;
+      }
       
       console.log(`\n═══════════════════════════════════════════════`);
       console.log(`✅ SWEEP COMPLETE`);
       console.log(`   Successful: ${totalSuccess}/${quotesToExecute.length}`);
       console.log(`   Failed: ${totalFailed}`);
-      console.log(`   Received: ${formatNumber(Number(formatUnits(totalReceived, outputDecimals)), 4)} ${mode === 'iAERO' ? 'AERO' : 'USDC'}`);
-      console.log(`   Value: $${totalReceivedUsd.toFixed(2)}`);
+      console.log(`   Total Output: ${totalOutputFromResults.toFixed(4)} ${mode === 'iAERO' ? 'AERO' : 'USDC'}`);
+      console.log(`   Value: $${totalOutputUsdFromResults.toFixed(2)}`);
       console.log(`═══════════════════════════════════════════════`);
       
       if (totalSuccess === 0) {
+        setPostTradeData({
+          mode,
+          outputToken: mode === 'iAERO' ? 'AERO' : 'USDC',
+          outputDecimals,
+          totalInputUsd: totalInputUsdFromResults,
+          totalOutputUsd: 0,
+          totalReceived: '0',
+          totalReceivedFormatted: '0',
+          successCount: 0,
+          failedCount: totalFailed,
+          skippedCount: skippedHighImpact.length,
+          results: uniqueResults,
+          txHashes,
+          timestamp: Date.now()
+        });
+        setShowPostTradeModal(true);
         showToast("No swaps were executed successfully", "warning");
+        await handleRefresh();
         return;
       }
       
       // If iAERO mode, do the AERO -> iAERO step
+      let didStake = false;
+      let stakedAmount: string | undefined;
+      
       if (mode === 'iAERO') {
-        await performAeroToIaeroStep();
-      } else {
-        showToast(`Swept ${totalSuccess} tokens to USDC! Received $${totalReceivedUsd.toFixed(2)}`, "success");
+        try {
+          const stakeResult = await performAeroToIaeroStep();
+          didStake = stakeResult.success;
+          stakedAmount = stakeResult.stakedAmount;
+        } catch (stakeError: any) {
+          console.error('AERO to iAERO step failed:', stakeError);
+          // Don't fail the whole operation - swaps succeeded, staking failed
+          showToast('Swaps succeeded but staking failed. Your AERO/iAERO is in your wallet.', 'warning');
+        }
       }
+      
+      // Show post-trade modal with calculated totals
+      setPostTradeData({
+        mode,
+        outputToken: mode === 'iAERO' 
+          ? (didStake ? 'Staked iAERO' : 'AERO') 
+          : 'USDC',
+        outputDecimals,
+        totalInputUsd: totalInputUsdFromResults,
+        totalOutputUsd: totalOutputUsdFromResults,
+        totalReceived: totalOutputFromResults.toString(),
+        totalReceivedFormatted: totalOutputFromResults.toFixed(4),
+        successCount: totalSuccess,
+        failedCount: totalFailed,
+        skippedCount: skippedHighImpact.length,
+        results: uniqueResults,
+        txHashes,
+        timestamp: Date.now(),
+        didStake,
+        stakedAmount
+      });
+      setShowPostTradeModal(true);
       
       await handleRefresh();
       
@@ -2344,8 +2571,9 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
 
   /**
    * AERO -> iAERO step via Aerodrome Router
+   * Returns success status and staked amount
    */
-  const performAeroToIaeroStep = async () => {
+  const performAeroToIaeroStep = async (): Promise<{ success: boolean; stakedAmount?: string }> => {
     console.log("\n🔄 Step 2: Waiting for AERO balance update...");
     setProgressStep("Waiting for blockchain to index...");
     
@@ -2371,8 +2599,8 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     }
 
     if (aeroBalance <= 0n) {
-      showToast("Sweep partial: Rewards moved to AERO, but balance didn't update.", "warning");
-      return;
+      console.warn("Sweep partial: Rewards moved to AERO, but balance didn't update.");
+      return { success: false };
     }
 
     console.log(`💰 AERO Balance to Swap: ${formatBigNumber(aeroBalance, 18, 4)}`);
@@ -2415,6 +2643,16 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     } catch {}
 
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200);
+    
+    // Capture iAERO balance BEFORE the Aerodrome swap
+    const iAeroBalanceBefore = await publicClient?.readContract({
+      address: IAERO_ADDR,
+      abi: ERC20_ABI,
+      functionName: 'balanceOf',
+      args: [account as Address],
+    }) as bigint || 0n;
+    console.log(`  📊 iAERO balance before swap: ${formatBigNumber(iAeroBalanceBefore, 18, 4)}`);
+    
     const hash = await writeContractAsync({
       address: AERODROME_ROUTER,
       abi: AERODROME_ABI,
@@ -2423,27 +2661,47 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     });
 
     await publicClient?.waitForTransactionReceipt({ hash });
+    console.log("  ✅ Aerodrome swap confirmed");
     
     // Step 4: Stake iAERO to Staking Distributor
     console.log("🔄 Step 4: Staking iAERO to Staking Distributor...");
-    setProgressStep("Step 3/3: Staking iAERO...");
+    setProgressStep("Step 3/3: Waiting for iAERO balance...");
     
-    // Get iAERO balance
-    const iAeroBalance = await publicClient?.readContract({
-      address: IAERO_ADDR,
-      abi: ERC20_ABI,
-      functionName: 'balanceOf',
-      args: [account as Address],
-    }) as bigint;
+    // Wait for iAERO balance to increase
+    let iAeroBalance = iAeroBalanceBefore;
+    let iAeroAttempts = 0;
     
-    if (!iAeroBalance || iAeroBalance <= 0n) {
-      showToast("Swept to iAERO but no balance to stake", "warning");
-      return;
+    while (iAeroAttempts < 15) {
+      await new Promise(r => setTimeout(r, 2000));
+      iAeroBalance = await publicClient?.readContract({
+        address: IAERO_ADDR,
+        abi: ERC20_ABI,
+        functionName: 'balanceOf',
+        args: [account as Address],
+      }) as bigint || 0n;
+      
+      // Just check if balance increased at all
+      if (iAeroBalance > iAeroBalanceBefore) {
+        console.log(`  ✅ iAERO balance updated: ${formatBigNumber(iAeroBalanceBefore, 18, 4)} → ${formatBigNumber(iAeroBalance, 18, 4)}`);
+        break;
+      }
+      
+      iAeroAttempts++;
+      console.log(`  ⏳ Attempt ${iAeroAttempts}/15: waiting for iAERO balance to update...`);
+    }
+    
+    if (iAeroBalance <= iAeroBalanceBefore) {
+      console.warn("⚠️ iAERO balance didn't update after Aerodrome swap - staking existing balance");
+      // Still try to stake what's there if > 0
+      if (iAeroBalance <= 0n) {
+        return { success: false, stakedAmount: '0' };
+      }
     }
     
     console.log(`💰 iAERO Balance to Stake: ${formatBigNumber(iAeroBalance, 18, 4)}`);
+    const stakedAmountStr = formatBigNumber(iAeroBalance, 18, 4);
     
-    // Check allowance
+    // Check allowance for staking
     const stakingAllowance = await publicClient?.readContract({
       address: IAERO_ADDR,
       abi: ERC20_FULL_ABI,
@@ -2465,19 +2723,20 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       console.log("✅ iAERO approved for staking");
     }
     
-    // Stake
-    console.log("🎯 Calling stake()...");
+    // Stake full iAERO balance
+    console.log(`🎯 Calling stake(${iAeroBalance})...`);
     setProgressStep("Staking iAERO...");
     const stakeHash = await writeContractAsync({
       address: STAKING_DISTRIBUTOR,
       abi: STAKING_ABI,
       functionName: 'stake',
+      args: [iAeroBalance],
     });
     
     await publicClient?.waitForTransactionReceipt({ hash: stakeHash });
     console.log("✅ Successfully staked iAERO!");
     
-    showToast("Successfully swept and staked iAERO!", "success");
+    return { success: true, stakedAmount: stakedAmountStr };
   };
 
   // ============================================================================
@@ -3204,80 +3463,96 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         </CardContent>
       </Card>
 
-      {/* CUSTOM SWEEP MODAL */}
+      {/* ================================================================
+          CUSTOM SWEEP MODAL - Token Selection
+          ================================================================ */}
       <AnimatePresence>
         {reviewModalOpen && (
-          <motion.div 
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            onClick={() => setReviewModalOpen(false)}
           >
-            <motion.div 
-              initial={{ scale: 0.95 }} animate={{ scale: 1 }} exit={{ scale: 0.95 }}
-              className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-md max-h-[80vh] flex flex-col shadow-2xl"
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-slate-800 border border-slate-700 rounded-2xl max-w-lg w-full max-h-[80vh] overflow-hidden"
             >
-              <div className="p-6 border-b border-slate-800">
-                <h3 className="text-xl font-semibold text-white flex items-center gap-2">
-                   <RefreshCw className="w-5 h-5 text-emerald-400" />
-                   Select Tokens to Sweep
-                </h3>
-                <p className="text-slate-400 text-sm mt-1">
-                   We found {candidates.length} tokens. Uncheck any you want to keep.
-                </p>
+              <div className="p-4 border-b border-slate-700 flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-white">Select Tokens to Sweep</h3>
+                <Button variant="ghost" size="sm" onClick={() => setReviewModalOpen(false)}>
+                  <X className="w-5 h-5" />
+                </Button>
               </div>
 
-              <div className="flex-1 overflow-y-auto p-2 space-y-2">
-                {candidates.map((t) => {
-                  const isSelected = selectedTokens.has(t.address);
-                  const balanceStr = formatBigNumber(t.walletBN, t.decimals, 6);
-                  const currentVal = customAmounts[t.address] ?? "";
+              <div className="p-4 max-h-[50vh] overflow-y-auto space-y-2">
+                {candidates.map((token) => {
+                  const isSelected = selectedTokens.has(token.address);
+                  const customVal = customAmounts[token.address] ?? "";
+                  const fullAmount = formatUnits(token.walletBN, token.decimals);
 
                   return (
-                    <div 
-                       key={t.address} 
-                       className={`p-3 rounded-lg border transition ${isSelected ? 'bg-slate-800 border-emerald-500/50' : 'bg-slate-800/30 border-transparent opacity-60'}`}
+                    <div
+                      key={token.address}
+                      className={`p-3 rounded-xl border transition-all ${
+                        isSelected
+                          ? "bg-emerald-500/10 border-emerald-500/40"
+                          : "bg-slate-900/50 border-slate-700/50 opacity-60"
+                      }`}
                     >
                       <div className="flex items-center justify-between mb-2">
-                        <div 
-                          className="flex items-center gap-3 cursor-pointer"
-                          onClick={() => {
-                            const next = new Set(selectedTokens);
-                            if (next.has(t.address)) next.delete(t.address);
-                            else next.add(t.address);
-                            setSelectedTokens(next);
-                          }}
-                        >
-                          <div className={`w-5 h-5 rounded flex items-center justify-center border ${isSelected ? 'bg-emerald-500 border-emerald-500' : 'border-slate-600'}`}>
-                            {isSelected && <CheckCircle className="w-3.5 h-3.5 text-white" />}
-                          </div>
-                          <span className="text-sm font-medium text-white">{t.symbol}</span>
-                        </div>
-                        <div className="text-xs text-slate-400">
-                          Max: {balanceStr}
-                        </div>
+                        <label className="flex items-center gap-2 cursor-pointer flex-1">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {
+                              setSelectedTokens((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(token.address)) next.delete(token.address);
+                                else next.add(token.address);
+                                return next;
+                              });
+                            }}
+                            className="w-4 h-4 rounded border-slate-600 text-emerald-500 focus:ring-emerald-500"
+                          />
+                          <span className="text-white font-medium">{token.symbol}</span>
+                        </label>
+                        <span className="text-slate-400 text-sm">
+                          {token.valueUsd ? `$${token.valueUsd.toFixed(2)}` : ''}
+                        </span>
                       </div>
 
                       {isSelected && (
-                        <div className="flex items-center gap-2 bg-black/20 rounded px-2 py-1 border border-slate-700">
-                          <input 
-                            type="number" 
-                            placeholder={balanceStr}
-                            value={currentVal}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setCustomAmounts(prev => ({ ...prev, [t.address]: val }));
-                            }}
-                            className="bg-transparent border-0 text-xs text-white w-full focus:ring-0 outline-none placeholder:text-slate-600"
+                        <div className="flex items-center gap-2 mt-2">
+                          <input
+                            type="text"
+                            placeholder={fullAmount}
+                            value={customVal}
+                            onChange={(e) =>
+                              setCustomAmounts((prev) => ({
+                                ...prev,
+                                [token.address]: e.target.value,
+                              }))
+                            }
+                            className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-white text-sm placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                           />
-                          <button 
-                            onClick={() => setCustomAmounts(prev => {
-                              const copy = { ...prev };
-                              delete copy[t.address];
-                              return copy;
-                            })}
-                            className="text-[10px] text-emerald-400 hover:text-emerald-300 uppercase font-bold"
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="text-xs border-slate-600"
+                            onClick={() =>
+                              setCustomAmounts((prev) => ({
+                                ...prev,
+                                [token.address]: fullAmount,
+                              }))
+                            }
                           >
                             Max
-                          </button>
+                          </Button>
                         </div>
                       )}
                     </div>
@@ -3285,257 +3560,436 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                 })}
               </div>
 
-              <div className="p-4 border-t border-slate-800 bg-slate-900/50 rounded-b-xl flex flex-col gap-3">
+              <div className="p-4 border-t border-slate-700 space-y-3">
+                <div className="text-sm text-slate-400 text-center">
+                  {selectedTokens.size} token(s) selected
+                </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <Button 
-                    className="bg-blue-600 hover:bg-blue-700 text-white"
+                  <Button
                     onClick={() => handleConfirmSweep('USDC')}
                     disabled={selectedTokens.size === 0}
+                    className="bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-700 hover:to-cyan-700"
                   >
                     Sweep to USDC
                   </Button>
-                  <Button 
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                  <Button
                     onClick={() => handleConfirmSweep('iAERO')}
                     disabled={selectedTokens.size === 0}
+                    className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700"
                   >
-                    Sweep to iAERO & Stake
+                    Sweep to iAERO
                   </Button>
                 </div>
-                <Button 
-                  variant="ghost" 
-                  className="text-slate-400 hover:text-white hover:bg-slate-800 w-full"
-                  onClick={() => setReviewModalOpen(false)}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ================================================================
+          QUOTE PREVIEW MODAL - Review before execution
+          ================================================================ */}
+      <AnimatePresence>
+        {showQuotePreview && quotePreviewData && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            onClick={() => { setShowQuotePreview(false); setQuotePreviewData(null); }}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-slate-800 border border-slate-700 rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-hidden"
+            >
+              <div className="p-4 border-b border-slate-700 flex items-center justify-between">
+                <div>
+                  <h3 className="text-lg font-semibold text-white">Review Swap Preview</h3>
+                  <p className="text-sm text-slate-400">
+                    Swapping to {quotePreviewData._mode === 'iAERO' ? 'AERO → iAERO (staked)' : 'USDC'}
+                  </p>
+                </div>
+                <Button variant="ghost" size="sm" onClick={() => { setShowQuotePreview(false); setQuotePreviewData(null); }}>
+                  <X className="w-5 h-5" />
+                </Button>
+              </div>
+
+              <div className="p-4 max-h-[55vh] overflow-y-auto">
+                {/* Summary stats */}
+                <div className="grid grid-cols-3 gap-4 mb-4">
+                  <div className="bg-slate-900/50 rounded-xl p-3 text-center">
+                    <div className="text-2xl font-bold text-white">{quotePreviewData.quotes.length}</div>
+                    <div className="text-xs text-slate-400">Tokens</div>
+                  </div>
+                  <div className="bg-slate-900/50 rounded-xl p-3 text-center">
+                    <div className="text-2xl font-bold text-emerald-400">
+                      ${quotePreviewData.quotes.filter(q => q.selected).reduce((s, q) => s + q.quotedOutputUsd, 0).toFixed(2)}
+                    </div>
+                    <div className="text-xs text-slate-400">Est. Output</div>
+                  </div>
+                  <div className="bg-slate-900/50 rounded-xl p-3 text-center">
+                    <div className="text-2xl font-bold text-yellow-400">
+                      {quotePreviewData.quotes.filter(q => q.selected && q.lossPercent > 5).length}
+                    </div>
+                    <div className="text-xs text-slate-400">High Impact</div>
+                  </div>
+                </div>
+
+                {/* Quote rows */}
+                <div className="space-y-2">
+                  {quotePreviewData.quotes.map((q, idx) => {
+                    const isHighImpact = q.lossPercent > 5;
+                    const needsForce = isHighImpact && !q.forceHighSlippage;
+                    
+                    return (
+                      <div
+                        key={`${q.token.address}-${idx}`}
+                        className={`p-3 rounded-xl border transition-all ${
+                          q.selected
+                            ? isHighImpact
+                              ? "bg-yellow-500/10 border-yellow-500/40"
+                              : "bg-emerald-500/10 border-emerald-500/40"
+                            : "bg-slate-900/30 border-slate-700/30 opacity-50"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <label className="flex items-center gap-3 cursor-pointer flex-1">
+                            <input
+                              type="checkbox"
+                              checked={q.selected}
+                              onChange={() => toggleQuoteSelection(q.token.address)}
+                              className="w-4 h-4 rounded border-slate-600 text-emerald-500 focus:ring-emerald-500"
+                            />
+                            <div>
+                              <div className="text-white font-medium">{q.token.symbol}</div>
+                              <div className="text-xs text-slate-400">
+                                {formatNumber(Number(formatUnits(q.token.walletBN, q.token.decimals)), 4)} tokens
+                              </div>
+                            </div>
+                          </label>
+                          
+                          <div className="text-right">
+                            <div className="text-white font-medium">
+                              ${q.quotedOutputUsd.toFixed(2)}
+                            </div>
+                            <div className={`text-xs ${q.lossPercent > 5 ? 'text-yellow-400' : q.lossPercent > 2 ? 'text-orange-400' : 'text-slate-400'}`}>
+                              {q.lossPercent > 0.01 ? `-${q.lossPercent.toFixed(2)}%` : '~0%'} impact
+                            </div>
+                          </div>
+                        </div>
+                        
+                        {/* Force high slippage toggle for high impact tokens */}
+                        {isHighImpact && q.selected && (
+                          <div className="mt-2 pt-2 border-t border-slate-700/50 flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-xs text-yellow-400">
+                              <AlertTriangle className="w-3 h-3" />
+                              <span>High price impact ({q.lossPercent.toFixed(1)}%)</span>
+                            </div>
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={q.forceHighSlippage || false}
+                                onChange={() => toggleForceSlippage(q.token.address)}
+                                className="w-3 h-3 rounded border-slate-600 text-yellow-500 focus:ring-yellow-500"
+                              />
+                              <span className="text-xs text-yellow-400">Force swap</span>
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Failed quotes section */}
+                {quotePreviewData.failedQuotes.length > 0 && (
+                  <div className="mt-4 p-3 bg-red-500/10 border border-red-500/30 rounded-xl">
+                    <div className="flex items-center gap-2 text-red-400 text-sm font-medium mb-2">
+                      <XCircle className="w-4 h-4" />
+                      <span>Failed to get quotes ({quotePreviewData.failedQuotes.length})</span>
+                    </div>
+                    <div className="space-y-1">
+                      {quotePreviewData.failedQuotes.map((f, idx) => (
+                        <div key={idx} className="text-xs text-slate-400 flex justify-between">
+                          <span>{f.token.symbol}</span>
+                          <span className="text-red-400/70">{f.error}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="p-4 border-t border-slate-700 space-y-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-slate-400">
+                    {quotePreviewData.quotes.filter(q => q.selected).length} of {quotePreviewData.quotes.length} selected
+                  </span>
+                  <span className="text-slate-400">
+                    {quotePreviewData.quotes.filter(q => q.selected && q.lossPercent > 5 && !q.forceHighSlippage).length > 0 && (
+                      <span className="text-yellow-400">
+                        ⚠️ {quotePreviewData.quotes.filter(q => q.selected && q.lossPercent > 5 && !q.forceHighSlippage).length} need "Force"
+                      </span>
+                    )}
+                  </span>
+                </div>
+                
+                <Button
+                  onClick={executeConfirmedSwaps}
+                  disabled={quotePreviewData.quotes.filter(q => q.selected).length === 0}
+                  className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 py-3"
                 >
-                  Cancel
+                  <Zap className="w-4 h-4 mr-2" />
+                  Execute {quotePreviewData.quotes.filter(q => q.selected && (q.lossPercent <= 5 || q.forceHighSlippage)).length} Swap(s)
                 </Button>
               </div>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
-      
-      {/* QUOTE PREVIEW MODAL */}
+
+      {/* ================================================================
+          POST-TRADE RESULTS MODAL - Shows what actually happened
+          ================================================================ */}
       <AnimatePresence>
-        {showQuotePreview && quotePreviewData && (
-          <motion.div 
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+        {showPostTradeModal && postTradeData && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            onClick={() => { setShowPostTradeModal(false); setPostTradeData(null); }}
           >
             <motion.div
-              initial={{ scale: 0.95 }} animate={{ scale: 1 }} exit={{ scale: 0.95 }}
-              className="bg-slate-800 border border-slate-700 rounded-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden shadow-2xl"
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-slate-800 border border-slate-700 rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-hidden"
             >
-              {/* Modal Header */}
-              <div className="p-6 border-b border-slate-700 bg-gradient-to-r from-amber-500/10 to-orange-500/10">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
-                      <AlertTriangle className="w-7 h-7 text-white" />
+              {/* Header */}
+              <div className="p-4 border-b border-slate-700 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  {postTradeData.userCancelled ? (
+                    <div className="w-10 h-10 rounded-full bg-slate-500/20 flex items-center justify-center">
+                      <X className="w-5 h-5 text-slate-400" />
                     </div>
-                    <div>
-                      <h3 className="text-xl font-bold text-white">Review Swap Quotes</h3>
-                      <p className="text-sm text-slate-400">
-                        {quotePreviewData.quotes.length} quotes received, {quotePreviewData.failedQuotes.length} failed
-                      </p>
+                  ) : postTradeData.successCount > 0 ? (
+                    <div className="w-10 h-10 rounded-full bg-emerald-500/20 flex items-center justify-center">
+                      <Trophy className="w-5 h-5 text-emerald-400" />
                     </div>
-                  </div>
-                  <button
-                    onClick={() => {
-                      setShowQuotePreview(false);
-                      setQuotePreviewData(null);
-                    }}
-                    className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
-                  >
-                    <X className="w-5 h-5 text-slate-400" />
-                  </button>
-                </div>
-                
-                {/* Summary Stats */}
-                <div className="grid grid-cols-3 gap-4 mt-4">
-                  <div className="bg-slate-900/50 rounded-lg p-3">
-                    <p className="text-xs text-slate-400">Input Value</p>
-                    <p className="text-lg font-bold text-white">
-                      {formatUSD(quotePreviewData.quotes
-                        .filter(q => q.selected)
-                        .reduce((sum, q) => sum + q.inputValueUsd, 0))}
+                  ) : (
+                    <div className="w-10 h-10 rounded-full bg-red-500/20 flex items-center justify-center">
+                      <XCircle className="w-5 h-5 text-red-400" />
+                    </div>
+                  )}
+                  <div>
+                    <h3 className="text-lg font-semibold text-white">
+                      {postTradeData.userCancelled 
+                        ? 'Swap Cancelled' 
+                        : postTradeData.successCount > 0 
+                          ? 'Swap Complete!' 
+                          : 'Swap Failed'}
+                    </h3>
+                    <p className="text-sm text-slate-400">
+                      {postTradeData.userCancelled 
+                        ? 'Transaction was rejected in wallet'
+                        : `${postTradeData.successCount} succeeded, ${postTradeData.failedCount} failed${postTradeData.skippedCount > 0 ? `, ${postTradeData.skippedCount} skipped` : ''}`}
                     </p>
                   </div>
-                  <div className="bg-slate-900/50 rounded-lg p-3">
-                    <p className="text-xs text-slate-400">You'll Receive</p>
-                    <p className="text-lg font-bold text-emerald-400">
-                      {formatUSD(quotePreviewData.quotes
-                        .filter(q => q.selected)
-                        .reduce((sum, q) => sum + q.quotedOutputUsd, 0))}
-                    </p>
-                  </div>
-                  <div className="bg-slate-900/50 rounded-lg p-3">
-                    <p className="text-xs text-slate-400">Price Impact</p>
-                    {(() => {
-                      const selectedQuotes = quotePreviewData.quotes.filter(q => q.selected);
-                      const totalInput = selectedQuotes.reduce((sum, q) => sum + q.inputValueUsd, 0);
-                      const weightedImpact = totalInput > 0 
-                        ? selectedQuotes.reduce((sum, q) => sum + (q.lossPercent * q.inputValueUsd), 0) / totalInput
-                        : 0;
-                      return (
-                        <p className={`text-lg font-bold ${weightedImpact > 2 ? 'text-red-400' : weightedImpact > 0.5 ? 'text-yellow-400' : 'text-emerald-400'}`}>
-                          {weightedImpact > 0.01 ? `-${weightedImpact.toFixed(2)}%` : '~0%'}
-                        </p>
-                      );
-                    })()}
-                  </div>
                 </div>
+                <Button variant="ghost" size="sm" onClick={() => { setShowPostTradeModal(false); setPostTradeData(null); }}>
+                  <X className="w-5 h-5" />
+                </Button>
               </div>
-              
-              {/* Token List */}
-              <div className="overflow-y-auto max-h-[400px] p-4">
-                <table className="w-full">
-                  <thead className="text-xs text-slate-400 uppercase tracking-wider">
-                    <tr>
-                      <th className="text-left pb-3 pl-2">Include</th>
-                      <th className="text-left pb-3">Token</th>
-                      <th className="text-right pb-3">Input Value</th>
-                      <th className="text-right pb-3">You Receive</th>
-                      <th className="text-right pb-3 pr-2">Impact</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-700/50">
-                    {quotePreviewData.quotes.map((quoteData, idx) => (
-                      <tr 
-                        key={idx} 
-                        className={`hover:bg-slate-700/30 transition-colors ${!quoteData.selected ? 'opacity-50' : ''}`}
-                      >
-                        <td className="py-3 pl-2">
-                          <input
-                            type="checkbox"
-                            checked={quoteData.selected}
-                            onChange={() => toggleQuoteSelection(quoteData.token.address)}
-                            className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-emerald-500 focus:ring-emerald-500"
-                          />
-                        </td>
-                        <td className="py-3">
-                          <div className="flex items-center gap-2">
-                            {quoteData.lossPercent > 5 ? (
-                              <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
-                            ) : quoteData.lossPercent > 1 ? (
-                              <AlertTriangle className="w-4 h-4 text-yellow-400 flex-shrink-0" />
-                            ) : (
-                              <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-                            )}
-                            <span className="font-medium text-white">{quoteData.token.symbol}</span>
-                          </div>
-                        </td>
-                        <td className="py-3 text-right">
-                          <span className="text-slate-300">{formatUSD(quoteData.inputValueUsd)}</span>
-                        </td>
-                        <td className="py-3 text-right">
-                          <span className="text-emerald-400 font-medium">{formatUSD(quoteData.quotedOutputUsd)}</span>
-                        </td>
-                        <td className="py-3 text-right pr-2">
-                          <div className="flex items-center justify-end gap-2">
-                            <span className={`font-medium ${
-                              quoteData.lossPercent > 5 ? 'text-red-400' : 
-                              quoteData.lossPercent > 1 ? 'text-yellow-400' : 
-                              'text-emerald-400'
-                            }`}>
-                              {quoteData.lossPercent > 0.01 ? `-${quoteData.lossPercent.toFixed(2)}%` : '~0%'}
-                            </span>
-                            {/* Force toggle for high-impact tokens (>5%) */}
-                            {quoteData.lossPercent > 5 && quoteData.selected && (
-                              <button
-                                onClick={() => toggleForceSlippage(quoteData.token.address)}
-                                className={`text-xs px-2 py-0.5 rounded transition-colors ${
-                                  quoteData.forceHighSlippage
-                                    ? 'bg-orange-500/30 text-orange-300 border border-orange-500/50'
-                                    : 'bg-slate-700 text-slate-400 hover:bg-slate-600 hover:text-slate-300'
-                                }`}
-                                title={quoteData.forceHighSlippage 
-                                  ? `Slippage unlocked to ~${Math.ceil(quoteData.lossPercent + 10)}%` 
-                                  : 'Click to allow higher slippage for this swap'}
-                              >
-                                {quoteData.forceHighSlippage ? '⚠️ Forced' : 'Force'}
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+
+              {/* Summary Cards */}
+              {!postTradeData.userCancelled && (
+                <div className="p-4 border-b border-slate-700/50">
+                  <div className="grid grid-cols-3 gap-3">
+                    {/* Total Received */}
+                    <div className="bg-gradient-to-br from-emerald-500/10 to-teal-500/10 rounded-xl p-4 border border-emerald-500/20">
+                      <div className="text-xs text-slate-400 mb-1">Total Received</div>
+                      <div className="text-xl font-bold text-emerald-400">
+                        {postTradeData.totalReceivedFormatted}
+                      </div>
+                      <div className="text-sm text-emerald-400/70">
+                        {postTradeData.outputToken}
+                      </div>
+                    </div>
                     
-                    {/* Failed quotes */}
-                    {quotePreviewData.failedQuotes.map((fq, idx) => (
-                      <tr key={`failed-${idx}`} className="opacity-50">
-                        <td className="py-3 pl-2">
-                          <input type="checkbox" disabled className="w-4 h-4 rounded border-slate-600 bg-slate-800" />
-                        </td>
-                        <td className="py-3">
-                          <div className="flex items-center gap-2">
-                            <XCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
-                            <span className="font-medium text-white">{fq.token.symbol}</span>
-                          </div>
-                          <p className="text-xs text-red-400 mt-1 truncate max-w-[150px]" title={fq.error}>
-                            {fq.error}
-                          </p>
-                        </td>
-                        <td className="py-3 text-right">
-                          <span className="text-slate-500">—</span>
-                        </td>
-                        <td className="py-3 text-right">
-                          <span className="text-slate-500">—</span>
-                        </td>
-                        <td className="py-3 text-right pr-2">
-                          <span className="text-slate-500">—</span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              
-              {/* Warning for high price impact */}
-              {quotePreviewData.quotes.some(q => q.selected && q.lossPercent > 5) && (
-                <div className="mx-4 mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
-                  <div className="flex items-center gap-2 text-red-400">
-                    <AlertTriangle className="w-4 h-4" />
-                    <span className="text-sm font-medium">
-                      {quotePreviewData.quotes.some(q => q.selected && q.lossPercent > 5 && !q.forceHighSlippage) 
-                        ? <>High-impact tokens ({quotePreviewData.quotes.filter(q => q.selected && q.lossPercent > 5 && !q.forceHighSlippage).length}) require "Force" to swap.</>
-                        : <>Some tokens have &gt;5% price impact.</>
-                      }
-                    </span>
+                    {/* Value */}
+                    <div className="bg-slate-900/50 rounded-xl p-4 border border-slate-700/50">
+                      <div className="text-xs text-slate-400 mb-1">USD Value</div>
+                      <div className="text-xl font-bold text-white">
+                        ${postTradeData.totalOutputUsd.toFixed(2)}
+                      </div>
+                      {postTradeData.totalInputUsd > 0 && (
+                        <div className="text-xs text-slate-500">
+                          from ${postTradeData.totalInputUsd.toFixed(2)} input
+                        </div>
+                      )}
+                    </div>
+                    
+                    {/* Success Rate */}
+                    <div className="bg-slate-900/50 rounded-xl p-4 border border-slate-700/50">
+                      <div className="text-xs text-slate-400 mb-1">Success Rate</div>
+                      <div className={`text-xl font-bold ${
+                        postTradeData.successCount === postTradeData.results.length 
+                          ? 'text-emerald-400' 
+                          : postTradeData.successCount > 0 
+                            ? 'text-yellow-400' 
+                            : 'text-red-400'
+                      }`}>
+                        {postTradeData.results.length > 0 
+                          ? Math.round((postTradeData.successCount / postTradeData.results.length) * 100)
+                          : 0}%
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        {postTradeData.successCount}/{postTradeData.results.length} tokens
+                      </div>
+                    </div>
                   </div>
-                  {quotePreviewData.quotes.some(q => q.selected && q.forceHighSlippage) && (
-                    <div className="mt-2 text-xs text-orange-400">
-                      ⚠️ Force enabled for {quotePreviewData.quotes.filter(q => q.selected && q.forceHighSlippage).length} token(s)
+                  
+                  {/* Staking indicator */}
+                  {postTradeData.didStake && postTradeData.stakedAmount && (
+                    <div className="mt-3 bg-purple-500/10 border border-purple-500/30 rounded-xl p-3 flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-purple-500/20 flex items-center justify-center">
+                        <TrendingUp className="w-4 h-4 text-purple-400" />
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium text-purple-300">Auto-Staked</div>
+                        <div className="text-xs text-purple-400/70">{postTradeData.stakedAmount} iAERO staked to earn rewards</div>
+                      </div>
                     </div>
                   )}
                 </div>
               )}
-              
-              {/* Modal Footer */}
-              <div className="p-4 border-t border-slate-700 bg-slate-900/50">
-                <div className="flex gap-3">
-                  <Button
-                    variant="ghost"
-                    className="flex-1 text-slate-400 hover:text-white hover:bg-slate-800"
-                    onClick={() => {
-                      setShowQuotePreview(false);
-                      setQuotePreviewData(null);
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    className="flex-1 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white"
-                    onClick={executeConfirmedSwaps}
-                    disabled={quotePreviewData.quotes.filter(q => q.selected && (q.lossPercent <= 5 || q.forceHighSlippage)).length === 0 || isProcessing}
-                  >
-                    {isProcessing ? (
-                      <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Executing...</>
-                    ) : (
-                      <>Execute {quotePreviewData.quotes.filter(q => q.selected && (q.lossPercent <= 5 || q.forceHighSlippage)).length} Swaps</>
-                    )}
-                  </Button>
+
+              {/* Individual Results */}
+              <div className="p-4 max-h-[40vh] overflow-y-auto">
+                <div className="text-sm font-medium text-slate-400 mb-3">Token Details</div>
+                
+                <div className="space-y-2">
+                  {postTradeData.results.map((result, idx) => (
+                    <div
+                      key={`${result.address}-${idx}`}
+                      className={`p-3 rounded-xl border ${
+                        result.status === 'success'
+                          ? 'bg-emerald-500/5 border-emerald-500/20'
+                          : result.status === 'skipped'
+                            ? 'bg-slate-500/5 border-slate-500/20'
+                            : 'bg-red-500/5 border-red-500/20'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          {/* Status icon */}
+                          <div className={`w-6 h-6 rounded-full flex items-center justify-center ${
+                            result.status === 'success'
+                              ? 'bg-emerald-500/20'
+                              : result.status === 'skipped'
+                                ? 'bg-slate-500/20'
+                                : 'bg-red-500/20'
+                          }`}>
+                            {result.status === 'success' ? (
+                              <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+                            ) : result.status === 'skipped' ? (
+                              <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
+                            ) : (
+                              <XCircle className="w-3.5 h-3.5 text-red-400" />
+                            )}
+                          </div>
+                          
+                          <div>
+                            <div className="font-medium text-white">{result.symbol}</div>
+                            <div className="text-xs text-slate-500">
+                              {Number(result.inputAmount).toFixed(4)} tokens
+                              {result.inputValueUsd > 0 && ` (~$${result.inputValueUsd.toFixed(2)})`}
+                            </div>
+                          </div>
+                        </div>
+                        
+                        <div className="text-right">
+                          {result.status === 'success' ? (
+                            <>
+                              <div className="text-emerald-400 font-medium">
+                                +{result.outputAmount ? Number(result.outputAmount).toFixed(4) : '—'}
+                              </div>
+                              {result.outputValueUsd && (
+                                <div className="text-xs text-emerald-400/70">
+                                  ${result.outputValueUsd.toFixed(2)}
+                                </div>
+                              )}
+                            </>
+                          ) : result.status === 'skipped' ? (
+                            <div className="text-xs text-slate-400">Skipped</div>
+                          ) : (
+                            <div className="text-xs text-red-400">Failed</div>
+                          )}
+                        </div>
+                      </div>
+                      
+                      {/* Failure reason */}
+                      {result.status !== 'success' && result.reason && (
+                        <div className={`mt-2 pt-2 border-t text-xs ${
+                          result.status === 'skipped' ? 'border-slate-700/50 text-slate-500' : 'border-red-500/20 text-red-400/80'
+                        }`}>
+                          {result.reason}
+                        </div>
+                      )}
+                      
+                      {/* Tx hash link */}
+                      {result.txHash && (
+                        <div className="mt-2 pt-2 border-t border-emerald-500/10">
+                          <a
+                            href={`${txBaseUrl}${result.txHash}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1"
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                            View transaction
+                          </a>
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
+                
+                {/* Transaction hashes summary */}
+                {postTradeData.txHashes.length > 0 && (
+                  <div className="mt-4 p-3 bg-slate-900/50 rounded-xl border border-slate-700/50">
+                    <div className="text-xs text-slate-400 mb-2">Transaction{postTradeData.txHashes.length > 1 ? 's' : ''}</div>
+                    <div className="space-y-1">
+                      {postTradeData.txHashes.map((hash, idx) => (
+                        <a
+                          key={idx}
+                          href={`${txBaseUrl}${hash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-2 text-xs text-blue-400 hover:text-blue-300"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                          <span className="font-mono">{hash.slice(0, 10)}...{hash.slice(-8)}</span>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="p-4 border-t border-slate-700">
+                <Button
+                  onClick={() => { setShowPostTradeModal(false); setPostTradeData(null); }}
+                  className="w-full bg-slate-700 hover:bg-slate-600 text-white"
+                >
+                  Close
+                </Button>
               </div>
             </motion.div>
           </motion.div>
