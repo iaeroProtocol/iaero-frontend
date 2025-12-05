@@ -249,16 +249,8 @@ interface SwapStep {
   permitNonce: bigint;
 }
 
-// Type assertion helpers for viem contract calls
-// Viem's strict ABI inference expects specific object shapes that are structurally
-// compatible with SwapStep but not directly assignable. These helpers validate
-// the SwapStep structure at compile time while satisfying viem's type requirements.
-
-type SwapPlanArgs = [plan: readonly Record<string, unknown>[], recipient: Address];
-
 // Validates SwapStep has all required fields, then returns args for viem
-function makeSwapArgs(steps: SwapStep[], recipient: Address): SwapPlanArgs {
-  // TypeScript validates that each step has all SwapStep fields
+function makeSwapArgs(steps: SwapStep[], recipient: Address) {
   const validated = steps.map(s => ({
     kind: s.kind,
     tokenIn: s.tokenIn,
@@ -275,7 +267,9 @@ function makeSwapArgs(steps: SwapStep[], recipient: Address): SwapPlanArgs {
     permitDeadline: s.permitDeadline,
     permitNonce: s.permitNonce,
   }));
-  return [validated, recipient] as SwapPlanArgs;
+
+  // as const ensures this is a tuple and not widened to (any[] | Address)[]
+  return [validated, recipient] as const;
 }
 
 // Quote Preview Types (ported from sweeper)
