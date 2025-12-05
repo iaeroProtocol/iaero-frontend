@@ -1458,7 +1458,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           address: SWAPPER_ADDRESS,
           abi: SWAPPER_ABI,
           functionName: 'executePlanFromCaller',
-          args: [[swap], recipient],
+          args: [[swap], recipient] as const,
           account: recipient,
         });
         
@@ -1541,7 +1541,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           address: SWAPPER_ADDRESS,
           abi: SWAPPER_ABI,
           functionName: 'executePlanFromCaller',
-          args: [remainingPlan, recipient],
+          args: [remainingPlan, recipient] as const,
           account: recipient,
         });
         
@@ -1564,7 +1564,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
               address: SWAPPER_ADDRESS,
               abi: SWAPPER_ABI,
               functionName: 'executePlanFromCaller',
-              args: [testPlan, recipient],
+              args: [testPlan, recipient] as const,
               account: recipient,
             });
             
@@ -1630,7 +1630,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             address: SWAPPER_ADDRESS,
             abi: SWAPPER_ABI,
             functionName: 'executePlanFromCaller',
-            args: [[modifiedSwap], recipient],
+            args: [[modifiedSwap], recipient] as const,
             account: recipient,
           });
           console.log(`    ⛽ Gas estimate: ${gas.toString()}`);
@@ -1671,7 +1671,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                     address: SWAPPER_ADDRESS,
                     abi: SWAPPER_ABI,
                     functionName: 'executePlanFromCaller',
-                    args: [[modifiedSwap], recipient],
+                    args: [[modifiedSwap], recipient] as const,
                     account: recipient,
                   });
                   console.log(`    ⛽ Fresh quote gas estimate: ${gas.toString()}`);
@@ -1707,7 +1707,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           address: SWAPPER_ADDRESS,
           abi: SWAPPER_ABI,
           functionName: 'executePlanFromCaller',
-          args: [[modifiedSwap], recipient],
+          args: [[modifiedSwap], recipient] as const,
           gas
         });
         
@@ -2100,7 +2100,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             address: SWAPPER_ADDRESS,
             abi: SWAPPER_ABI,
             functionName: 'executePlanFromCaller',
-            args: [passing, account as Address],
+            args: [passing, account as Address] as const,
             account: account as Address,
           });
           console.log(`  ✅ Batch ${batchNum} validated (gas: ${batchGas.toString()})`);
@@ -2166,7 +2166,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                 address: SWAPPER_ADDRESS,
                 abi: SWAPPER_ABI,
                 functionName: 'executePlanFromCaller',
-                args: [planToExecute, account as Address],
+                args: [planToExecute, account as Address] as const,
                 account: account as Address,
               });
               gas = (gas * 130n) / 100n;
@@ -2180,7 +2180,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
               address: SWAPPER_ADDRESS,
               abi: SWAPPER_ABI,
               functionName: 'executePlanFromCaller',
-              args: [planToExecute, account as Address],
+              args: [planToExecute, account as Address] as const,
               gas
             });
             
