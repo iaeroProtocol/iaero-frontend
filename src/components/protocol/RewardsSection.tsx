@@ -236,6 +236,51 @@ interface SwapStep {
   permitNonce: bigint;
 }
 
+// Tuple type matching the contract's expected format for type-safe viem calls
+// This satisfies viem's strict ABI type inference while maintaining compile-time safety
+type SwapStepTuple = readonly [
+  number,           // kind (uint8)
+  Address,          // tokenIn
+  Address,          // outToken
+  boolean,          // useAll
+  bigint,           // amountIn
+  bigint,           // quotedIn
+  bigint,           // quotedOut
+  number,           // slippageBps (uint16)
+  `0x${string}`,    // data
+  boolean,          // viaPermit2
+  `0x${string}`,    // permitSig
+  bigint,           // permitAmount
+  bigint,           // permitDeadline
+  bigint            // permitNonce
+];
+
+// Convert SwapStep object to tuple for contract calls
+// Provides compile-time validation that all fields exist and have correct types
+function swapStepToTuple(step: SwapStep): SwapStepTuple {
+  return [
+    step.kind,
+    step.tokenIn,
+    step.outToken,
+    step.useAll,
+    step.amountIn,
+    step.quotedIn,
+    step.quotedOut,
+    step.slippageBps,
+    step.data,
+    step.viaPermit2,
+    step.permitSig,
+    step.permitAmount,
+    step.permitDeadline,
+    step.permitNonce
+  ] as const;
+}
+
+// Convert array of SwapSteps to tuples
+function swapPlanToTuples(plan: SwapStep[]): readonly SwapStepTuple[] {
+  return plan.map(swapStepToTuple);
+}
+
 // Quote Preview Types (ported from sweeper)
 interface SwapQuote {
   token: TokenForSwap;
@@ -1458,7 +1503,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           address: SWAPPER_ADDRESS,
           abi: SWAPPER_ABI,
           functionName: 'executePlanFromCaller',
-          args: [[swap], recipient] as const,
+          args: [[swapStepToTuple(swap)], recipient],
           account: recipient,
         });
         
@@ -1541,7 +1586,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           address: SWAPPER_ADDRESS,
           abi: SWAPPER_ABI,
           functionName: 'executePlanFromCaller',
-          args: [remainingPlan, recipient] as const,
+          args: [swapPlanToTuples(remainingPlan), recipient],
           account: recipient,
         });
         
@@ -1564,7 +1609,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
               address: SWAPPER_ADDRESS,
               abi: SWAPPER_ABI,
               functionName: 'executePlanFromCaller',
-              args: [testPlan, recipient] as const,
+              args: [swapPlanToTuples(testPlan), recipient],
               account: recipient,
             });
             
@@ -1630,7 +1675,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             address: SWAPPER_ADDRESS,
             abi: SWAPPER_ABI,
             functionName: 'executePlanFromCaller',
-            args: [[modifiedSwap], recipient] as const,
+            args: [[swapStepToTuple(modifiedSwap)], recipient],
             account: recipient,
           });
           console.log(`    ⛽ Gas estimate: ${gas.toString()}`);
@@ -1671,7 +1716,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                     address: SWAPPER_ADDRESS,
                     abi: SWAPPER_ABI,
                     functionName: 'executePlanFromCaller',
-                    args: [[modifiedSwap], recipient] as const,
+                    args: [[swapStepToTuple(modifiedSwap)], recipient],
                     account: recipient,
                   });
                   console.log(`    ⛽ Fresh quote gas estimate: ${gas.toString()}`);
@@ -1707,7 +1752,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           address: SWAPPER_ADDRESS,
           abi: SWAPPER_ABI,
           functionName: 'executePlanFromCaller',
-          args: [[modifiedSwap], recipient] as const,
+          args: [[swapStepToTuple(modifiedSwap)], recipient],
           gas
         });
         
@@ -2100,7 +2145,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             address: SWAPPER_ADDRESS,
             abi: SWAPPER_ABI,
             functionName: 'executePlanFromCaller',
-            args: [passing, account as Address] as const,
+            args: [swapPlanToTuples(passing), account as Address],
             account: account as Address,
           });
           console.log(`  ✅ Batch ${batchNum} validated (gas: ${batchGas.toString()})`);
@@ -2166,7 +2211,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                 address: SWAPPER_ADDRESS,
                 abi: SWAPPER_ABI,
                 functionName: 'executePlanFromCaller',
-                args: [planToExecute, account as Address] as const,
+                args: [swapPlanToTuples(planToExecute), account as Address],
                 account: account as Address,
               });
               gas = (gas * 130n) / 100n;
@@ -2180,7 +2225,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
               address: SWAPPER_ADDRESS,
               abi: SWAPPER_ABI,
               functionName: 'executePlanFromCaller',
-              args: [planToExecute, account as Address] as const,
+              args: [swapPlanToTuples(planToExecute), account as Address],
               gas
             });
             
