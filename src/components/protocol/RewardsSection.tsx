@@ -191,9 +191,9 @@ const RouterKind = { AERODROME: 0, UNIV3: 1, AGGREGATOR: 2 };
 // ============================================================================
 // BATCH CONFIGURATION - Ported from page.tsx
 // ============================================================================
-const QUOTE_BATCH_SIZE = 5;          // Number of quotes to fetch in parallel
-const QUOTE_BATCH_DELAY = 1500;      // ms delay between quote batches
-const EXECUTION_BATCH_SIZE = 5;      // Number of swaps per execution batch
+const QUOTE_BATCH_SIZE = 10;          // Number of quotes to fetch in parallel
+const QUOTE_BATCH_DELAY = 500;      // ms delay between quote batches
+const EXECUTION_BATCH_SIZE = 10;      // Number of swaps per execution batch
 
 // --------------------------------------------------------------------------
 // 2. TYPES
