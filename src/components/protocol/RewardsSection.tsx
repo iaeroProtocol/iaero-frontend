@@ -1837,8 +1837,107 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     if (successCount > 0) {
       showToast(`Recovered ${successCount}/${problemTokens.length} problem tokens`, "info");
     }
-    
+
     return { successCount, successfulAddresses };
+  };
+
+  /**
+   * Retry a failed batch with boosted parameters (1.5x slippage, 1.5x gas)
+   * Fetches fresh quotes and retries as a batch before falling back to individual
+   */
+  const retryBatchWithBoost = async (
+    failedSwaps: SwapStep[],
+    recipient: Address,
+    targetTokenAddr: Address
+  ): Promise<{ success: boolean; hash?: string; boostedSwaps: SwapStep[] }> => {
+    console.log(`\n🔄 === RETRY BATCH WITH 1.5x SLIPPAGE & GAS ===`);
+
+    const SLIPPAGE_MULT = 1.5;
+    const GAS_MULT = 1.5;
+
+    // Fetch fresh quotes in parallel
+    const freshQuoteResults = await Promise.all(
+      failedSwaps.map(async (swap) => {
+        try {
+          const quote = await fetch0xQuote(
+            chainId || 8453,
+            swap.tokenIn,
+            targetTokenAddr,
+            swap.amountIn,
+            SWAPPER_ADDRESS
+          );
+          return { swap, quote, error: null };
+        } catch (e: any) {
+          return { swap, quote: null, error: e.message };
+        }
+      })
+    );
+
+    // Build boosted swaps with fresh quotes
+    const boostedSwaps: SwapStep[] = [];
+    for (const { swap, quote } of freshQuoteResults) {
+      const boostedSlippage = Math.min(9900, Math.ceil(swap.slippageBps * SLIPPAGE_MULT));
+
+      if (quote?.transaction?.to && quote?.transaction?.data) {
+        const encodedData = encodeAbiParameters(
+          [{ type: 'address' }, { type: 'bytes' }],
+          [quote.transaction.to, quote.transaction.data]
+        );
+        boostedSwaps.push({
+          ...swap,
+          quotedOut: BigInt(quote.buyAmount),
+          data: encodedData as `0x${string}`,
+          slippageBps: boostedSlippage
+        });
+      } else {
+        // Use original with boosted slippage
+        boostedSwaps.push({ ...swap, slippageBps: boostedSlippage });
+      }
+    }
+
+    if (boostedSwaps.length === 0) {
+      return { success: false, boostedSwaps: [] };
+    }
+
+    // Try gas estimation
+    try {
+      let gas = await publicClient!.estimateContractGas({
+        address: SWAPPER_ADDRESS,
+        abi: SWAPPER_ABI,
+        functionName: 'executePlanFromCaller',
+        args: makeSwapArgs(boostedSwaps, recipient),
+        account: recipient,
+      });
+      gas = BigInt(Math.ceil(Number(gas) * GAS_MULT));
+
+      console.log(`  ⛽ Boosted gas: ${gas}`);
+
+      const hash = await writeContractAsync({
+        address: SWAPPER_ADDRESS,
+        abi: SWAPPER_ABI,
+        functionName: 'executePlanFromCaller',
+        args: makeSwapArgs(boostedSwaps, recipient),
+        gas
+      });
+
+      const receipt = await publicClient!.waitForTransactionReceipt({ hash });
+
+      if (receipt.status === 'reverted') {
+        throw new Error('Boosted batch reverted');
+      }
+
+      console.log(`  ✅ Boosted batch succeeded!`);
+      return { success: true, hash, boostedSwaps };
+
+    } catch (e: any) {
+      const msg = e.message || '';
+      if (msg.includes('User rejected') || msg.includes('user denied')) {
+        console.log(`  ⏸️ User rejected`);
+        return { success: false, boostedSwaps: [] };
+      }
+      console.log(`  ❌ Boosted batch failed: ${msg.substring(0, 80)}`);
+      return { success: false, boostedSwaps };
+    }
   };
 
   /**
@@ -2300,77 +2399,139 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                 }
               }
             } else if (errorMsg.includes('reverted on-chain') || errorMsg.includes('Transaction reverted')) {
-              console.error(`  ❌ Batch ${batchNum} reverted, trying tokens individually...`);
-              
-              // Batch reverted - try each token individually with fresh quotes
-              const { successCount, successfulAddresses } = await executeProblemTokensIndividually(
-                planToExecute, 
-                account as Address, 
-                targetTokenAddr,
-                tradeResults,
-                txHashes
-              );
-              
-              for (const addr of successfulAddresses) {
-                successfulTokens.add(addr);
-              }
-              totalSuccess += successCount;
-              
-              // Mark failures
-              for (const swap of planToExecute) {
-                const addr = swap.tokenIn.toLowerCase();
-                if (!successfulAddresses.includes(addr)) {
-                  failedTokensMap.set(addr, 'Transaction reverted');
-                  totalFailed++;
-                  
+              console.error(`  ❌ Batch ${batchNum} reverted, trying boosted retry first...`);
+
+              // First try boosted batch retry with 1.5x slippage and gas
+              const retryResult = await retryBatchWithBoost(planToExecute, account as Address, targetTokenAddr);
+
+              if (retryResult.success && retryResult.hash) {
+                console.log(`  ✅ Boosted batch retry succeeded!`);
+                txHashes.push(retryResult.hash);
+
+                for (const swap of planToExecute) {
+                  const addr = swap.tokenIn.toLowerCase();
+                  successfulTokens.add(addr);
+                  totalSuccess++;
+
                   const quoteData = quotesToExecute.find(q => q.token.address.toLowerCase() === addr);
-                  if (quoteData && !tradeResults.find(r => r.address.toLowerCase() === addr)) {
+                  if (quoteData) {
                     tradeResults.push({
                       address: quoteData.token.address,
                       symbol: quoteData.token.symbol,
                       decimals: quoteData.token.decimals,
                       inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
                       inputValueUsd: quoteData.inputValueUsd,
-                      status: 'failed',
-                      reason: 'Transaction reverted'
+                      outputAmount: quoteData.quote.buyAmountFormatted,
+                      outputValueUsd: quoteData.quotedOutputUsd,
+                      status: 'success',
+                      txHash: retryResult.hash
                     });
+                  }
+                }
+              } else {
+                // Boosted retry failed - fall back to individual execution
+                console.log(`  ⚠️ Boosted retry failed, trying tokens individually...`);
+
+                const { successCount, successfulAddresses } = await executeProblemTokensIndividually(
+                  planToExecute,
+                  account as Address,
+                  targetTokenAddr,
+                  tradeResults,
+                  txHashes
+                );
+
+                for (const addr of successfulAddresses) {
+                  successfulTokens.add(addr);
+                }
+                totalSuccess += successCount;
+
+                // Mark failures
+                for (const swap of planToExecute) {
+                  const addr = swap.tokenIn.toLowerCase();
+                  if (!successfulAddresses.includes(addr)) {
+                    failedTokensMap.set(addr, 'Transaction reverted');
+                    totalFailed++;
+
+                    const quoteData = quotesToExecute.find(q => q.token.address.toLowerCase() === addr);
+                    if (quoteData && !tradeResults.find(r => r.address.toLowerCase() === addr)) {
+                      tradeResults.push({
+                        address: quoteData.token.address,
+                        symbol: quoteData.token.symbol,
+                        decimals: quoteData.token.decimals,
+                        inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
+                        inputValueUsd: quoteData.inputValueUsd,
+                        status: 'failed',
+                        reason: 'Transaction reverted'
+                      });
+                    }
                   }
                 }
               }
             } else {
-              console.error(`  ❌ Batch ${batchNum} execution failed:`, errorMsg.slice(0, 100));
-              
-              // Try individual execution as fallback
-              const { successCount, successfulAddresses } = await executeProblemTokensIndividually(
-                planToExecute, 
-                account as Address, 
-                targetTokenAddr,
-                tradeResults,
-                txHashes
-              );
-              
-              for (const addr of successfulAddresses) {
-                successfulTokens.add(addr);
-              }
-              totalSuccess += successCount;
-              
-              for (const swap of planToExecute) {
-                const addr = swap.tokenIn.toLowerCase();
-                if (!successfulAddresses.includes(addr)) {
-                  failedTokensMap.set(addr, 'Individual execution failed');
-                  totalFailed++;
-                  
+              console.error(`  ❌ Batch ${batchNum} execution failed, trying boosted retry first...`);
+
+              // First try boosted batch retry with 1.5x slippage and gas
+              const retryResult = await retryBatchWithBoost(planToExecute, account as Address, targetTokenAddr);
+
+              if (retryResult.success && retryResult.hash) {
+                console.log(`  ✅ Boosted batch retry succeeded!`);
+                txHashes.push(retryResult.hash);
+
+                for (const swap of planToExecute) {
+                  const addr = swap.tokenIn.toLowerCase();
+                  successfulTokens.add(addr);
+                  totalSuccess++;
+
                   const quoteData = quotesToExecute.find(q => q.token.address.toLowerCase() === addr);
-                  if (quoteData && !tradeResults.find(r => r.address.toLowerCase() === addr)) {
+                  if (quoteData) {
                     tradeResults.push({
                       address: quoteData.token.address,
                       symbol: quoteData.token.symbol,
                       decimals: quoteData.token.decimals,
                       inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
                       inputValueUsd: quoteData.inputValueUsd,
-                      status: 'failed',
-                      reason: 'Execution failed'
+                      outputAmount: quoteData.quote.buyAmountFormatted,
+                      outputValueUsd: quoteData.quotedOutputUsd,
+                      status: 'success',
+                      txHash: retryResult.hash
                     });
+                  }
+                }
+              } else {
+                // Boosted retry failed - fall back to individual execution
+                console.log(`  ⚠️ Boosted retry failed, trying tokens individually...`);
+
+                const { successCount, successfulAddresses } = await executeProblemTokensIndividually(
+                  planToExecute,
+                  account as Address,
+                  targetTokenAddr,
+                  tradeResults,
+                  txHashes
+                );
+
+                for (const addr of successfulAddresses) {
+                  successfulTokens.add(addr);
+                }
+                totalSuccess += successCount;
+
+                for (const swap of planToExecute) {
+                  const addr = swap.tokenIn.toLowerCase();
+                  if (!successfulAddresses.includes(addr)) {
+                    failedTokensMap.set(addr, 'Individual execution failed');
+                    totalFailed++;
+
+                    const quoteData = quotesToExecute.find(q => q.token.address.toLowerCase() === addr);
+                    if (quoteData && !tradeResults.find(r => r.address.toLowerCase() === addr)) {
+                      tradeResults.push({
+                        address: quoteData.token.address,
+                        symbol: quoteData.token.symbol,
+                        decimals: quoteData.token.decimals,
+                        inputAmount: formatUnits(quoteData.token.walletBN, quoteData.token.decimals),
+                        inputValueUsd: quoteData.inputValueUsd,
+                        status: 'failed',
+                        reason: 'Execution failed'
+                      });
+                    }
                   }
                 }
               }
