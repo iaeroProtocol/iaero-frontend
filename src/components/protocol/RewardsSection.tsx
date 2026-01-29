@@ -1132,10 +1132,11 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
   const preScreenTokens = async (tokens: TokenForSwap[]) => {
     console.log(`\n🔍 === PRE-SCREENING PHASE ===`);
     console.log(`Checking prices for ${tokens.length} tokens...`);
-    
+
     setProgressStep(`Pre-screening ${tokens.length} tokens...`);
-    
-    const addresses = tokens.map(t => t.address);
+
+    // Include AERO and USDC in price fetch so we have output token prices for USD calculations
+    const addresses = [...tokens.map(t => t.address), AERO_ADDR, USDC_ADDR];
     const priceMap = await fetchPricesForAddrs(addresses, chainId || 8453);
     
     const validTokens: TokenForSwap[] = [];
