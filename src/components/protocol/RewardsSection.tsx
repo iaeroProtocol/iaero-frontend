@@ -1478,6 +1478,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                 abi: ERC20_FULL_ABI,
                 functionName: 'approve',
                 args: [SWAPPER_ADDRESS, 0n],
+                gas: 100_000n,
               });
               await publicClient?.waitForTransactionReceipt({ hash: hash0 });
             } catch (e: any) {
@@ -1493,6 +1494,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             abi: ERC20_FULL_ABI,
             functionName: 'approve',
             args: [SWAPPER_ADDRESS, 115792089237316195423570985008687907853269984665640564039457584007913129639935n],
+            gas: 100_000n,
           });
           await publicClient?.waitForTransactionReceipt({ hash });
           console.log(`    ✅ Approved`);
@@ -2782,6 +2784,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         abi: ERC20_FULL_ABI,
         functionName: 'approve',
         args: [AERODROME_ROUTER, aeroBalance],
+        gas: 100_000n,
       });
       await publicClient?.waitForTransactionReceipt({ hash: approveHash });
     }
@@ -2820,6 +2823,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       abi: AERODROME_ABI,
       functionName: 'swapExactTokensForTokens',
       args: [aeroBalance, amountOutMin, routes, account as Address, deadline],
+      gas: 500_000n,
     });
 
     await publicClient?.waitForTransactionReceipt({ hash });
@@ -2880,6 +2884,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         abi: ERC20_FULL_ABI,
         functionName: 'approve',
         args: [STAKING_DISTRIBUTOR, iAeroBalance],
+        gas: 100_000n,
       });
       await publicClient?.waitForTransactionReceipt({ hash: approveHash });
       console.log("✅ iAERO approved for staking");
@@ -2893,6 +2898,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       abi: STAKING_ABI,
       functionName: 'stake',
       args: [iAeroBalance],
+      gas: 300_000n,
     });
     
     await publicClient?.waitForTransactionReceipt({ hash: stakeHash });

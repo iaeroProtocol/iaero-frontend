@@ -197,6 +197,7 @@ export const useStaking = () => {
         abi: ABIS.iAERO,
         functionName: 'approve',
         args: [stakingAddr, BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')], // MaxUint256
+        gas: 100_000n,
       });
 
       // Wait for transaction
@@ -249,6 +250,7 @@ export const useStaking = () => {
         abi: ABIS.StakingDistributor,
         functionName: 'stake',
         args: [amountWei],
+        gas: 300_000n,
       });
 
       // Wait for confirmation
@@ -308,6 +310,7 @@ export const useStaking = () => {
         abi: ABIS.StakingDistributor,
         functionName: 'unstake',
         args: [amountWei],
+        gas: 300_000n,
       });
 
       const receipt = await publicClient?.waitForTransactionReceipt({ hash });
@@ -420,7 +423,7 @@ export const useStaking = () => {
             abi: ABIS.StakingDistributor,
             functionName: 'claimLatest',
             args: [batch],
-            gas: 1_000_000n,
+            gas: 5_000_000n,
           });
           
           lastReceipt = await publicClient?.waitForTransactionReceipt({ hash });
@@ -509,6 +512,7 @@ export const useStaking = () => {
           abi: ABIS.StakingDistributor,
           functionName: 'claimLatest',
           args: [[tokenAddress]],
+          gas: 400_000n,
         });
       } catch {
         // Fallback: claim prev, then current
@@ -518,15 +522,17 @@ export const useStaking = () => {
             abi: ABIS.StakingDistributor,
             functionName: 'claim',
             args: [tokenAddress, prevEpoch],
+            gas: 300_000n,
           });
           await publicClient!.waitForTransactionReceipt({ hash: h1 });
         } catch { /* okay if nothing pending in prev */ }
-  
+
         hash = await writeContractAsync({
           address: stakingAddr,
           abi: ABIS.StakingDistributor,
           functionName: 'claim',
           args: [tokenAddress, currentEpoch],
+          gas: 300_000n,
         });
       }
   
@@ -787,6 +793,7 @@ export const useStaking = () => {
         address: stakingAddr,
         abi: ABIS.StakingDistributor,
         functionName: 'exit',
+        gas: 3_000_000n,
       });
 
       const receipt = await publicClient?.waitForTransactionReceipt({ hash });

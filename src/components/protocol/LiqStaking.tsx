@@ -445,6 +445,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         abi: ABIS.LIQ,
         functionName: 'approve',
         args: [liqStakingAddr, BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')],
+        gas: 100_000n,
       });
 
       showToast("Approving LIQ...", "info");
@@ -478,6 +479,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         abi: ABIS.LIQStakingDistributor,
         functionName: 'stake',
         args: [amount],
+        gas: 12_000_000n,
       });
 
       showToast("Staking LIQ...", "info");
@@ -511,6 +513,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         abi: ABIS.LIQStakingDistributor,
         functionName: 'unstake',
         args: [amount],
+        gas: 12_000_000n,
       });
 
       showToast("Unstaking LIQ...", "info");
@@ -559,7 +562,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
           abi: ABIS.LIQStakingDistributor,
           functionName: "claimMany",
           args: [slice],
-          gas: 700_000n,
+          gas: 8_000_000n,
         });
         showToast(`Claiming chunk ${i / MAX + 1} of ${Math.ceil(claimTokens.length / MAX)}...`, "info");
         await publicClient?.waitForTransactionReceipt({ hash });

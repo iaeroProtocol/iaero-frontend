@@ -165,6 +165,7 @@ export const useVault = () => {
         abi: ABIS.AERO,
         functionName: 'approve',
         args: [vaultAddr, amountWei],
+        gas: 100_000n,
       });
 
       const receipt = await publicClient?.waitForTransactionReceipt({ hash });
@@ -212,6 +213,7 @@ export const useVault = () => {
         abi: ABIS.PermalockVault,
         functionName: 'deposit',
         args: [wei],
+        gas: 700_000n,
       });
 
       onProgress?.("Confirming…");
@@ -347,6 +349,7 @@ export const useVault = () => {
           abi: ABIS.VeAERO,
           functionName: 'approve',
           args: [vaultAddr, tid],
+          gas: 100_000n,
         });
         
         await publicClient?.waitForTransactionReceipt({ hash: approvalHash });
