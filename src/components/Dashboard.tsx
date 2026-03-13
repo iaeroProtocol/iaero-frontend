@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   BarChart3,
@@ -57,19 +57,19 @@ function DashboardContent() {
   const [activeTab, setActiveTab] = useState<"dashboard" | "lock" | "stake" | "rewards">("dashboard");
   const [toasts, setToasts] = useState<{id:number; message:string; type: 'success' | 'error' | 'info' | 'warning'; show?:boolean}[]>([]);
 
-  const showToast = (message: string, type: 'success' | 'error' | 'info' | 'warning' = 'info') => {
+  const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' | 'warning' = 'info') => {
     const id = Date.now();
     setToasts(prev => [...prev, { id, message, type, show: true }]);
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
-  };
+  }, []);
 
-  const formatNumber = (num: string | number) => {
+  const formatNumber = useCallback((num: string | number) => {
     const n = typeof num === "number" ? num : parseFloat(num || "0");
     if (!isFinite(n)) return "0.00";
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
     if (n >= 1_000) return (n / 1_000).toFixed(2) + "K";
     return n.toFixed(2);
-  };
+  }, []);
 
   const fmtUsd = (n: number, d = 2) =>
     (isFinite(n) ? n : 0).toLocaleString(undefined, {

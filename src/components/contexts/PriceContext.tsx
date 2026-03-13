@@ -205,7 +205,7 @@ export function PriceProvider({
     [prices]
   );
 
-  const value: PriceContextValue = {
+  const value: PriceContextValue = useMemo(() => ({
     prices,
     loading,
     error,
@@ -216,7 +216,7 @@ export function PriceProvider({
     getPriceInUSD,
     getFormattedPrice,
     getTotalValueUSD,
-  };
+  }), [prices, loading, error, lastUpdate, intervalMs, refreshPrices, getPriceInUSD, getFormattedPrice, getTotalValueUSD]);
 
   return <PriceContext.Provider value={value}>{children}</PriceContext.Provider>;
 }

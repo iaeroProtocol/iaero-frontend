@@ -361,14 +361,14 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
     return () => clearInterval(interval);
   }, [loadStats]);
 
-  const value: ProtocolContextValue = {
+  const value: ProtocolContextValue = useMemo(() => ({
     ...state,
     loadBalances,
     loadAllowances,
     loadPendingRewards,
     loadStats,
     setTransactionLoading,
-  };
+  }), [state, loadBalances, loadAllowances, loadPendingRewards, loadStats, setTransactionLoading]);
 
   return (
     <ProtocolContext.Provider value={value}>
