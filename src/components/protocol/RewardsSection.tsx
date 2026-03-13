@@ -4,6 +4,7 @@
 // WITH POST-TRADE RESULTS MODAL
 // ==============================================
 import React, { useEffect, useMemo, useState, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { usePublicClient, useWriteContract } from 'wagmi';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -758,6 +759,17 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
   // POST-TRADE RESULTS MODAL STATE
   const [showPostTradeModal, setShowPostTradeModal] = useState(false);
   const [postTradeData, setPostTradeData] = useState<PostTradeData | null>(null);
+
+  // Lock body scroll when any modal is open
+  useEffect(() => {
+    const anyModalOpen = reviewModalOpen || showQuotePreview || showPostTradeModal;
+    if (anyModalOpen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => { document.body.style.overflow = ''; };
+  }, [reviewModalOpen, showQuotePreview, showPostTradeModal]);
 
   // --- INTERNAL HELPERS ---
 
@@ -3632,13 +3644,13 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       {/* ================================================================
           CUSTOM SWEEP MODAL - Token Selection
           ================================================================ */}
-      <AnimatePresence>
+      {typeof document !== 'undefined' && createPortal(<AnimatePresence>
         {reviewModalOpen && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 overscroll-contain"
             onClick={() => setReviewModalOpen(false)}
           >
             <motion.div
@@ -3750,18 +3762,18 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             </motion.div>
           </motion.div>
         )}
-      </AnimatePresence>
+      </AnimatePresence>, document.body)}
 
       {/* ================================================================
           QUOTE PREVIEW MODAL - Review before execution
           ================================================================ */}
-      <AnimatePresence>
+      {typeof document !== 'undefined' && createPortal(<AnimatePresence>
         {showQuotePreview && quotePreviewData && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 overscroll-contain"
             onClick={() => { setShowQuotePreview(false); setQuotePreviewData(null); }}
           >
             <motion.div
@@ -3915,18 +3927,18 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             </motion.div>
           </motion.div>
         )}
-      </AnimatePresence>
+      </AnimatePresence>, document.body)}
 
       {/* ================================================================
           POST-TRADE RESULTS MODAL - Shows what actually happened
           ================================================================ */}
-      <AnimatePresence>
+      {typeof document !== 'undefined' && createPortal(<AnimatePresence>
         {showPostTradeModal && postTradeData && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4 overscroll-contain"
             onClick={() => { setShowPostTradeModal(false); setPostTradeData(null); }}
           >
             <motion.div
@@ -4160,7 +4172,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             </motion.div>
           </motion.div>
         )}
-      </AnimatePresence>
+      </AnimatePresence>, document.body)}
     </motion.div>
   );
 }
