@@ -778,35 +778,33 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
 
   // Toggle quote selection in preview modal
   const toggleQuoteSelection = useCallback((tokenAddress: string) => {
-    if (!quotePreviewData) return;
     setQuotePreviewData(prev => {
       if (!prev) return prev;
       return {
         ...prev,
-        quotes: prev.quotes.map(q => 
+        quotes: prev.quotes.map(q =>
           q.token.address.toLowerCase() === tokenAddress.toLowerCase()
             ? { ...q, selected: !q.selected }
             : q
         )
       };
     });
-  }, [quotePreviewData]);
-  
+  }, []);
+
   // Toggle force high slippage
   const toggleForceSlippage = useCallback((tokenAddress: string) => {
-    if (!quotePreviewData) return;
     setQuotePreviewData(prev => {
       if (!prev) return prev;
       return {
         ...prev,
-        quotes: prev.quotes.map(q => 
+        quotes: prev.quotes.map(q =>
           q.token.address.toLowerCase() === tokenAddress.toLowerCase()
             ? { ...q, forceHighSlippage: !q.forceHighSlippage }
             : q
         )
       };
     });
-  }, [quotePreviewData]);
+  }, []);
 
   // ============================================================================
   // PRICE FETCHING
