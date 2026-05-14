@@ -122,6 +122,10 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   const [priceByAddr, setPriceByAddr] = useState<Record<string, number>>({});
   const [rewardsLoading, setRewardsLoading] = useState(false);
   const [pricesLoading, setPricesLoading] = useState(false);
+  // Bump to force the pending-rewards useEffect to re-fetch from chain.
+  const [rewardsRefreshKey, setRewardsRefreshKey] = useState(0);
+  // Per-row claim spinner: holds the lowercase address of the token currently being claimed.
+  const [claimingAddr, setClaimingAddr] = useState<string | null>(null);
 
   const isLocked = stakingStats.timeUntilUnlock > 0;
 
@@ -341,9 +345,20 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         }) as unknown as PendingRewardsResult;
         
                 console.log('getPendingRewards raw result:', result);
-                const [tokensRaw, amountsRaw] = Array.isArray(result) ? result : [[], []] as PendingRewardsResult;
-                const tokens: string[] = Array.from(tokensRaw ?? []);
-                const amounts: bigint[] = Array.from(amountsRaw ?? []);
+                // viem v2 returns multi-output reads with NAMED outputs as `{ tokens, amounts }`,
+                // and with UNNAMED outputs as `[tokens, amounts]`. Handle both so the table
+                // populates regardless of ABI shape.
+                let tokensRaw: readonly any[] = [];
+                let amountsRaw: readonly any[] = [];
+                if (Array.isArray(result)) {
+                  tokensRaw = (result[0] ?? []) as readonly any[];
+                  amountsRaw = (result[1] ?? []) as readonly any[];
+                } else if (result && typeof result === 'object') {
+                  tokensRaw = ((result as any).tokens ?? []) as readonly any[];
+                  amountsRaw = ((result as any).amounts ?? []) as readonly any[];
+                }
+                const tokens: string[] = Array.from(tokensRaw);
+                const amounts: bigint[] = Array.from(amountsRaw).map((x) => toBigintSafe(x));
 
         console.log('Tokens count:', tokens.length);
         console.log('Amounts count:', amounts.length);
@@ -398,7 +413,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         setRewardsLoading(false);
       }
     })();
-  }, [connected, networkSupported, address, publicClient]);
+  }, [connected, networkSupported, address, publicClient, rewardsRefreshKey]);
 
   // Fetch prices for reward tokens
   useEffect(() => {
@@ -449,7 +464,8 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       });
 
       showToast("Approving LIQ...", "info");
-      await publicClient?.waitForTransactionReceipt({ hash });
+      const receipt = await publicClient?.waitForTransactionReceipt({ hash });
+      if (receipt && receipt.status !== "success") throw new Error(`Approval reverted: ${hash}`);
       showToast("LIQ approved!", "success");
       await loadLiqBalance();
     } catch (e: any) {
@@ -483,7 +499,8 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       });
 
       showToast("Staking LIQ...", "info");
-      await publicClient?.waitForTransactionReceipt({ hash });
+      const receipt = await publicClient?.waitForTransactionReceipt({ hash });
+      if (receipt && receipt.status !== "success") throw new Error(`Stake reverted: ${hash}`);
       showToast(`Staked ${stakeAmount} LIQ!`, "success");
       
       setStakeAmount("");
@@ -517,7 +534,8 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       });
 
       showToast("Unstaking LIQ...", "info");
-      await publicClient?.waitForTransactionReceipt({ hash });
+      const receipt = await publicClient?.waitForTransactionReceipt({ hash });
+      if (receipt && receipt.status !== "success") throw new Error(`Unstake reverted: ${hash}`);
       showToast(`Unstaked ${unstakeAmount} LIQ!`, "success");
       
       setUnstakeAmount("");
@@ -533,30 +551,99 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
 
   const handleClaimRewards = async () => {
     if (!connected || !address) return;
+    if (claimingAddr) return; // Don't race against an in-flight per-row claim.
     const txId = "claimLiqRewards";
     setTransactionLoading(txId, true);
     setLoading(true);
-  
+
     try {
       const liqStakingAddr = getAddr("LIQStakingDistributor");
       if (!liqStakingAddr) throw new Error("LIQ Staking contract not initialized");
-  
-      const claimTokens = rows
+      if (!publicClient) throw new Error("RPC client not available");
+
+      const allTokens = rows
         .filter((r) => r.amountBN > 0n)
         .map((r) => r.address as `0x${string}`);
-  
-      if (claimTokens.length === 0) {
+
+      if (allTokens.length === 0) {
         showToast("No rewards to claim", "info");
         return;
       }
-  
-      const MAX = 50;
-  
-      showToast(`Claiming ${claimTokens.length} reward tokens...`, "info");
-  
-      // 🔹 Claim in chunks of 50 to respect contract limit
-      for (let i = 0; i < claimTokens.length; i += MAX) {
-        const slice = claimTokens.slice(i, i + MAX);
+
+      const CONTRACT_MAX = 50;
+
+      // ─── Bisection isolation ────────────────────────────────────────────────
+      // The contract's claimMany() reverts the entire batch if ANY single token's
+      // transfer reverts (most often "transfer amount exceeds balance" when the
+      // distributor's internal accumulator drifts past its actual ERC20 balance).
+      // Pre-simulate via eth_call and bisect to find the largest claimable subset
+      // and the minimal set of "poison" tokens to skip.
+      const simulateBatch = async (toks: `0x${string}`[]): Promise<boolean> => {
+        if (toks.length === 0) return true;
+        try {
+          await publicClient.simulateContract({
+            account: address,
+            address: liqStakingAddr as `0x${string}`,
+            abi: ABIS.LIQStakingDistributor,
+            functionName: "claimMany",
+            args: [toks],
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      const isolate = async (
+        toks: `0x${string}`[]
+      ): Promise<{ working: `0x${string}`[]; failing: `0x${string}`[] }> => {
+        if (toks.length === 0) return { working: [], failing: [] };
+        if (await simulateBatch(toks)) return { working: toks, failing: [] };
+        if (toks.length === 1) return { working: [], failing: toks };
+        const mid = Math.floor(toks.length / 2);
+        const left = await isolate(toks.slice(0, mid));
+        const right = await isolate(toks.slice(mid));
+        return {
+          working: [...left.working, ...right.working],
+          failing: [...left.failing, ...right.failing],
+        };
+      };
+
+      showToast(`Validating ${allTokens.length} reward token(s)...`, "info");
+
+      // Isolate within each contract-allowed chunk of 50.
+      const working: `0x${string}`[] = [];
+      const failing: `0x${string}`[] = [];
+      for (let i = 0; i < allTokens.length; i += CONTRACT_MAX) {
+        const slice = allTokens.slice(i, i + CONTRACT_MAX);
+        const r = await isolate(slice);
+        working.push(...r.working);
+        failing.push(...r.failing);
+      }
+
+      if (failing.length > 0) {
+        console.warn("LIQ claim: skipping tokens that revert on claim:", failing);
+        showToast(
+          `Skipping ${failing.length} token(s) whose transfer reverts (see console for addresses)`,
+          "warning"
+        );
+      }
+
+      if (working.length === 0) {
+        showToast("None of your reward tokens are claimable right now", "error");
+        return;
+      }
+
+      showToast(`Claiming ${working.length} reward token(s)...`, "info");
+
+      // Send the working tokens, respecting the contract's per-call cap.
+      let claimed = 0;
+      const totalBatches = Math.ceil(working.length / CONTRACT_MAX);
+      for (let i = 0; i < working.length; i += CONTRACT_MAX) {
+        const slice = working.slice(i, i + CONTRACT_MAX);
+        const batchIdx = Math.floor(i / CONTRACT_MAX) + 1;
+        showToast(`Claiming batch ${batchIdx} of ${totalBatches}...`, "info");
+
         const hash = await writeContractAsync({
           address: liqStakingAddr as `0x${string}`,
           abi: ABIS.LIQStakingDistributor,
@@ -564,20 +651,84 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
           args: [slice],
           gas: 8_000_000n,
         });
-        showToast(`Claiming chunk ${i / MAX + 1} of ${Math.ceil(claimTokens.length / MAX)}...`, "info");
-        await publicClient?.waitForTransactionReceipt({ hash });
+
+        // waitForTransactionReceipt does NOT throw on reverted txs — it just
+        // returns status: "reverted". We must check it ourselves.
+        const receipt = await publicClient.waitForTransactionReceipt({ hash });
+        if (receipt.status !== "success") {
+          throw new Error(`Claim tx reverted on-chain: ${hash}`);
+        }
+        claimed += slice.length;
       }
-  
-      showToast("Rewards claimed!", "success");
-  
-      // Refresh state
+
+      showToast(`Claimed ${claimed} reward token(s)!`, "success");
+
+      // Refresh from chain — re-fetch pending rewards instead of blanking them,
+      // so any leftover poison tokens remain visible (and any new accruals show up).
       await Promise.all([loadStakingStats(), loadBalances()]);
-      setBaseRows([]);
+      setRewardsRefreshKey((k) => k + 1);
     } catch (e: any) {
       console.error("Claim error:", e);
-      showToast(e.message || "Claim failed", "error");
+      showToast(e?.shortMessage || e?.message || "Claim failed", "error");
     } finally {
       setLoading(false);
+      setTransactionLoading(txId, false);
+    }
+  };
+
+  // Claim a single reward token. Useful for picking through the list when the
+  // batch claim has a poison token, or when the user just wants one specific asset.
+  const handleClaimOne = async (token: string, symbol: string) => {
+    if (!connected || !address) return;
+    const tokenLc = token.toLowerCase();
+    const txId = `claimLiqRewardOne:${tokenLc}`;
+    setTransactionLoading(txId, true);
+    setClaimingAddr(tokenLc);
+
+    try {
+      const liqStakingAddr = getAddr("LIQStakingDistributor");
+      if (!liqStakingAddr) throw new Error("LIQ Staking contract not initialized");
+      if (!publicClient) throw new Error("RPC client not available");
+
+      const tokenArg = token as `0x${string}`;
+
+      // Pre-simulate so we surface the revert reason before asking the wallet to sign.
+      try {
+        await publicClient.simulateContract({
+          account: address,
+          address: liqStakingAddr as `0x${string}`,
+          abi: ABIS.LIQStakingDistributor,
+          functionName: "claimReward",
+          args: [tokenArg],
+        });
+      } catch (simErr: any) {
+        const reason = simErr?.shortMessage || simErr?.message || "Simulation reverted";
+        throw new Error(`${symbol} not claimable: ${reason}`);
+      }
+
+      showToast(`Claiming ${symbol}...`, "info");
+      const hash = await writeContractAsync({
+        address: liqStakingAddr as `0x${string}`,
+        abi: ABIS.LIQStakingDistributor,
+        functionName: "claimReward",
+        args: [tokenArg],
+        gas: 1_000_000n,
+      });
+
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") {
+        throw new Error(`Claim of ${symbol} reverted: ${hash}`);
+      }
+
+      showToast(`Claimed ${symbol}!`, "success");
+
+      await Promise.all([loadStakingStats(), loadBalances()]);
+      setRewardsRefreshKey((k) => k + 1);
+    } catch (e: any) {
+      console.error("Single-token claim error:", e);
+      showToast(e?.shortMessage || e?.message || "Claim failed", "error");
+    } finally {
+      setClaimingAddr(null);
       setTransactionLoading(txId, false);
     }
   };
@@ -769,21 +920,25 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
           {rewardsLoading || pricesLoading ? (
             <div className="mt-6 p-0 rounded-lg border border-slate-700/40 overflow-hidden">
               <div className="grid grid-cols-12 bg-slate-900/70 px-4 py-3 text-slate-400 text-xs">
-                <div className="col-span-5">Token</div>
-                <div className="col-span-4 text-right">Amount</div>
-                <div className="col-span-3 text-right">Value</div>
+                <div className="col-span-4">Token</div>
+                <div className="col-span-3 text-right">Amount</div>
+                <div className="col-span-2 text-right">Value</div>
+                <div className="col-span-3 text-right">Action</div>
               </div>
               {[...Array(3)].map((_, i) => (
                 <div key={i} className="grid grid-cols-12 items-center px-4 py-3 border-t border-slate-800/50">
-                  <div className="col-span-5">
+                  <div className="col-span-4">
                     <div className="h-4 w-24 bg-slate-700/50 rounded animate-pulse mb-1" />
                     <div className="h-3 w-40 bg-slate-800/50 rounded animate-pulse" />
                   </div>
-                  <div className="col-span-4 text-right">
+                  <div className="col-span-3 text-right">
                     <div className="h-4 w-24 bg-slate-700/50 rounded ml-auto animate-pulse" />
                   </div>
-                  <div className="col-span-3 text-right">
+                  <div className="col-span-2 text-right">
                     <div className="h-4 w-20 bg-slate-700/50 rounded ml-auto animate-pulse" />
+                  </div>
+                  <div className="col-span-3 text-right">
+                    <div className="h-8 w-20 bg-slate-700/50 rounded ml-auto animate-pulse" />
                   </div>
                 </div>
               ))}
@@ -792,27 +947,50 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
             rows.length > 0 && (
               <div className="mt-6 p-0 rounded-lg border border-slate-700/40 overflow-hidden">
                 <div className="grid grid-cols-12 bg-slate-900/70 px-4 py-3 text-slate-400 text-xs">
-                  <div className="col-span-5">Token</div>
-                  <div className="col-span-4 text-right">Amount</div>
-                  <div className="col-span-3 text-right">Value</div>
+                  <div className="col-span-4">Token</div>
+                  <div className="col-span-3 text-right">Amount</div>
+                  <div className="col-span-2 text-right">Value</div>
+                  <div className="col-span-3 text-right">Action</div>
                 </div>
-                {rows.map((r, i) => (
-                  <div
-                    key={r.address + i}
-                    className="grid grid-cols-12 items-center px-4 py-3 border-t border-slate-800/50"
-                  >
-                    <div className="col-span-5">
-                      <div className="text-white font-medium">{r.symbol}</div>
-                      <div className="text-[11px] text-slate-400 break-all">{r.address}</div>
+                {rows.map((r, i) => {
+                  const isThisClaiming = claimingAddr === r.address;
+                  const rowDisabled = loading || rewardsLoading || pricesLoading || claimingAddr !== null;
+                  return (
+                    <div
+                      key={r.address + i}
+                      className="grid grid-cols-12 items-center px-4 py-3 border-t border-slate-800/50"
+                    >
+                      <div className="col-span-4">
+                        <div className="text-white font-medium">{r.symbol}</div>
+                        <div className="text-[11px] text-slate-400 break-all">{r.address}</div>
+                      </div>
+                      <div className="col-span-3 text-right text-white">
+                        {formatUnits(r.amountBN, r.decimals)}
+                      </div>
+                      <div className="col-span-2 text-right text-emerald-400">
+                        {r.usd ? `$${r.usd.toLocaleString(undefined, { maximumFractionDigits: 6 })}` : "$0"}
+                      </div>
+                      <div className="col-span-3 text-right">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="border-slate-600"
+                          disabled={rowDisabled || r.amountBN === 0n}
+                          onClick={() => handleClaimOne(r.address, r.symbol)}
+                        >
+                          {isThisClaiming ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                              Claiming
+                            </>
+                          ) : (
+                            "Claim"
+                          )}
+                        </Button>
+                      </div>
                     </div>
-                    <div className="col-span-4 text-right text-white">
-                      {formatUnits(r.amountBN, r.decimals)}
-                    </div>
-                    <div className="col-span-3 text-right text-emerald-400">
-                      {r.usd ? `$${r.usd.toLocaleString(undefined, { maximumFractionDigits: 6 })}` : "$0"}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )
           )}
@@ -826,7 +1004,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
                 </div>
                 <Button
                   onClick={handleClaimRewards}
-                  disabled={loading || rewardsLoading || pricesLoading}
+                  disabled={loading || rewardsLoading || pricesLoading || claimingAddr !== null}
                   className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700"
                 >
                   {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Gift className="w-4 h-4 mr-2" />}
