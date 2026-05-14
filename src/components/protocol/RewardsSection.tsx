@@ -120,6 +120,7 @@ const AERODROME_ABI = [
 
 const REWARDS_JSON_URL = process.env.NEXT_PUBLIC_REWARDS_JSON_URL || "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/estimated_rewards_usd.json";
 const STAKER_REWARDS_JSON_URL = process.env.NEXT_PUBLIC_STAKER_REWARDS_JSON_URL || "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/staker_rewards.json";
+const EPOCHS_JSON_URL = process.env.NEXT_PUBLIC_EPOCHS_JSON_URL || "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/epochs.json";
 const SPAM_BLOCKLIST_URL = process.env.NEXT_PUBLIC_SPAM_BLOCKLIST_URL || 
   "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/spam_tokens_base.json";
 
@@ -696,6 +697,137 @@ async function fetchRewardsFromJson(userAddress: string): Promise<JsonRewardItem
 }
 
 // --------------------------------------------------------------------------
+// 3b. DIRECT ON-CHAIN REWARDS QUERY (primary path)
+// --------------------------------------------------------------------------
+interface EpochsJson {
+  epochs: Record<string, { tokens: string[] }>;
+  distributorAddress?: string;
+  currentEpoch?: number;
+}
+
+async function fetchEpochsJson(): Promise<EpochsJson | null> {
+  try {
+    const res = await fetch(EPOCHS_JSON_URL, { cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/** Build (token, epoch) pairs from epochs.json, query previewClaim on-chain, return non-zero results. */
+async function fetchRewardsFromChain(
+  userAddress: string,
+  distributor: string,
+  publicClient: any,
+): Promise<JsonRewardItem[] | null> {
+  const t0 = performance.now();
+
+  const epochsData = await fetchEpochsJson();
+  if (!epochsData?.epochs) {
+    console.warn("[on-chain] Failed to fetch epochs.json — skipping on-chain path");
+    return null;
+  }
+
+  const epochCount = Object.keys(epochsData.epochs).length;
+
+  // Build all (token, epoch) combos
+  const combos: { token: string; epoch: number }[] = [];
+  for (const [epochId, data] of Object.entries(epochsData.epochs)) {
+    for (const token of data.tokens || []) {
+      combos.push({ token: token.toLowerCase(), epoch: Number(epochId) });
+    }
+  }
+
+  if (combos.length === 0) {
+    console.warn("[on-chain] No (token, epoch) combos found in epochs.json");
+    return null;
+  }
+
+  console.log(`[on-chain] ${epochCount} epochs, ${combos.length} (token × epoch) combos — querying previewClaim...`);
+
+  // Multicall: previewClaim for each combo
+  const calls = combos.map(c => ({
+    address: distributor as Address,
+    abi: PREVIEW_ABI,
+    functionName: 'previewClaim' as const,
+    args: [userAddress as Address, c.token as Address, BigInt(c.epoch)],
+  }));
+
+  // Batch in chunks to avoid oversized multicalls
+  const BATCH_SIZE = 200;
+  const allResults: (bigint | null)[] = [];
+  const numBatches = Math.ceil(calls.length / BATCH_SIZE);
+  for (let i = 0; i < calls.length; i += BATCH_SIZE) {
+    const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+    const batch = calls.slice(i, i + BATCH_SIZE);
+    const res = await publicClient.multicall({ contracts: batch });
+    let batchFails = 0;
+    for (const r of res) {
+      if (r.status === 'success') {
+        allResults.push(r.result as bigint);
+      } else {
+        allResults.push(null);
+        batchFails++;
+      }
+    }
+    if (batchFails > 0) {
+      console.warn(`[on-chain] Batch ${batchNum}/${numBatches}: ${batchFails}/${batch.length} calls failed`);
+    }
+  }
+
+  const t1 = performance.now();
+
+  // Collect unique token addresses with non-zero claims for enrichment
+  const nonZeroTokens = new Set<string>();
+  const nonZeroItems: { token: string; epoch: number; amount: bigint }[] = [];
+  for (let i = 0; i < combos.length; i++) {
+    const amount = allResults[i];
+    if (amount && amount > 0n) {
+      nonZeroTokens.add(combos[i].token);
+      nonZeroItems.push({ ...combos[i], amount });
+    }
+  }
+
+  console.log(`[on-chain] previewClaim done in ${((t1 - t0) / 1000).toFixed(1)}s — ${nonZeroItems.length} non-zero items across ${nonZeroTokens.size} tokens`);
+
+  if (nonZeroItems.length === 0) return [];
+
+  // Enrich: fetch symbol + decimals for non-zero tokens via multicall
+  const tokenList = Array.from(nonZeroTokens);
+  const enrichCalls = tokenList.flatMap(t => [
+    { address: t as Address, abi: ERC20_ABI, functionName: 'symbol' as const },
+    { address: t as Address, abi: ERC20_ABI, functionName: 'decimals' as const },
+  ]);
+  const enrichRes = await publicClient.multicall({ contracts: enrichCalls });
+  const tokenMeta: Record<string, { symbol: string; decimals: number }> = {};
+  for (let i = 0; i < tokenList.length; i++) {
+    const symRes = enrichRes[2 * i];
+    const decRes = enrichRes[2 * i + 1];
+    tokenMeta[tokenList[i]] = {
+      symbol: symRes.status === 'success' ? (symRes.result as string) : 'TOKEN',
+      decimals: decRes.status === 'success' ? Number(decRes.result) : 18,
+    };
+  }
+
+  const t2 = performance.now();
+  console.log(`[on-chain] Enriched ${tokenList.length} tokens in ${((t2 - t1) / 1000).toFixed(1)}s — total: ${((t2 - t0) / 1000).toFixed(1)}s`);
+
+  // Build JsonRewardItem[] (same shape as JSON fallback)
+  return nonZeroItems.map(item => {
+    const meta = tokenMeta[item.token] || { symbol: 'TOKEN', decimals: 18 };
+    return {
+      token: item.token,
+      symbol: meta.symbol,
+      decimals: meta.decimals,
+      amount: item.amount.toString(),
+      epoch: item.epoch,
+      priceUsd: 0, // live prices fetched separately via fetchPricesForAddrs
+    };
+  });
+}
+
+// --------------------------------------------------------------------------
 // 4. COMPONENT
 // --------------------------------------------------------------------------
 export default function RewardsSection({ showToast }: RewardsSectionProps) {
@@ -959,22 +1091,42 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
 
     setIsRefreshing(true);
     setRewardsLoading(true);
-    
-    try {
-      console.log("🔄 Refreshing rewards from JSON...");
 
-      const jsonRewards = await fetchRewardsFromJson(account);
-      
+    try {
+      // Primary path: query contract directly via epochs.json index
+      let jsonRewards: JsonRewardItem[] | null = null;
+      let rewardsSource = 'none';
+      try {
+        console.log("[rewards] Trying primary path: on-chain via epochs.json...");
+        jsonRewards = await fetchRewardsFromChain(account, distAddr, publicClient);
+        if (jsonRewards) {
+          rewardsSource = 'on-chain';
+          console.log(`[rewards] PRIMARY PATH (on-chain) returned ${jsonRewards.length} items`);
+        }
+      } catch (e) {
+        console.warn("[rewards] On-chain query failed, falling back to JSON:", e);
+      }
+
+      // Fallback: use pre-computed JSON
+      if (!jsonRewards) {
+        console.log("[rewards] Using FALLBACK path: staker_rewards.json...");
+        jsonRewards = await fetchRewardsFromJson(account);
+        rewardsSource = jsonRewards.length > 0 ? 'json-fallback' : 'none';
+        console.log(`[rewards] FALLBACK (JSON) returned ${jsonRewards.length} items`);
+      }
+
       if (jsonRewards.length === 0) {
-        console.warn("No pending rewards found in JSON");
+        console.warn(`[rewards] No pending rewards found (source: ${rewardsSource})`);
         setPending([]);
         return;
       }
 
+      console.log(`[rewards] Processing ${jsonRewards.length} reward items (source: ${rewardsSource})`);
+
       // Enrich tokens on-chain for correct decimals
       const tokenAddresses = jsonRewards.map(j => j.token);
       const enrichedData = await enrichTokens(tokenAddresses);
-      
+
       const decimalMap: Record<string, number> = {};
       enrichedData.forEach(t => {
         decimalMap[t.address.toLowerCase()] = t.decimals;
@@ -986,14 +1138,14 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           address: item.token.toLowerCase(),
           symbol: item.symbol,
           decimals: realDecimals,
-          epoch: BigInt(item.epoch), 
+          epoch: BigInt(item.epoch),
           priceUsd: item.priceUsd
         };
       });
 
       const { results } = await smartPreflight(
-        tokensToCheck, 
-        account as Address, 
+        tokensToCheck,
+        account as Address,
         distAddr as Address
       );
 
@@ -1008,27 +1160,27 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           walletBN: res.wallet,
           amountBN: res.claimable,
           amount: (Number(res.claimable) / 10 ** res.decimals).toString(),
-          epoch: res.epoch, 
-          priceUsd: res.priceUsd 
+          epoch: res.epoch,
+          priceUsd: res.priceUsd
         };
       }).filter(Boolean);
 
       console.log(`✅ Found ${validated.length} claimable tokens`);
       setPending(validated);
-      
+
       if (validated.length > 0) {
         fetchPricesForAddrs(validated.map((p:any) => p.address), chainId || 8453)
           .then(map => setPriceByAddr(prev => ({...prev, ...map})));
       }
-      
+
       showToast("Rewards refreshed", "info");
 
-    } catch(e) { 
-      console.error(e); 
+    } catch(e) {
+      console.error(e);
       showToast("Failed to refresh rewards", "error");
-      setPending([]); 
-    } finally { 
-      setRewardsLoading(false); 
+      setPending([]);
+    } finally {
+      setRewardsLoading(false);
       setIsRefreshing(false);
     }
   }, [account, publicClient, distAddr, showToast, chainId]);
