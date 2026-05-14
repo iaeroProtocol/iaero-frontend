@@ -115,6 +115,11 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
     timeUntilUnlock: 0,
   });
   const [liqBalance, setLiqBalance] = useState("0");
+  // Lossless bigint mirror of liqBalance — used by MAX and by stake guards so we
+  // never send an amount larger than the on-chain balance due to Number() precision.
+  const [liqBalanceBN, setLiqBalanceBN] = useState<bigint>(0n);
+  // Same lossless mirror for the user's staked balance, used by unstake MAX.
+  const [userStakedBN, setUserStakedBN] = useState<bigint>(0n);
   const [allowance, setAllowance] = useState("0");
   const [needsApproval, setNeedsApproval] = useState(false);
 
@@ -173,10 +178,13 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
 
       const liqApr = await calculateLiqStakingAPR();
 
+      const userStakedBigInt = (userBalance as bigint) ?? 0n;
+      setUserStakedBN(userStakedBigInt);
       setStakingStats({
-        totalStaked: safeFormatEther(totalSupply as bigint),
+        totalStaked: formatUnits((totalSupply as bigint) ?? 0n, 18),
         apy: Number.isFinite(liqApr) ? liqApr : 0,
-        userStaked: safeFormatEther(userBalance as bigint),
+        // Lossless string from bigint — safeFormatEther's Number() loses precision past ~15 digits.
+        userStaked: formatUnits(userStakedBigInt, 18),
         canUnstake,
         timeUntilUnlock,
       });
@@ -209,8 +217,12 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
         }),
       ]);
 
-      setLiqBalance(safeFormatEther(bal as bigint));
-      setAllowance(safeFormatEther(allow as bigint));
+      const balBN = (bal as bigint) ?? 0n;
+      setLiqBalanceBN(balBN);
+      // Lossless formatting so MAX uses the exact on-chain balance string,
+      // avoiding the Number() precision overshoot that would make stake() revert.
+      setLiqBalance(formatUnits(balBN, 18));
+      setAllowance(formatUnits((allow as bigint) ?? 0n, 18));
     } catch (e) {
       console.error("Error loading LIQ balance:", e);
     }
@@ -482,14 +494,49 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
     const txId = "stakeLiq";
     setTransactionLoading(txId, true);
     setLoading(true);
-    
+
     try {
       const liqStakingAddr = getAddr('LIQStakingDistributor');
       if (!liqStakingAddr) throw new Error("LIQ Staking contract not initialized");
+      if (!publicClient) throw new Error("RPC client not available");
 
       if (needsApproval) await handleApprove();
 
       const amount = parseTokenAmount(stakeAmount);
+
+      // Hard cap: never send more than we know the on-chain balance to be.
+      // Guards against the Number()-precision overshoot bug *and* any case where
+      // the user manually typed slightly more than they own.
+      if (amount > liqBalanceBN) {
+        throw new Error(
+          `Amount (${formatUnits(amount, 18)}) exceeds your LIQ balance (${formatUnits(liqBalanceBN, 18)})`
+        );
+      }
+
+      // Pre-simulate so reverts surface their real cause before the wallet prompt.
+      // stake() runs _harvest() first, which iterates every reward token — if any
+      // one is short (e.g. distributor's superOETHb shortfall), the whole call
+      // reverts with the generic "Transfer amount exceeds balance" from that ERC20.
+      try {
+        await publicClient.simulateContract({
+          account: address,
+          address: liqStakingAddr,
+          abi: ABIS.LIQStakingDistributor,
+          functionName: 'stake',
+          args: [amount],
+        });
+      } catch (simErr: any) {
+        const reason = simErr?.shortMessage || simErr?.message || "Stake simulation reverted";
+        if (/Transfer amount exceeds balance/i.test(reason)) {
+          // Already proved amount <= liqBalanceBN above, so the LIQ pull can't be
+          // the cause — must be a poison reward token in the auto-harvest path.
+          throw new Error(
+            "Stake blocked: the reward distributor is short on one of its reward tokens (the auto-harvest reverts). Try claiming individually from the rewards table to identify it, then contact the protocol admin."
+          );
+        }
+        throw new Error(reason);
+      }
+
       const hash = await writeContractAsync({
         address: liqStakingAddr,
         abi: ABIS.LIQStakingDistributor,
@@ -499,8 +546,8 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       });
 
       showToast("Staking LIQ...", "info");
-      const receipt = await publicClient?.waitForTransactionReceipt({ hash });
-      if (receipt && receipt.status !== "success") throw new Error(`Stake reverted: ${hash}`);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") throw new Error(`Stake reverted: ${hash}`);
       showToast(`Staked ${stakeAmount} LIQ!`, "success");
       
       setStakeAmount("");
@@ -519,12 +566,44 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
     const txId = "unstakeLiq";
     setTransactionLoading(txId, true);
     setLoading(true);
-    
+
     try {
       const liqStakingAddr = getAddr('LIQStakingDistributor');
       if (!liqStakingAddr) throw new Error("LIQ Staking contract not initialized");
+      if (!publicClient) throw new Error("RPC client not available");
 
       const amount = parseTokenAmount(unstakeAmount);
+
+      // Hard cap against precision overshoot / over-typing.
+      if (amount > userStakedBN) {
+        throw new Error(
+          `Amount (${formatUnits(amount, 18)}) exceeds your staked LIQ (${formatUnits(userStakedBN, 18)})`
+        );
+      }
+
+      // Pre-simulate. unstake() also calls _harvest() first, so a poison reward
+      // token reverts the entire call — same as stake().
+      try {
+        await publicClient.simulateContract({
+          account: address,
+          address: liqStakingAddr,
+          abi: ABIS.LIQStakingDistributor,
+          functionName: 'unstake',
+          args: [amount],
+        });
+      } catch (simErr: any) {
+        const reason = simErr?.shortMessage || simErr?.message || "Unstake simulation reverted";
+        if (/Transfer amount exceeds balance/i.test(reason)) {
+          throw new Error(
+            "Unstake blocked: the reward distributor is short on one of its reward tokens (the auto-harvest reverts). Try claiming individually from the rewards table to identify it, then contact the protocol admin. (You can still use emergencyWithdraw if the contract is paused.)"
+          );
+        }
+        if (/Still locked/i.test(reason)) {
+          throw new Error("Your LIQ is still in its 7-day lock period.");
+        }
+        throw new Error(reason);
+      }
+
       const hash = await writeContractAsync({
         address: liqStakingAddr,
         abi: ABIS.LIQStakingDistributor,
@@ -534,8 +613,8 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       });
 
       showToast("Unstaking LIQ...", "info");
-      const receipt = await publicClient?.waitForTransactionReceipt({ hash });
-      if (receipt && receipt.status !== "success") throw new Error(`Unstake reverted: ${hash}`);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") throw new Error(`Unstake reverted: ${hash}`);
       showToast(`Unstaked ${unstakeAmount} LIQ!`, "success");
       
       setUnstakeAmount("");
