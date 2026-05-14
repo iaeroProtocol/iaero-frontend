@@ -66,7 +66,9 @@ async function fetchPricesForAddrs(addrs: string[], chainId = 8453): Promise<Rec
 
 interface StakingStats {
   totalStaked: string;
-  apy: number;
+  // null while prices/JSON haven't loaded yet — UI shows "—" instead of a
+  // misleading number computed from mock prices.
+  apy: number | null;
   userStaked: string;
   canUnstake: boolean;
   timeUntilUnlock: number;
@@ -86,7 +88,11 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   const chainId = useChainId();
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
-  const { prices } = usePrices();
+  // pricesLastUpdate flips from null → timestamp once real prices arrive; we
+  // re-trigger loadStakingStats on that transition so the APR display refreshes
+  // immediately instead of waiting for the next 30s interval (or a wallet
+  // switch) to kick the stale closure out.
+  const { prices, lastUpdate: pricesLastUpdate } = usePrices();
   const { calculateLiqStakingAPR } = useStaking();
 
 
@@ -109,7 +115,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   const [loading, setLoading] = useState(false);
   const [stakingStats, setStakingStats] = useState<StakingStats>({
     totalStaked: "0",
-    apy: 0,
+    apy: null,
     userStaked: "0",
     canUnstake: false,
     timeUntilUnlock: 0,
@@ -181,9 +187,10 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       const userStakedBigInt = (userBalance as bigint) ?? 0n;
       setUserStakedBN(userStakedBigInt);
       setStakingStats({
-        totalStaked: formatUnits((totalSupply as bigint) ?? 0n, 18),
-        apy: Number.isFinite(liqApr) ? liqApr : 0,
         // Lossless string from bigint — safeFormatEther's Number() loses precision past ~15 digits.
+        totalStaked: formatUnits((totalSupply as bigint) ?? 0n, 18),
+        // null propagates through to UI as "—" instead of fabricating a number from mock prices.
+        apy: liqApr != null && Number.isFinite(liqApr) ? liqApr : null,
         userStaked: formatUnits(userStakedBigInt, 18),
         canUnstake,
         timeUntilUnlock,
@@ -246,7 +253,13 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       }, 30000);
       return () => clearInterval(t);
     }
-  }, [connected, networkSupported, address]);
+    // pricesLastUpdate is intentionally in deps: when PriceContext flips from
+    // mocks to real prices (null → timestamp), this effect re-fires and the
+    // new interval/loadStakingStats closure captures the real prices. Without
+    // this, the interval keeps recomputing APR against the mock LIQ price and
+    // shows a stable-looking 2.7% until a wallet/chain change re-fires the
+    // effect by other means.
+  }, [connected, networkSupported, address, pricesLastUpdate]);
 
   // Load pending rewards
   useEffect(() => {
@@ -843,7 +856,9 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-slate-400 text-sm">Current APY</p>
-                <p className="text-2xl font-bold text-emerald-400">{stakingStats.apy.toFixed(1)}%</p>
+                <p className="text-2xl font-bold text-emerald-400">
+                  {stakingStats.apy == null ? "—" : `${stakingStats.apy.toFixed(1)}%`}
+                </p>
               </div>
               <TrendingUp className="w-8 h-8 text-emerald-400" />
             </div>

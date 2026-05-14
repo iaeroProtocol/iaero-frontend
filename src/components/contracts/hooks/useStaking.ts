@@ -97,7 +97,10 @@ export const useStaking = () => {
   const chainId = useChainId();
   const publicClient = usePublicClient();
   const { loadBalances, loadAllowances, loadPendingRewards, setTransactionLoading } = useProtocol();
-  const { prices } = usePrices();
+  // `lastUpdate` is null until PriceContext has fetched real prices once. Until
+  // then, `prices` holds MOCKS (LIQ=$0.15 etc.) — using them silently produces
+  // a stable-looking but wrong APR display (the classic "shows 2.7% by default").
+  const { prices, lastUpdate: pricesLastUpdate } = usePrices();
 
   const [loading, setLoading] = useState(false);
   
@@ -622,15 +625,23 @@ export const useStaking = () => {
     }
   }, [publicClient, getAddr, prices]);
 
-  const calculateLiqStakingAPR = useCallback(async (): Promise<number> => {
+  const calculateLiqStakingAPR = useCallback(async (): Promise<number | null> => {
     try {
       const liqStakingAddr = getAddr('LIQStakingDistributor') as `0x${string}` | undefined;
-      if (!liqStakingAddr || !publicClient) return DEFAULT_STAKING_APR;
-  
-      // (1) LIQ gets 8% of the *estimated* total protocol weekly USD
+      if (!liqStakingAddr || !publicClient) return null;
+
+      // Bail until PriceContext has real prices. Using the mock LIQ price ($0.15)
+      // before the first fetch resolves produces a stable-looking 2.7% APR that
+      // overrides itself only after a wallet/chain change kicks the consumer's
+      // useEffect — the source of the "shows 2.7% for ages" bug.
+      if (pricesLastUpdate == null) return null;
+
+      // (1) LIQ gets 8% of the *estimated* total protocol weekly USD.
+      // (10% routed to TreasuryDistributor on-chain, of which 80% reaches LIQ
+      //  stakers and 20% goes to the treasury wallet — net 8%.)
       const estimatedWeeklyUSD_1e18 = await fetchEstimatedWeeklyUSD();
-      const liqWeeklyUSD_1e18 = (estimatedWeeklyUSD_1e18 * 800n) / 10000n; // 0.08  
-  
+      const liqWeeklyUSD_1e18 = (estimatedWeeklyUSD_1e18 * 800n) / 10000n; // 0.08
+
       // (2) Total LIQ staked (1e18)
       const totalLiqStaked = await publicClient.readContract({
         address: liqStakingAddr,
@@ -638,26 +649,28 @@ export const useStaking = () => {
         functionName: 'totalLIQStaked',
       }) as bigint;
       if (!totalLiqStaked || totalLiqStaked === 0n) return 0;
-  
+
       // (3) LIQ price (USD)
       const liqUsd = Number(prices?.LIQ?.usd ?? 0);
-      if (!Number.isFinite(liqUsd) || liqUsd <= 0) return DEFAULT_STAKING_APR;
-  
+      if (!Number.isFinite(liqUsd) || liqUsd <= 0) return null;
+
       // (4) APR = (0.08 * weekly * 52) / (totalLIQStaked * price) * 100
       const liqUsd_1e18 = toE18(liqUsd);
       const annualUSD_1e18 = liqWeeklyUSD_1e18 * 52n;
       const tvlUSD_1e18 = (totalLiqStaked * liqUsd_1e18) / E18;
       if (tvlUSD_1e18 === 0n) return 0;
-  
+
       const aprRatio_1e18 = (annualUSD_1e18 * E18) / tvlUSD_1e18; // 1e18-scaled ratio
       const aprPct = (Number(aprRatio_1e18) / 1e18) * 100;        // keep fractional precision
       return aprPct;
 
     } catch (e) {
       console.error('calculateLiqStakingAPR failed:', e);
-      return DEFAULT_STAKING_APR;
+      // Return null (not DEFAULT_STAKING_APR) so the UI can render a "—" instead
+      // of fabricating a number that looks legitimate.
+      return null;
     }
-  }, [publicClient, getAddr, prices]);
+  }, [publicClient, getAddr, prices, pricesLastUpdate]);
 
 
 
