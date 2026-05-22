@@ -17,6 +17,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   Vault, ArrowDownToLine, ArrowUpFromLine, DollarSign,
   Loader2, RefreshCw, CheckCircle, Info, Gift,
+  ExternalLink, Clock, TrendingUp, Sparkles,
 } from 'lucide-react';
 
 import { useProtocol } from '@/components/contexts/ProtocolContext';
@@ -33,7 +34,9 @@ import { getContractAddress } from '../contracts/addresses';
 
 const MIN_DEPOSIT = ethers.parseUnits('0.01', 18);
 const WEEK = 7 * 24 * 60 * 60;
-const EPOCHS_LOOKBACK = 26; // scan last ~6 months of epochs
+const EPOCHS_LOOKBACK = 26;   // scan last ~6 months of epochs for pending/claimed lookups
+const APR_LOOKBACK   = 4;     // weeks used to compute APR
+const KEEPER_LAG_SECONDS = 3600;  // keeper runs ~1h after epoch boundary
 
 const VAULT_ABI = parseAbi([
   // user
@@ -47,7 +50,21 @@ const VAULT_ABI = parseAbi([
   'function previewUSDCMany(address user, uint256[] epochs) view returns (uint256[] amounts, uint256 total)',
   'function usdcForEpoch(uint256) view returns (uint256)',
   'function epochFinalized(uint256) view returns (bool)',
+  'function claimedByUser(address, uint256) view returns (uint256)',
+  'function supplySnapAtEpoch(uint256) view returns (uint256)',
 ]);
+
+const BASESCAN_BASE = 'https://basescan.org';
+
+function formatCountdown(secondsRemaining: number): string {
+  if (secondsRemaining <= 0) return 'soon';
+  const days = Math.floor(secondsRemaining / 86400);
+  const hours = Math.floor((secondsRemaining % 86400) / 3600);
+  const mins = Math.floor((secondsRemaining % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
 
 const ERC20_ABI = parseAbi([
   'function balanceOf(address) view returns (uint256)',
@@ -94,6 +111,10 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
   const [totalShares, setTotalShares] = useState<bigint>(0n);
   const [pendingUSDC, setPendingUSDC] = useState<bigint>(0n);
   const [pendingEpochs, setPendingEpochs] = useState<bigint[]>([]);
+  const [claimedAllTime, setClaimedAllTime] = useState<bigint>(0n);
+  const [vaultUsdcLast4w, setVaultUsdcLast4w] = useState<bigint>(0n);
+  const [aprPct, setAprPct] = useState<number | null>(null);
+  const [nowTs, setNowTs] = useState<number>(() => Math.floor(Date.now() / 1000));
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressStep, setProgressStep] = useState('');
@@ -132,7 +153,9 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
 
   /**
    * Scan the last EPOCHS_LOOKBACK weekly epochs and ask the vault how much
-   * USDC each one owes the user. Sums to the pending total.
+   * USDC each one owes the user (pending) + how much they've already claimed
+   * from each (all-time). Also pulls vault-wide USDC for last APR_LOOKBACK
+   * epochs so we can estimate APR.
    */
   const loadPendingUSDC = useCallback(async () => {
     if (!publicClient || !account || !VAULT_ADDR) return;
@@ -143,20 +166,41 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
       for (let i = 1; i <= EPOCHS_LOOKBACK; i++) {
         epochs.push(BigInt(currentEpoch - i * WEEK));
       }
+
+      // Pending USDC (per-epoch + total)
       const [amounts, total] = (await publicClient.readContract({
         address: VAULT_ADDR,
         abi: VAULT_ABI,
         functionName: 'previewUSDCMany',
         args: [account, epochs],
       })) as readonly [readonly bigint[], bigint];
-
       setPendingUSDC(total);
-      // Keep only epochs with a non-zero pending amount — those are the
-      // ones we'll pass to claimUSDC. Avoids spending gas iterating zeros.
       const nonZero = epochs.filter((_, i) => amounts[i] > 0n);
       setPendingEpochs(nonZero);
+
+      // All-time claimed: sum claimedByUser[user][epoch] across lookback
+      const claimedPromises = epochs.map(e =>
+        publicClient.readContract({
+          address: VAULT_ADDR, abi: VAULT_ABI,
+          functionName: 'claimedByUser', args: [account, e],
+        }) as Promise<bigint>
+      );
+      const claimedArr = await Promise.all(claimedPromises);
+      const claimedSum = claimedArr.reduce((s, x) => s + x, 0n);
+      setClaimedAllTime(claimedSum);
+
+      // Vault-wide USDC for last APR_LOOKBACK weeks (used for APR calc)
+      const aprEpochs = epochs.slice(0, APR_LOOKBACK);
+      const usdcPromises = aprEpochs.map(e =>
+        publicClient.readContract({
+          address: VAULT_ADDR, abi: VAULT_ABI,
+          functionName: 'usdcForEpoch', args: [e],
+        }) as Promise<bigint>
+      );
+      const usdcArr = await Promise.all(usdcPromises);
+      setVaultUsdcLast4w(usdcArr.reduce((s, x) => s + x, 0n));
     } catch (e) {
-      console.warn('[AutoVault] pending load failed', e);
+      console.warn('[AutoVault] pending/claimed/APR load failed', e);
     }
   }, [publicClient, account, VAULT_ADDR]);
 
@@ -174,6 +218,37 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
       refreshAll();
     }
   }, [connected, networkSupported, account, refreshAll]);
+
+  // 1-minute tick so the countdown stays fresh without rapid re-renders.
+  useEffect(() => {
+    const t = setInterval(() => setNowTs(Math.floor(Date.now() / 1000)), 60_000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Compute APR estimate whenever inputs change.
+  useEffect(() => {
+    if (totalShares === 0n || vaultUsdcLast4w === 0n) {
+      setAprPct(null);
+      return;
+    }
+    const iAeroPrice = getPriceInUSD('iAERO', 1) || 0;
+    if (iAeroPrice <= 0) { setAprPct(null); return; }
+
+    const tvlUsd  = Number(formatUnits(totalShares, 18)) * iAeroPrice;
+    const usdcUsd = Number(formatUnits(vaultUsdcLast4w, 6)); // USDC ≈ $1
+    if (tvlUsd <= 0) { setAprPct(null); return; }
+
+    const weeklyAvg = usdcUsd / APR_LOOKBACK;
+    const apr = (weeklyAvg / tvlUsd) * 52 * 100;
+    setAprPct(apr);
+  }, [totalShares, vaultUsdcLast4w, getPriceInUSD]);
+
+  // Next harvest = next Thursday 00:00 UTC + keeper lag.
+  const nextHarvestTs = useMemo(() => {
+    const currentEpoch = Math.floor(nowTs / WEEK) * WEEK;
+    return currentEpoch + WEEK + KEEPER_LAG_SECONDS;
+  }, [nowTs]);
+  const secondsToHarvest = Math.max(0, nextHarvestTs - nowTs);
 
   // Approval check for deposit
   useEffect(() => {
@@ -438,19 +513,35 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
             <CardTitle className="flex items-center gap-2 text-white">
               <Vault className="w-5 h-5 text-indigo-400" />
               Your Auto-Vault Position
+              <a
+                href={`${BASESCAN_BASE}/address/${VAULT_ADDR}`}
+                target="_blank" rel="noopener noreferrer"
+                title="Open vault contract on Basescan"
+                className="text-slate-500 hover:text-indigo-300 transition-colors"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
             </CardTitle>
-            <Button
-              variant="ghost" size="sm"
-              onClick={refreshAll}
-              disabled={isRefreshing}
-              className="text-slate-400 hover:text-white"
-            >
-              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-            </Button>
+            <div className="flex items-center gap-2">
+              {aprPct !== null && aprPct > 0 && (
+                <Badge className="border-indigo-500/30 text-indigo-300 bg-indigo-500/10">
+                  <TrendingUp className="w-3 h-3 mr-1" />
+                  ~{aprPct.toFixed(1)}% APR
+                </Badge>
+              )}
+              <Button
+                variant="ghost" size="sm"
+                onClick={refreshAll}
+                disabled={isRefreshing}
+                className="text-slate-400 hover:text-white"
+              >
+                <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="bg-slate-900/40 rounded-lg p-4">
               <div className="text-xs text-slate-400 uppercase tracking-wide mb-1">Your deposit</div>
               <div className="text-2xl font-bold text-white">
@@ -471,6 +562,13 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
               </div>
             </div>
             <div className="bg-slate-900/40 rounded-lg p-4">
+              <div className="text-xs text-slate-400 uppercase tracking-wide mb-1">Claimed all-time</div>
+              <div className="text-2xl font-bold text-white">
+                ${formatBigNumber(claimedAllTime, 6, 4)}
+              </div>
+              <div className="text-xs text-slate-500 mt-1">USDC</div>
+            </div>
+            <div className="bg-slate-900/40 rounded-lg p-4">
               <div className="text-xs text-slate-400 uppercase tracking-wide mb-1">Vault TVL</div>
               <div className="text-2xl font-bold text-white">
                 {formatBigNumber(totalShares, 18, 2)}
@@ -483,8 +581,44 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
               )}
             </div>
           </div>
+
+          {/* Next harvest countdown — informational, always shown */}
+          <div className="mt-4 flex items-center justify-between bg-slate-900/30 border border-slate-700/30 rounded-lg p-3 text-sm">
+            <div className="flex items-center gap-2 text-slate-300">
+              <Clock className="w-4 h-4 text-indigo-400" />
+              <span>Next keeper harvest</span>
+            </div>
+            <div className="text-right">
+              <div className="text-white font-medium">in {formatCountdown(secondsToHarvest)}</div>
+              <div className="text-xs text-slate-500">
+                {new Date(nextHarvestTs * 1000).toUTCString().replace('GMT', 'UTC')}
+              </div>
+            </div>
+          </div>
         </CardContent>
       </Card>
+
+      {/* ─── Empty-state explainer when user has no position ─── */}
+      {shares === 0n && (
+        <Card className="bg-gradient-to-br from-indigo-500/10 to-slate-900/40 border-indigo-500/20">
+          <CardContent className="p-6">
+            <div className="flex items-start gap-4">
+              <div className="rounded-full bg-indigo-500/20 p-3 shrink-0">
+                <Sparkles className="w-5 h-5 text-indigo-300" />
+              </div>
+              <div className="space-y-2">
+                <h3 className="text-white font-semibold">How it works</h3>
+                <ul className="text-sm text-slate-300 space-y-1 list-disc list-inside marker:text-indigo-400">
+                  <li>Deposit iAERO — it's auto-staked into the epoch distributor for you.</li>
+                  <li>Every Thursday, the keeper claims all your reward tokens and converts them to USDC.</li>
+                  <li>Your share of the USDC accrues per epoch — claim with one click whenever you want.</li>
+                  <li>Withdraw any time, no cooldown. Past USDC stays claimable even after withdrawing.</li>
+                </ul>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* ─── Deposit / Withdraw ─── */}
       <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50">
