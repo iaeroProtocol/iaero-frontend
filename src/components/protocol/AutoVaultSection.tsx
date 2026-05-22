@@ -459,6 +459,13 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
 
   return (
     <div className="space-y-6">
+      {/* ─── Brief intro (always shown) ─── */}
+      <div className="bg-slate-900/30 border border-slate-700/30 rounded-lg px-4 py-3 text-sm text-slate-300">
+        Deposit iAERO once. Every Thursday the keeper claims all your reward
+        tokens and converts them to USDC — claim with one click whenever you
+        want. Withdrawals are instant.
+      </div>
+
       {/* ─── Pending USDC banner ─── */}
       <AnimatePresence>
         {pendingUSDC > 0n && (
