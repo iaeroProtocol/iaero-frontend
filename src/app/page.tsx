@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
- Lock, Zap, Gift, Shield, Sparkles, TrendingUp, Coins, Banknote,
+ Lock, Zap, Gift, Shield, Sparkles, TrendingUp, Coins, Banknote, Vault,
  MessageCircle, Twitter, BookOpen
 } from 'lucide-react';
 
@@ -15,6 +15,7 @@ import LockSection from '@/components/protocol/LockSection';
 import StakeSection from '@/components/protocol/StakeSection';
 import LiqStaking from '@/components/protocol/LiqStaking';
 import RewardsSection from '@/components/protocol/RewardsSection';
+import AutoVaultSection from '@/components/protocol/AutoVaultSection';
 import ToastNotification from '@/components/protocol/ToastNotification';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -281,6 +282,12 @@ export default function IaeroProtocolApp() {
                 <span>LIQ</span>
               </div>
             </TabsTrigger>
+            <TabsTrigger value="auto-vault" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
+              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
+                <Vault className="w-4 h-4 mb-0.5 md:mb-0" />
+                <span>Auto-Vault</span>
+              </div>
+            </TabsTrigger>
           </TabsList>
 
              <TabsContent value="lock">
@@ -297,6 +304,10 @@ export default function IaeroProtocolApp() {
 
              <TabsContent value="stake-liq">
                <LiqStaking showToast={showToast} formatNumber={formatNumber} />
+             </TabsContent>
+
+             <TabsContent value="auto-vault">
+               <AutoVaultSection showToast={showToast} formatNumber={formatNumber} />
              </TabsContent>
            </Tabs>
          </CardContent>

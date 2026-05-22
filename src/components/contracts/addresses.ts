@@ -21,8 +21,9 @@ export type ContractName =
   | "VeAERO"
   | "MockVoter"
   | "treasury"
-  | "stiAERO"                  
+  | "stiAERO"
   | "EpochStakingDistributor"
+  | "AutoUSDCVault"
   | "WETH"
   | "USDC"
   | "USDbC" 
@@ -69,6 +70,7 @@ export const CONTRACTS: Record<SupportedChainId, NetworkAddresses> = {
     TreasuryDistributor: "0xD36b84EeFd1F481a737595C8212c43A9cD76C8e0",
     stiAERO: "0x72C135B8eEBC57A3823f0920233e1A90FF4D683D",
     EpochStakingDistributor: "0x781A80fA817b5a146C440F03EF8643f4aca6588A",
+    AutoUSDCVault: "0xFE5c929677D97723dc822C86c93c7e2D1B59c774",
     WETH: "0x4200000000000000000000000000000000000006",
     USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     USDbC: '0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA',
