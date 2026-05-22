@@ -2211,62 +2211,82 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       }
       
       // ═══════════════════════════════════════════════════════════════
-      // STEP 2: ALWAYS re-fetch quotes before execution
-      // Quotes from preview modal can be stale - always get fresh data
+      // STEP 2: Quote refresh — DEFERRED to per-batch in STEP 3 below.
+      // (Previously refreshed ALL quotes up-front, which made later batches'
+      // quotes stale by the time their broadcast tx executed. Now each batch
+      // refreshes its own quotes immediately before simulating + executing.)
       // ═══════════════════════════════════════════════════════════════
-      setProgressStep('Refreshing quotes before execution...');
-      console.log(`\n🔄 Re-fetching ${quotesToExecute.length} quotes (ensuring fresh data)...`);
       if (approvalsNeeded > 0) {
-        console.log(`   (${approvalsNeeded} approvals were done, quotes likely stale)`);
+        console.log(`\n(${approvalsNeeded} approvals were done; per-batch JIT refresh below will get fresh quotes)`);
       }
-      
-      const freshQuotes: typeof executableQuotes = [];
-      const totalRefreshBatches = Math.ceil(quotesToExecute.length / QUOTE_BATCH_SIZE);
-      
-      for (let batchStart = 0; batchStart < quotesToExecute.length; batchStart += QUOTE_BATCH_SIZE) {
-        const batch = quotesToExecute.slice(batchStart, batchStart + QUOTE_BATCH_SIZE);
-        const batchNum = Math.floor(batchStart / QUOTE_BATCH_SIZE) + 1;
-        
-        setProgressStep(`Refreshing quotes (${batchNum}/${totalRefreshBatches})...`);
-        
-        const quotePromises = batch.map(async (sq) => {
-          try {
-            const freshQuote = await fetch0xQuote(
-              chainId || 8453,
-              sq.token.address,
-              targetTokenAddr,
-              sq.token.walletBN,
-              SWAPPER_ADDRESS
-            );
-            
-            if (!freshQuote?.transaction?.to || !freshQuote?.transaction?.data) {
-              throw new Error('Invalid quote response');
+
+      // Address-indexed map of quotes — initially preview-time, updated in
+      // place as each batch is refreshed. Used for trade-result + error lookups.
+      const quoteByAddress = new Map<string, typeof quotesToExecute[0]>();
+      quotesToExecute.forEach(sq => quoteByAddress.set(sq.token.address.toLowerCase(), sq));
+
+      // ═══════════════════════════════════════════════════════════════
+      // STEP 3: Per-batch JIT refresh + build + execute
+      // For each execution batch: fetch fresh quotes immediately, build the
+      // batch's swap plan from those fresh quotes, then proceed with the
+      // existing simulate / validate / isolate / execute / retry pipeline.
+      // ═══════════════════════════════════════════════════════════════
+      const totalBatches = Math.ceil(quotesToExecute.length / EXECUTION_BATCH_SIZE);
+
+      console.log(`\n🚀 Executing ${quotesToExecute.length} swaps in ${totalBatches} batch(es) with per-batch quote refresh...`);
+
+      for (let batchStart = 0; batchStart < quotesToExecute.length; batchStart += EXECUTION_BATCH_SIZE) {
+        const batchEnd = Math.min(batchStart + EXECUTION_BATCH_SIZE, quotesToExecute.length);
+        const batchNum = Math.floor(batchStart / EXECUTION_BATCH_SIZE) + 1;
+
+        console.log(`\n═══════════════════════════════════════════════`);
+        console.log(`📦 BATCH ${batchNum}/${totalBatches}`);
+        console.log(`═══════════════════════════════════════════════`);
+
+        // ─── Refresh this batch's quotes (just-in-time) ───
+        setProgressStep(`Batch ${batchNum}/${totalBatches}: Refreshing quotes...`);
+        console.log(`🔄 Refreshing ${batchEnd - batchStart} quote(s) for this batch...`);
+
+        const refreshPromises = [];
+        for (let i = batchStart; i < batchEnd; i++) {
+          const sq = quotesToExecute[i];
+          refreshPromises.push((async () => {
+            try {
+              const fq = await fetch0xQuote(
+                chainId || 8453,
+                sq.token.address,
+                targetTokenAddr,
+                sq.token.walletBN,
+                SWAPPER_ADDRESS
+              );
+              if (!fq?.transaction?.to || !fq?.transaction?.data) {
+                throw new Error('Invalid quote response');
+              }
+              return { i, sq, freshQuote: fq, error: null as string | null };
+            } catch (err: any) {
+              return { i, sq, freshQuote: null, error: err.message || 'Re-quote failed' };
             }
-            
-            return { sq, freshQuote, error: null };
-          } catch (err: any) {
-            return { sq, freshQuote: null, error: err.message || 'Re-quote failed' };
-          }
-        });
-        
-        const results = await Promise.all(quotePromises);
-        
-        for (const { sq, freshQuote, error } of results) {
+          })());
+        }
+        const refreshResults = await Promise.all(refreshPromises);
+
+        // Apply each refresh result in-place. Failed refreshes are dropped
+        // from this batch and recorded as failed (same as old up-front block).
+        const failedThisBatchIdx = new Set<number>();
+        for (const { i, sq, freshQuote, error } of refreshResults) {
           if (freshQuote) {
             const newBuyAmount = BigInt(freshQuote.buyAmount);
             const newQuotedOutputUsd = Number(formatUnits(newBuyAmount, outputDecimals)) * outputPrice;
-            
-            const priceChange = sq.quotedOutputUsd > 0 
-              ? ((newQuotedOutputUsd - sq.quotedOutputUsd) / sq.quotedOutputUsd) * 100 
+            const priceChange = sq.quotedOutputUsd > 0
+              ? ((newQuotedOutputUsd - sq.quotedOutputUsd) / sq.quotedOutputUsd) * 100
               : 0;
-            
             console.log(`  ${sq.token.symbol}: $${sq.quotedOutputUsd.toFixed(2)} → $${newQuotedOutputUsd.toFixed(2)} (${priceChange >= 0 ? '+' : ''}${priceChange.toFixed(2)}%)`);
-            
-            const newLossPercent = sq.inputValueUsd > 0 
-              ? Math.max(0, ((sq.inputValueUsd - newQuotedOutputUsd) / sq.inputValueUsd) * 100) 
+
+            const newLossPercent = sq.inputValueUsd > 0
+              ? Math.max(0, ((sq.inputValueUsd - newQuotedOutputUsd) / sq.inputValueUsd) * 100)
               : 0;
-            
-            freshQuotes.push({
+
+            const refreshed = {
               ...sq,
               quotedOutputUsd: newQuotedOutputUsd,
               lossPercent: newLossPercent,
@@ -2279,13 +2299,16 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                 transactionData: freshQuote.transaction.data as `0x${string}`,
                 priceImpact: newLossPercent
               }
-            });
+            };
+            // Update both the index-keyed list AND the address-keyed map so
+            // every downstream lookup sees the refreshed quote data.
+            quotesToExecute[i] = refreshed;
+            quoteByAddress.set(sq.token.address.toLowerCase(), refreshed);
           } else {
             console.warn(`  ${sq.token.symbol}: re-quote failed - ${error}`);
             failedTokensMap.set(sq.token.address.toLowerCase(), `Re-quote failed: ${error}`);
             trackFailedToken(sq.token.address, sq.token.symbol, `Re-quote failed: ${error}`, 'requote');
             totalFailed++;
-            
             tradeResults.push({
               address: sq.token.address,
               symbol: sq.token.symbol,
@@ -2295,78 +2318,46 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
               status: 'failed',
               reason: `Quote refresh failed: ${error}`
             });
+            failedThisBatchIdx.add(i);
           }
         }
-        
-        if (batchStart + QUOTE_BATCH_SIZE < quotesToExecute.length) {
-          await new Promise(r => setTimeout(r, 300));
+
+        // Build this batch's swap plan from the just-refreshed quotes.
+        const batchSwaps: SwapStep[] = [];
+        for (let i = batchStart; i < batchEnd; i++) {
+          if (failedThisBatchIdx.has(i)) continue;
+          const sq = quotesToExecute[i];
+          const q = sq.quote;
+          const encodedData = encodeAbiParameters(
+            [{ type: 'address' }, { type: 'bytes' }],
+            [q.transactionTo, q.transactionData]
+          );
+          const slippageBps = calculateSlippage(sq.lossPercent, sq.forceHighSlippage);
+          const isFullSweep = sq.token.walletBN >= sq.token.fullBalanceBN;
+          console.log(`  ${sq.token.symbol}: slippage=${slippageBps/100}%, impact=${sq.lossPercent.toFixed(2)}%, useAll=${isFullSweep}`);
+          batchSwaps.push({
+            kind: RouterKind.AGGREGATOR,
+            tokenIn: sq.token.address,
+            outToken: targetTokenAddr,
+            useAll: isFullSweep,
+            amountIn: sq.token.walletBN,
+            quotedIn: sq.token.walletBN,
+            quotedOut: q.buyAmount,
+            slippageBps,
+            data: encodedData as `0x${string}`,
+            viaPermit2: false,
+            permitSig: '0x' as `0x${string}`,
+            permitAmount: 0n,
+            permitDeadline: 0n,
+            permitNonce: 0n
+          });
         }
-      }
-      
-      if (freshQuotes.length === 0) {
-        throw new Error('All re-quotes failed');
-      }
-      
-      console.log(`✅ Got ${freshQuotes.length} fresh quotes`);
-      quotesToExecute = freshQuotes;
 
-      // ═══════════════════════════════════════════════════════════════
-      // STEP 3: Build swap plan from quotes
-      // ═══════════════════════════════════════════════════════════════
-      setProgressStep('Building swap plan...');
-      console.log(`\n🔧 Building plan for ${quotesToExecute.length} swaps...`);
-      
-      // Create a map from tokenIn address to quote data for result tracking
-      const quoteByAddress = new Map<string, typeof quotesToExecute[0]>();
-      quotesToExecute.forEach(sq => quoteByAddress.set(sq.token.address.toLowerCase(), sq));
-      
-      const swapPlan: SwapStep[] = quotesToExecute.map(sq => {
-        const q = sq.quote;
-        const encodedData = encodeAbiParameters(
-          [{ type: 'address' }, { type: 'bytes' }],
-          [q.transactionTo, q.transactionData]
-        );
-        
-        const slippageBps = calculateSlippage(sq.lossPercent, sq.forceHighSlippage);
-        
-        // Determine if we're swapping the full balance or a custom amount
-        const isFullSweep = sq.token.walletBN >= sq.token.fullBalanceBN;
-        
-        console.log(`  ${sq.token.symbol}: slippage=${slippageBps/100}%, impact=${sq.lossPercent.toFixed(2)}%, useAll=${isFullSweep}`);
-        
-        return {
-          kind: RouterKind.AGGREGATOR,
-          tokenIn: sq.token.address,
-          outToken: targetTokenAddr,
-          useAll: isFullSweep,
-          amountIn: sq.token.walletBN,
-          quotedIn: sq.token.walletBN,
-          quotedOut: q.buyAmount,
-          slippageBps,
-          data: encodedData as `0x${string}`,
-          viaPermit2: false,
-          permitSig: '0x' as `0x${string}`,
-          permitAmount: 0n,
-          permitDeadline: 0n,
-          permitNonce: 0n
-        };
-      });
+        if (batchSwaps.length === 0) {
+          console.log(`  ⚠️ Batch ${batchNum}: all re-quotes failed, skipping`);
+          continue;
+        }
 
-      // ═══════════════════════════════════════════════════════════════
-      // STEP 4: Execute in batches with per-swap simulation
-      // ═══════════════════════════════════════════════════════════════
-      const totalBatches = Math.ceil(swapPlan.length / EXECUTION_BATCH_SIZE);
-      
-      console.log(`\n🚀 Executing ${swapPlan.length} swaps in ${totalBatches} batch(es)...`);
-      
-      for (let batchStart = 0; batchStart < swapPlan.length; batchStart += EXECUTION_BATCH_SIZE) {
-        const batchSwaps = swapPlan.slice(batchStart, batchStart + EXECUTION_BATCH_SIZE);
-        const batchNum = Math.floor(batchStart / EXECUTION_BATCH_SIZE) + 1;
-        
-        console.log(`\n═══════════════════════════════════════════════`);
-        console.log(`📦 BATCH ${batchNum}/${totalBatches}`);
-        console.log(`═══════════════════════════════════════════════`);
-        
         // Simulate this batch
         setProgressStep(`Batch ${batchNum}/${totalBatches}: Simulating...`);
         const { passing, failing } = await simulateSwapsIndividually(batchSwaps, account as Address);
@@ -2743,7 +2734,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         }
         
         // Small delay between batches
-        if (batchStart + EXECUTION_BATCH_SIZE < swapPlan.length) {
+        if (batchStart + EXECUTION_BATCH_SIZE < quotesToExecute.length) {
           await new Promise(r => setTimeout(r, 500));
         }
       }
