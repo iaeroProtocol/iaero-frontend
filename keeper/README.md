@@ -2,6 +2,8 @@
 
 Weekly keeper for the [iAERO Auto-USDC Vault](https://basescan.org/address/0xFE5c929677D97723dc822C86c93c7e2D1B59c774). On every Thursday epoch boundary, it discovers reward tokens owed to the vault, fetches fresh 0x quotes, swaps everything to USDC, and finalizes the epoch — all atomically per epoch.
 
+**Production deployment:** [iaero-autovault-production.up.railway.app](https://iaero-autovault-production.up.railway.app) (Railway cron service)
+
 ## What it does
 
 1. **Discovers** claimable reward tokens via the on-chain `RewardTokenRegistry` + spam filter
@@ -32,6 +34,7 @@ For the full architecture see [`docs/AUTO_VAULT.md`](../docs/AUTO_VAULT.md) and 
 | `SKIP_INDIVIDUAL_RETRY` | `0` | Set `1` to skip Tier 3 (individual retries) entirely |
 | `DRY_RUN` | `0` | Set `1` to simulate without broadcasting |
 | `TARGET_EPOCH` | (latest completed) | Override which epoch to harvest |
+| `LOG_LEVEL` | `info` | Set to `verbose` for per-phase timing |
 | `FORCE_HIGH_SLIPPAGE` | `0` | Rehearsal-only — do NOT set in production |
 
 ## Running locally
@@ -86,16 +89,41 @@ Leave defaults unless you have a specific reason. See the table above.
 
 ### Monitoring
 
-The keeper logs everything to stdout. Railway captures and stores logs. For each run you'll see:
+The keeper logs everything to stdout, structured with `[stage]` prefixes. Railway captures and stores all of it.
 
-- `[init]` — env loaded, target epoch
-- `[discover]` — token discovery, spam filtering, previewClaim results
-- `[quote]` — 0x quotes (main + reference) + impact + slippage
-- `[simulate]` / `[isolate]` — pre-broadcast sim + any step drops
-- `[chunk]` — per-chunk broadcast tx hashes + gas
-- `[sweep]` — per-token retry passes
-- `[finalize]` — epoch finalization tx
-- `[postflight]` — any tokens left in swapper or vault
+**Live deployment logs:** open the service in Railway, **Logs** tab. The most recent run is at the bottom.
+
+Every run begins with a startup banner showing node version, env presence, RPC health, keeper EOA balance, and config. Every run ends with a one-block summary so you can scroll to the bottom for the outcome at a glance:
+
+```
+[summary] ═══════════════════════════════════════════════════════════════
+[summary] Run complete in 87.3s — epoch 1780531200
+[summary]   USDC bucketed:       42.184217 USDC
+[summary]   Total gas used:      6342184 (3 chunk(s) + finalize)
+[summary]   Chunks:              3/3 succeeded
+[summary]   Sweep retries:       2 attempted, 1 delivered USDC, 1 confirmed-but-0-USDC
+[summary]   Stuck in swapper:    1 token(s)
+[summary]   Stuck in vault:      0 token(s) (admin can rescue if non-USDC)
+[summary]   Finalize tx:         0xabc...
+[summary] ═══════════════════════════════════════════════════════════════
+```
+
+Log stages used throughout:
+
+| Prefix | Phase |
+|---|---|
+| `[init]` | Startup banner — node, env, RPC ping, keeper balance, config |
+| `[discover]` | Token discovery via registry + spam filter + `previewClaim` results |
+| `[quote]` | 0x quotes (main + reference) + impact + slippage |
+| `[simulate]` / `[isolate]` | Pre-broadcast sim + any step drops |
+| `[chunk]` | Per-chunk broadcast tx hashes + gas |
+| `[refresh]` | Just-in-time quote refresh before each chunk |
+| `[sweep]` | Per-token retry passes (Tier 3) |
+| `[finalize]` | Epoch finalization tx |
+| `[postflight]` | Any tokens left in swapper or vault |
+| `[timing]` | Per-phase elapsed time (only when `LOG_LEVEL=verbose`) |
+| `[summary]` | End-of-run recap |
+| `[fatal]` | Unhandled error — run aborted |
 
 ### Manual one-off runs
 

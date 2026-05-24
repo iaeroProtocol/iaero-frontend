@@ -117,6 +117,20 @@ const MAX_SWEEPS = Number(process.env.MAX_SWEEPS || '3');
 // well under the upstream RewardSwapper's MAX_STEPS=32 hard cap. Avoids gas-
 // exhaustion when many tokens accrue in a single epoch.
 const EXECUTION_BATCH_SIZE = Number(process.env.EXECUTION_BATCH_SIZE || '10');
+// Logging verbosity. `verbose` adds per-phase timings + full env dump.
+const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
+const VERBOSE = LOG_LEVEL === 'verbose' || LOG_LEVEL === 'debug';
+
+// Track total elapsed for the end-of-run summary.
+const RUN_START_MS = Date.now();
+const elapsedSec = () => ((Date.now() - RUN_START_MS) / 1000).toFixed(1) + 's';
+
+/** Returns a closure that logs the elapsed phase time when called. */
+function startPhase(name: string): () => void {
+  if (!VERBOSE) return () => {};
+  const t0 = Date.now();
+  return () => log('timing', `phase=${name} took=${((Date.now() - t0) / 1000).toFixed(2)}s`);
+}
 
 // ---------------------------------------------------------------------------
 // ABIs (only what this script needs)
@@ -654,8 +668,33 @@ function persistRun(payload: Record<string, unknown>) {
 // ---------------------------------------------------------------------------
 
 async function main() {
+  // ─────────────────────────────────────────────────────────────────────
+  // Startup banner — comprehensive snapshot to make Railway logs easy to
+  // diagnose. Every run begins with this block so when you scroll back to
+  // a past run you have the full env context.
+  // ─────────────────────────────────────────────────────────────────────
+  log('init', '═══════════════════════════════════════════════════════════════');
   log('init', `Auto-USDC vault keeper — vault=${VAULT_ADDR}`);
-  log('init', `DRY_RUN=${DRY_RUN} FINALIZE=${FINALIZE} MIN_USDC_PCT=${MIN_USDC_PCT} MAX_SWEEPS=${MAX_SWEEPS} SKIP_INDIVIDUAL_RETRY=${SKIP_INDIVIDUAL_RETRY}`);
+  log('init', `node=${process.version} pid=${process.pid} cwd=${process.cwd()}`);
+  log('init', `Config: DRY_RUN=${DRY_RUN} FINALIZE=${FINALIZE} MIN_USDC_PCT=${MIN_USDC_PCT} ` +
+              `MAX_SWEEPS=${MAX_SWEEPS} EXECUTION_BATCH_SIZE=${EXECUTION_BATCH_SIZE} ` +
+              `SKIP_INDIVIDUAL_RETRY=${SKIP_INDIVIDUAL_RETRY} LOG_LEVEL=${LOG_LEVEL}`);
+  // Show only protocol + host of the RPC URL so we can debug which provider
+  // is in use without leaking the API key embedded in the path. Works for any
+  // RPC (Alchemy, QuickNode, Ankr, BlockPi, public — anything URL-parseable).
+  const safeRpcUrl = (() => {
+    try {
+      const u = new URL(RPC_URL);
+      const hasPath = u.pathname && u.pathname !== '/' && u.pathname !== '';
+      return hasPath ? `${u.protocol}//${u.host}/[path-redacted]` : `${u.protocol}//${u.host}`;
+    } catch { return '[invalid-url]'; }
+  })();
+  log('init', `Env presence: PRIVATE_KEY=${PRIVATE_KEY ? 'set' : 'MISSING'} ` +
+              `ZERO_EX_API_KEY=${ZERO_X_API_KEY ? 'set' : 'MISSING'} ` +
+              `RPC_URL=${safeRpcUrl}`);
+  if (FORCE_HIGH_SLIPPAGE) {
+    log('init', '⚠️  FORCE_HIGH_SLIPPAGE=1 — production should NOT have this set!');
+  }
 
   if (!PRIVATE_KEY) die('init', 'PRIVATE_KEY env var is required');
 
@@ -667,7 +706,26 @@ async function main() {
   const publicClient = createPublicClient({ chain: base, transport }) as PublicClient;
   const walletClient = createWalletClient({ account, chain: base, transport }) as WalletClient;
 
+  // RPC health probe — print block + gas price so we know connectivity works
+  // before doing any heavy reads. Failure here halts the run cleanly.
+  try {
+    const [latestBlock, gasPriceWei, ethBalance] = await Promise.all([
+      publicClient.getBlockNumber(),
+      publicClient.getGasPrice(),
+      publicClient.getBalance({ address: account.address }),
+    ]);
+    log('init', `Chain: base block=${latestBlock} gasPrice=${formatUnits(gasPriceWei, 9)} gwei`);
+    log('init', `Keeper ETH balance: ${formatEther(ethBalance)} ETH`);
+    if (ethBalance < 1_000_000_000_000_000n) {  // 0.001 ETH
+      log('init', '⚠️  Keeper ETH balance is low; top up the EOA to avoid failed broadcasts');
+    }
+  } catch (e: any) {
+    die('init', `RPC health check failed: ${e.shortMessage || e.message || e}`);
+  }
+  log('init', '═══════════════════════════════════════════════════════════════');
+
   // -- Determine target epoch --
+  const endDiscover = startPhase('determine-epoch');
   const currentEpoch = (await publicClient.readContract({
     address: EPOCH_DIST_ADDR, abi: EPOCH_DIST_ABI, functionName: 'currentEpoch',
   })) as bigint;
@@ -675,6 +733,7 @@ async function main() {
   const targetEpoch = overrideEpoch ?? (currentEpoch - WEEK);
   log('init', `currentEpoch=${currentEpoch}, targetEpoch=${targetEpoch}`);
 
+  endDiscover();
   if (targetEpoch >= currentEpoch) die('init', 'targetEpoch must be < currentEpoch');
 
   // -- Pre-flight checks against the vault --
@@ -1060,10 +1119,28 @@ async function main() {
     finalize: FINALIZE,
   });
 
+  // ─────────────────────────────────────────────────────────────────────
+  // End-of-run summary — single block at the bottom of every log so the
+  // most recent run's outcome is at-a-glance in Railway's log tail.
+  // ─────────────────────────────────────────────────────────────────────
+  const successfulChunks = chunkResults.filter(c => c.success).length;
+  const usdcDeliveringRetries = individualResults.filter(r => r.success).length;
+  const txConfirmedRetries    = individualResults.filter(r => r.txConfirmed).length;
+  log('summary', '═══════════════════════════════════════════════════════════════');
+  log('summary', `Run complete in ${elapsedSec()} — epoch ${targetEpoch}`);
+  log('summary', `  USDC bucketed:       ${formatUnits(bucketed, 6)} USDC`);
+  log('summary', `  Total gas used:      ${receipt.gasUsed} (${chunkResults.length} chunk(s)${finalizeTxHash ? ' + finalize' : ''})`);
+  log('summary', `  Chunks:              ${successfulChunks}/${chunkResults.length} succeeded`);
+  log('summary', `  Sweep retries:       ${individualResults.length} attempted, ${usdcDeliveringRetries} delivered USDC, ${txConfirmedRetries - usdcDeliveringRetries} confirmed-but-0-USDC`);
+  log('summary', `  Stuck in swapper:    ${stuckInSwapper.length} token(s)`);
+  log('summary', `  Stuck in vault:      ${stuckInVault.length} token(s) (admin can rescue if non-USDC)`);
+  if (finalizeTxHash) log('summary', `  Finalize tx:         ${finalizeTxHash}`);
+  log('summary', '═══════════════════════════════════════════════════════════════');
   log('main', 'Done.');
 }
 
 main().catch((err) => {
   console.error('[fatal]', err);
+  console.error(`[fatal] Run aborted after ${elapsedSec()}`);
   process.exit(1);
 });
