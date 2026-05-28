@@ -33,6 +33,7 @@ For the full architecture see [`docs/AUTO_VAULT.md`](../docs/AUTO_VAULT.md) and 
 | `EXECUTION_BATCH_SIZE` | `10` | Swap steps per harvest tx |
 | `SKIP_INDIVIDUAL_RETRY` | `0` | Set `1` to skip Tier 3 (individual retries) entirely |
 | `DRY_RUN` | `0` | Set `1` to simulate without broadcasting |
+| `WARMUP_RUN` | `0` | Set `1` for manually-triggered post-deploy validation runs. Adds a banner block to the startup logs identifying the run as deploy-gating. Behaviorally identical to a normal run. |
 | `TARGET_EPOCH` | (latest completed) | Override which epoch to harvest |
 | `LOG_LEVEL` | `info` | Set to `verbose` for per-phase timing |
 | `FORCE_HIGH_SLIPPAGE` | `0` | Rehearsal-only — do NOT set in production |
