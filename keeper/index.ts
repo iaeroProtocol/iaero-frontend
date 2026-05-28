@@ -7,9 +7,10 @@
 // (filtering spam / unswappable), builds a PullStep[] swap plan, and calls
 // `vault.harvest()` to claim + swap into USDC + bucket per-epoch.
 //
-// Reuses the shared swap pipeline at:
-//   iaero-frontend/src/lib/swap-pipeline.ts
-// so quote handling / slippage logic stays in lockstep with the frontend.
+// Uses a vendored copy of the swap pipeline at `./swap-pipeline.ts` (canonical
+// source lives at iaero-frontend/src/lib/swap-pipeline.ts). The vendored copy
+// is byte-identical and CI enforces drift via .github/workflows/keeper-sync.yml.
+// Whenever the canonical file changes, copy it across before committing.
 //
 // Usage:
 //   npx tsx protocol/scripts/auto-usdc-vault-keeper.ts             # broadcast
@@ -69,7 +70,7 @@ import {
   getQuoteWithImpact,
   type SwapStep,
   type TokenForSwap,
-} from '../src/lib/swap-pipeline';
+} from './swap-pipeline';
 
 // ---------------------------------------------------------------------------
 // Config & env
@@ -120,6 +121,10 @@ const EXECUTION_BATCH_SIZE = Number(process.env.EXECUTION_BATCH_SIZE || '10');
 // Logging verbosity. `verbose` adds per-phase timings + full env dump.
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 const VERBOSE = LOG_LEVEL === 'verbose' || LOG_LEVEL === 'debug';
+// Set by Railway's "Pre-Deploy Command" (`WARMUP_RUN=1 npm start`). Triggers
+// extra logging that distinguishes deploy-gating runs from scheduled cron runs.
+// Behaviorally identical to a normal run — same skip/finalize/exit logic.
+const WARMUP_RUN = process.env.WARMUP_RUN === '1';
 
 // Track total elapsed for the end-of-run summary.
 const RUN_START_MS = Date.now();
@@ -673,8 +678,24 @@ async function main() {
   // diagnose. Every run begins with this block so when you scroll back to
   // a past run you have the full env context.
   // ─────────────────────────────────────────────────────────────────────
+  if (WARMUP_RUN) {
+    log('init', '┌─────────────────────────────────────────────────────────────┐');
+    log('init', '│ WARM-UP RUN (Railway Pre-Deploy)                            │');
+    log('init', '│ Gates the new deployment: if this run exits non-zero,       │');
+    log('init', '│ Railway aborts the deploy and the old image stays live.     │');
+    log('init', '│ Otherwise the new image is promoted and waits for the cron. │');
+    log('init', '└─────────────────────────────────────────────────────────────┘');
+    const rid = process.env.RAILWAY_DEPLOYMENT_ID;
+    const sha = process.env.RAILWAY_GIT_COMMIT_SHA;
+    const svc = process.env.RAILWAY_SERVICE_NAME;
+    const env = process.env.RAILWAY_ENVIRONMENT_NAME;
+    if (rid) log('init', `Railway deploy:  ${rid}`);
+    if (sha) log('init', `Git commit SHA:  ${sha.slice(0, 12)}`);
+    if (svc) log('init', `Service:         ${svc}`);
+    if (env) log('init', `Environment:     ${env}`);
+  }
   log('init', '═══════════════════════════════════════════════════════════════');
-  log('init', `Auto-USDC vault keeper — vault=${VAULT_ADDR}`);
+  log('init', `Auto-USDC vault keeper — vault=${VAULT_ADDR}` + (WARMUP_RUN ? ' (warm-up)' : ''));
   log('init', `node=${process.version} pid=${process.pid} cwd=${process.cwd()}`);
   log('init', `Config: DRY_RUN=${DRY_RUN} FINALIZE=${FINALIZE} MIN_USDC_PCT=${MIN_USDC_PCT} ` +
               `MAX_SWEEPS=${MAX_SWEEPS} EXECUTION_BATCH_SIZE=${EXECUTION_BATCH_SIZE} ` +
@@ -1127,7 +1148,7 @@ async function main() {
   const usdcDeliveringRetries = individualResults.filter(r => r.success).length;
   const txConfirmedRetries    = individualResults.filter(r => r.txConfirmed).length;
   log('summary', '═══════════════════════════════════════════════════════════════');
-  log('summary', `Run complete in ${elapsedSec()} — epoch ${targetEpoch}`);
+  log('summary', `Run complete in ${elapsedSec()} — epoch ${targetEpoch}` + (WARMUP_RUN ? ' [warm-up]' : ''));
   log('summary', `  USDC bucketed:       ${formatUnits(bucketed, 6)} USDC`);
   log('summary', `  Total gas used:      ${receipt.gasUsed} (${chunkResults.length} chunk(s)${finalizeTxHash ? ' + finalize' : ''})`);
   log('summary', `  Chunks:              ${successfulChunks}/${chunkResults.length} succeeded`);
