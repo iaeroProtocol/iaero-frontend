@@ -1,0 +1,12 @@
+# Local env (keep PRIVATE_KEY / ZERO_EX_API_KEY out of git)
+.env
+.env.local
+
+# Per-run audit JSON written by persistRun(); ephemeral, large
+outputs/
+*.json.tmp
+
+# Build artifacts
+node_modules/
+dist/
+*.log
