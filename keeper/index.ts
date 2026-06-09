@@ -121,10 +121,19 @@ const EXECUTION_BATCH_SIZE = Number(process.env.EXECUTION_BATCH_SIZE || '10');
 // Logging verbosity. `verbose` adds per-phase timings + full env dump.
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 const VERBOSE = LOG_LEVEL === 'verbose' || LOG_LEVEL === 'debug';
-// Set by Railway's "Pre-Deploy Command" (`WARMUP_RUN=1 npm start`). Triggers
-// extra logging that distinguishes deploy-gating runs from scheduled cron runs.
-// Behaviorally identical to a normal run — same skip/finalize/exit logic.
+// Set by Railway's "Pre-Deploy Command" (`WARMUP_RUN=1 npm start`). This is the
+// deploy GATE: it runs full discovery → quote → isolate to validate the new
+// image, then exits 0 (deploy promoted, real harvest left to the scheduled
+// cron) or non-zero (deploy aborted). It deliberately does NOT broadcast — a
+// pre-deploy gate must never move funds or consume an epoch.
 const WARMUP_RUN = process.env.WARMUP_RUN === '1';
+// Force a sweep-only run: skip claiming this epoch's rewards entirely and just
+// convert whatever reward tokens currently sit in the vault to USDC (bucketed to
+// the target epoch). Safe + idempotent — it never claims or finalizes a fresh
+// epoch's entitlement — so it's the right thing to run on deploy/startup to drain
+// any stranded residue. Combine with TARGET_EPOCH to bucket the USDC to a
+// specific still-open epoch (e.g. recovering a past stranded harvest).
+const SWEEP_ON_START = process.env.SWEEP_ON_START === '1';
 
 // Track total elapsed for the end-of-run summary.
 const RUN_START_MS = Date.now();
@@ -209,9 +218,23 @@ function log(stage: string, msg: string, extra?: Record<string, unknown>) {
   console.log(`[${ts}] [${stage}] ${msg}${tail}`);
 }
 
+/**
+ * Sentinel thrown by die(). It carries the failure stage/message up to
+ * main().catch, which is the single place that fires the failure webhook and
+ * exits non-zero. Throwing (rather than process.exit) keeps die()'s `never`
+ * return type — so call-site narrowing (e.g. PRIVATE_KEY) still works — while
+ * letting one async handler own alerting + shutdown.
+ */
+class FatalExit extends Error {
+  constructor(public stage: string, message: string, public extra?: Record<string, unknown>) {
+    super(message);
+    this.name = 'FatalExit';
+  }
+}
+
 function die(stage: string, msg: string, extra?: Record<string, unknown>): never {
   log(stage, `FATAL: ${msg}`, extra);
-  process.exit(1);
+  throw new FatalExit(stage, msg, extra);
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +319,80 @@ async function discoverClaimableTokens(
     log('discover', `  ${t.symbol} → ${formatUnits(t.claimable, t.decimals)} (${t.address})`);
   }
   return symbolFiltered;
+}
+
+// ---------------------------------------------------------------------------
+// Vault residue scan — find reward tokens physically sitting in the vault.
+//
+// Discovery (above) is entitlement-based (`previewClaim`): it only finds tokens
+// the vault is still OWED for a given epoch. It cannot see tokens that were
+// already CLAIMED into the vault but never swapped (e.g. stranded by a harvest
+// whose swap step was dropped). Those just sit as ERC20 balances. This scan is
+// balance-based, so the keeper can sweep *everything* in the vault to USDC each
+// run — regardless of which epoch the tokens originated from — and leftovers
+// never accumulate.
+//
+// USDC (the output asset) and iAERO (vault principal, must never be swapped)
+// are always excluded. stiAERO is not a reward-registry token and the Auto-Vault
+// never holds it, so it can't appear here.
+async function buildSweepUniverse(
+  client: PublicClient,
+): Promise<{ tokens: Address[]; blocklist: Awaited<ReturnType<typeof fetchSpamBlocklist>> }> {
+  const allTokens = (await client.readContract({
+    address: REGISTRY_ADDRESS, abi: REGISTRY_ABI, functionName: 'allTokens',
+  })) as readonly Address[];
+  const blocklist = await fetchSpamBlocklist();
+  const excluded = new Set([USDC_ADDR.toLowerCase(), IAERO_ADDR.toLowerCase()]);
+  const tokens = allTokens.filter(
+    t => !excluded.has(t.toLowerCase()) && !blocklist.addresses.has(t.toLowerCase()),
+  );
+  return { tokens, blocklist };
+}
+
+/** Return every universe token the vault currently holds a non-zero balance of. */
+async function scanVaultBalances(
+  client: PublicClient,
+  universe: Address[],
+  blocklist: Awaited<ReturnType<typeof fetchSpamBlocklist>>,
+  knownMeta: Map<string, ClaimableToken>,
+): Promise<Array<{ tok: ClaimableToken; bal: bigint }>> {
+  const balances = await Promise.all(
+    universe.map(async (t) => {
+      try {
+        const bal = (await client.readContract({
+          address: t, abi: ERC20_BASIC_ABI, functionName: 'balanceOf', args: [VAULT_ADDR],
+        })) as bigint;
+        return { t, bal };
+      } catch {
+        return { t, bal: 0n };
+      }
+    }),
+  );
+
+  const out: Array<{ tok: ClaimableToken; bal: bigint }> = [];
+  for (const { t, bal } of balances) {
+    if (bal === 0n) continue;
+    let meta = knownMeta.get(t.toLowerCase());
+    if (!meta) {
+      let symbol = '???';
+      let decimals = 18;
+      try {
+        const [sym, dec] = await Promise.all([
+          client.readContract({ address: t, abi: ERC20_BASIC_ABI, functionName: 'symbol' }) as Promise<string>,
+          client.readContract({ address: t, abi: ERC20_BASIC_ABI, functionName: 'decimals' }) as Promise<number>,
+        ]);
+        symbol = sym;
+        decimals = Number(dec);
+      } catch {
+        // keep defaults
+      }
+      meta = { address: t, symbol, decimals, claimable: bal };
+    }
+    if (isSpamToken(t, meta.symbol, blocklist)) continue;
+    // claimable carries the live balance so individualRetry quotes the full amount.
+    out.push({ tok: { ...meta, claimable: bal }, bal });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +572,64 @@ async function simulateHarvest(
   }
 }
 
+// Optional Slack/Discord-compatible incoming webhook. When set, every non-zero
+// exit (failed harvest, failed deploy gate, unhandled crash) posts a message
+// here so a human is paged instead of the failure sitting silently in the logs.
+const ALERT_WEBHOOK_URL = process.env.ALERT_WEBHOOK_URL || '';
+
+/**
+ * Best-effort failure alert. Never throws and never blocks shutdown for more
+ * than ~5s; no-op when ALERT_WEBHOOK_URL is unset. Posts both `text` (Slack)
+ * and `content` (Discord) keys — each provider ignores the other's field.
+ */
+async function sendAlert(title: string, body: string): Promise<void> {
+  if (!ALERT_WEBHOOK_URL) return;
+  const where = process.env.RAILWAY_SERVICE_NAME
+    ? `${process.env.RAILWAY_SERVICE_NAME}/${process.env.RAILWAY_ENVIRONMENT_NAME ?? '?'}`
+    : 'local';
+  const text =
+    `🚨 Auto-USDC keeper — ${title}\n${body}\n` +
+    `vault=${VAULT_ADDR} epoch=${process.env.TARGET_EPOCH ?? 'latest'} host=${where}`;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      await fetch(ALERT_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, content: text }),
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(t);
+    }
+    log('alert', 'failure webhook sent');
+  } catch (e: any) {
+    log('alert', `WARN: could not send alert webhook: ${e?.message || e}`);
+  }
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Block until the RPC has advanced to at least `target`. Load-balanced RPCs
+ * (Alchemy, public fallbacks) serve reads from multiple nodes that lag the tip
+ * by a block or two, so a `balanceOf`/`usdcForEpoch` read issued immediately
+ * after a tx confirms can return PRE-tx state. That read-after-write race is
+ * what made the Tier-3 sweep scan see a falsely "clean" vault right after the
+ * claim landed and skip every retry, stranding the just-claimed tokens.
+ * Polling the height first makes the subsequent `latest` reads consistent.
+ */
+async function waitForChainCatchUp(client: PublicClient, target: bigint, stage: string): Promise<void> {
+  for (let i = 0; i < 20; i++) {
+    try {
+      if ((await client.getBlockNumber()) >= target) return;
+    } catch { /* transient RPC blip — retry */ }
+    await sleep(500);
+  }
+  log(stage, `WARN: RPC did not reach block ${target} after retries; post-tx reads may be stale`);
+}
+
 /**
  * If the full plan reverts in simulation, drop steps one at a time until a
  * sub-plan passes. Same pattern as frontend's isolateProblemTokens but tested
@@ -487,7 +642,23 @@ async function isolateExecutablePlan(
   args: HarvestArgs,
   candidatePlan: SwapStep[],
 ): Promise<{ plan: SwapStep[]; dropped: SwapStep[]; lastError?: string }> {
-  let err = await simulateHarvest(client, account, args, candidatePlan);
+  // The contract enforces `minUSDC` as a SINGLE aggregate floor over the whole
+  // swapPlan. Each candidate subset must therefore be simulated against a floor
+  // recomputed from *that subset's own* quotes — never the full plan's floor.
+  //
+  // Reusing the full-plan floor (the previous behaviour, where `args.minUSDC`
+  // was passed unchanged to every trial sim) guarantees that every proper
+  // subset under-delivers vs. the floor and reverts "total slippage". Isolation
+  // then walks all the way down to the empty 0-step plan — the only subset whose
+  // floor (0) it can ever satisfy — claiming all reward tokens but swapping
+  // none. That is exactly what stranded ~$4.46 of rewards and left 20 tokens
+  // sitting in the vault for epoch 1779926400.
+  const floorFor = (steps: SwapStep[]): bigint =>
+    (steps.reduce((s, st) => s + st.quotedOut, 0n) * MIN_USDC_PCT) / 100n;
+  const simSubset = (steps: SwapStep[]) =>
+    simulateHarvest(client, account, { ...args, minUSDC: floorFor(steps) }, steps);
+
+  let err = await simSubset(candidatePlan);
   if (!err) return { plan: candidatePlan, dropped: [] };
 
   log('isolate', `Whole-plan sim failed: ${err.substring(0, 120)}`);
@@ -505,7 +676,7 @@ async function isolateExecutablePlan(
   while (remaining.length > 0) {
     for (let i = 0; i < remaining.length; i++) {
       const trial = remaining.filter((_, j) => j !== i);
-      const trialErr = await simulateHarvest(client, account, args, trial);
+      const trialErr = await simSubset(trial);
       if (!trialErr) {
         log('isolate', `  drop ${remaining[i].tokenIn} → ${trial.length}-step plan passes`);
         dropped.push(remaining[i]);
@@ -516,7 +687,7 @@ async function isolateExecutablePlan(
     log('isolate', `  no single removal fixes ${remaining.length}-step plan; dropping head and retrying`);
     dropped.push(remaining[0]);
     remaining = remaining.slice(1);
-    const trialErr = await simulateHarvest(client, account, args, remaining);
+    const trialErr = await simSubset(remaining);
     if (!trialErr) return { plan: remaining, dropped };
     lastErr = trialErr;
   }
@@ -774,63 +945,142 @@ async function main() {
   }
   log('init', `Vault supply at epoch start: ${formatUnits(supplyAtEpochStart, 18)} iAERO`);
 
-  // -- Discover claimable tokens --
+  // -- Discover claimable tokens (entitlement for this epoch) --
   const claimable = await discoverClaimableTokens(publicClient, targetEpoch);
-  if (claimable.length === 0) {
-    log('main', 'Nothing claimable for this epoch');
-    process.exit(0);
-  }
   const claimableByAddr = new Map<string, ClaimableToken>(
     claimable.map(c => [c.address.toLowerCase(), c]),
   );
 
-  // Tokens to claim = all claimable (including those we couldn't price-swap;
-  // they get claimed raw and sit in the vault for admin to handle).
-  const tokensToClaim = claimable.map(c => c.address);
+  // -- Scan the vault for reward tokens already sitting in it --
+  // These include anything stranded by a prior epoch's claim-but-no-swap. We
+  // sweep them to USDC every run (see Tier 3 below), regardless of origin epoch,
+  // so residue never piles up. Built once; balances re-read each sweep pass.
+  const sweepUniverse = await buildSweepUniverse(publicClient);
+  const vaultResident = await scanVaultBalances(
+    publicClient, sweepUniverse.tokens, sweepUniverse.blocklist, claimableByAddr,
+  );
+  if (vaultResident.length > 0) {
+    log('discover',
+      `Vault holds ${vaultResident.length} reward token(s) to sweep` +
+      (claimable.length === 0 ? ' (stranded from a prior epoch)' : ' (incl. any prior-epoch residue)'));
+  }
 
-  // ---------------- Attempt 1: normal slippage ----------------
-  let plan = await buildSwapPlanFor(claimable, { forceHighSlippage: false, label: 'normal' });
-  let minUSDC = (plan.totalQuotedUSDC * MIN_USDC_PCT) / 100n;
-  let baseArgs: HarvestArgs = { epoch: targetEpoch, tokens: tokensToClaim, minUSDC, finalize: FINALIZE };
+  if (claimable.length === 0 && vaultResident.length === 0) {
+    log('main', 'Nothing claimable and vault is clean — nothing to do');
+    process.exit(0);
+  }
 
-  log('main', `minUSDC floor: ${formatUnits(minUSDC, 6)} (${MIN_USDC_PCT}% of ${formatUnits(plan.totalQuotedUSDC, 6)})`);
+  // sweepOnly: skip the claim/main-swap broadcast and go straight to the Tier-3
+  // sweep, converting whatever is already in the vault. Triggered either because
+  // there's nothing new to claim, or because SWEEP_ON_START forces a drain run
+  // (e.g. on deploy, to recover stranded residue without touching fresh epochs).
+  const sweepOnly = SWEEP_ON_START || claimable.length === 0;
+  if (sweepOnly) {
+    const why = SWEEP_ON_START
+      ? `SWEEP_ON_START set — draining vault to USDC (bucketing to epoch ${targetEpoch})`
+      : `nothing newly claimable for epoch ${targetEpoch}`;
+    log('main', `Sweep-only run: ${why}; ${vaultResident.length} vault token(s) to convert`);
+  }
 
-  // Isolate: if the whole plan would revert, drop steps until it passes.
-  log('simulate', 'Simulating harvest + isolating any problem steps...');
-  let { plan: workingSteps, dropped: droppedSteps, lastError } =
-    await isolateExecutablePlan(publicClient, account.address, baseArgs, plan.steps);
+  // Tokens to claim = all claimable (claimed raw, then swapped/swept). Empty in
+  // sweep-only mode — we only convert balances already in the vault.
+  const tokensToClaim = sweepOnly ? [] : claimable.map(c => c.address);
 
+  // Claim-path plan building / isolation only runs for a normal (non-sweep) run.
+  let plan: BuiltPlan = { steps: [], tokensInPlan: [], totalQuotedUSDC: 0n, skippedTokens: [] };
+  let workingSteps: SwapStep[] = [];
+  let droppedSteps: SwapStep[] = [];
+  let lastError: string | undefined;
   let attemptedRetry = false;
-  let finalPlan = plan;
 
-  // ---------------- Attempt 2: boosted retry if isolation gave us nothing ----------------
-  if (workingSteps.length === 0 && !DRY_RUN) {
-    const reason = lastError
-      ? `last sim error: ${lastError.substring(0, 100)}`
-      : 'isolation reduced plan to 0 swap steps (all swaps would revert under current floor)';
-    log('main', `Normal-slippage plan yields no swaps (${reason}); retrying with boosted slippage...`);
-    attemptedRetry = true;
-    plan = await buildSwapPlanFor(claimable, { forceHighSlippage: true, label: 'boosted' });
-    minUSDC = (plan.totalQuotedUSDC * MIN_USDC_PCT) / 100n;
-    baseArgs = { epoch: targetEpoch, tokens: tokensToClaim, minUSDC, finalize: FINALIZE };
-    log('main', `minUSDC floor (boosted): ${formatUnits(minUSDC, 6)}`);
+  if (!sweepOnly) {
+    // ---------------- Attempt 1: normal slippage ----------------
+    plan = await buildSwapPlanFor(claimable, { forceHighSlippage: false, label: 'normal' });
+    let minUSDC = (plan.totalQuotedUSDC * MIN_USDC_PCT) / 100n;
+    let baseArgs: HarvestArgs = { epoch: targetEpoch, tokens: tokensToClaim, minUSDC, finalize: FINALIZE };
 
-    const retried = await isolateExecutablePlan(publicClient, account.address, baseArgs, plan.steps);
-    workingSteps = retried.plan;
-    droppedSteps = retried.dropped;
-    lastError = retried.lastError;
-    finalPlan = plan;
+    log('main', `minUSDC floor: ${formatUnits(minUSDC, 6)} (${MIN_USDC_PCT}% of ${formatUnits(plan.totalQuotedUSDC, 6)})`);
+
+    // Isolate: if the whole plan would revert, drop steps until it passes.
+    log('simulate', 'Simulating harvest + isolating any problem steps...');
+    const isolated = await isolateExecutablePlan(publicClient, account.address, baseArgs, plan.steps);
+    workingSteps = isolated.plan;
+    droppedSteps = isolated.dropped;
+    lastError = isolated.lastError;
+
+    // ---------------- Attempt 2: boosted retry if isolation gave us nothing ----------------
+    if (workingSteps.length === 0 && !DRY_RUN) {
+      const reason = lastError
+        ? `last sim error: ${lastError.substring(0, 100)}`
+        : 'isolation reduced plan to 0 swap steps (all swaps would revert under current floor)';
+      log('main', `Normal-slippage plan yields no swaps (${reason}); retrying with boosted slippage...`);
+      attemptedRetry = true;
+      plan = await buildSwapPlanFor(claimable, { forceHighSlippage: true, label: 'boosted' });
+      minUSDC = (plan.totalQuotedUSDC * MIN_USDC_PCT) / 100n;
+      baseArgs = { epoch: targetEpoch, tokens: tokensToClaim, minUSDC, finalize: FINALIZE };
+      log('main', `minUSDC floor (boosted): ${formatUnits(minUSDC, 6)}`);
+
+      const retried = await isolateExecutablePlan(publicClient, account.address, baseArgs, plan.steps);
+      workingSteps = retried.plan;
+      droppedSteps = retried.dropped;
+      lastError = retried.lastError;
+    }
+
+    if (workingSteps.length === 0 && tokensToClaim.length === 0) {
+      die('main', 'Nothing executable and no tokens to claim — giving up');
+    }
+    if (workingSteps.length === 0) {
+      log('main', `No swaps will execute; harvest will only claim raw tokens. Last sim error: ${lastError?.substring(0, 200)}`);
+    } else if (droppedSteps.length > 0) {
+      log('main', `Final plan: ${workingSteps.length} steps (dropped ${droppedSteps.length} via isolation)`);
+    } else {
+      log('main', `Final plan: ${workingSteps.length} steps (all passed isolation)`);
+    }
   }
 
-  if (workingSteps.length === 0 && tokensToClaim.length === 0) {
-    die('main', 'Nothing executable and no tokens to claim — giving up');
-  }
-  if (workingSteps.length === 0) {
-    log('main', `No swaps will execute; harvest will only claim raw tokens. Last sim error: ${lastError?.substring(0, 200)}`);
-  } else if (droppedSteps.length > 0) {
-    log('main', `Final plan: ${workingSteps.length} steps (dropped ${droppedSteps.length} via isolation)`);
-  } else {
-    log('main', `Final plan: ${workingSteps.length} steps (all passed isolation)`);
+  const finalPlan = plan;
+  const minUSDC = (finalPlan.totalQuotedUSDC * MIN_USDC_PCT) / 100n;  // reporting only
+
+  // ---------------- WARM-UP (pre-deploy gate) exit ----------------
+  // A warm-up run is Railway's pre-deploy gate. Its ONLY job is to validate the
+  // new image end-to-end and decide (via exit code) whether the deploy is
+  // promoted — then "wait for the cron" to do the real harvest. It must NEVER
+  // broadcast: a deploy gate that moves real funds is what claimed-but-didn't-
+  // swap epoch 1779926400 and stranded its rewards. We've already discovered,
+  // quoted, and isolated above; now exit 0 if a viable plan exists (or there
+  // were simply no swappable rewards), or non-zero to ABORT the deploy when
+  // swappable rewards exist but no executable swap plan could be built.
+  if (WARMUP_RUN) {
+    const swappableExisted = finalPlan.totalQuotedUSDC > 0n;
+    const planViable = workingSteps.length > 0 || !swappableExisted;
+    log('broadcast', 'WARM-UP (pre-deploy gate) — validation only, NOT broadcasting');
+    log('broadcast', `  swappable rewards quoted: ${formatUnits(finalPlan.totalQuotedUSDC, 6)} USDC`);
+    log('broadcast', `  executable swap steps:    ${workingSteps.length} (dropped ${droppedSteps.length} via isolation)`);
+    persistRun({
+      kind:     'auto-usdc-vault-keeper',
+      mode:     'warmup',
+      ts:       Date.now(),
+      epoch:    targetEpoch,
+      keeper:   account.address,
+      claimable,
+      attemptedRetry,
+      finalSteps: workingSteps.length,
+      droppedSteps: droppedSteps.length,
+      plan: {
+        stepCount:       workingSteps.length,
+        totalQuotedUSDC: finalPlan.totalQuotedUSDC,
+        skippedTokens:   finalPlan.skippedTokens.map(s => ({ symbol: s.token.symbol, addr: s.token.address, reason: s.reason })),
+      },
+      planViable,
+      finalize: FINALIZE,
+    });
+    if (!planViable) {
+      die('warmup',
+        `Pre-deploy gate FAILED: ${formatUnits(finalPlan.totalQuotedUSDC, 6)} USDC of swappable rewards ` +
+        `but isolation produced 0 executable swaps — deploy aborted, old image stays live`);
+    }
+    log('main', 'Warm-up gate PASSED — image promoted; the real harvest runs on the scheduled cron.');
+    process.exit(0);
   }
 
   // ---------------- DRY_RUN exit ----------------
@@ -869,8 +1119,13 @@ async function main() {
   // its own quotes JIT and re-isolates within the chunk if sim fails.
   // Always finalize=false here; final flip happens via the separate finalize
   // tx at the very end (after Tier 3 sweep).
-  const numChunks = Math.max(1, Math.ceil(workingSteps.length / EXECUTION_BATCH_SIZE));
-  log('broadcast', `Splitting into ${numChunks} chunk(s) of up to ${EXECUTION_BATCH_SIZE} swap steps each`);
+  // sweepOnly ⇒ nothing to claim or main-swap; skip straight to the Tier-3 sweep.
+  const numChunks = sweepOnly ? 0 : Math.max(1, Math.ceil(workingSteps.length / EXECUTION_BATCH_SIZE));
+  if (sweepOnly) {
+    log('broadcast', 'Sweep-only run — no claim/main-swap broadcast; proceeding to vault sweep');
+  } else {
+    log('broadcast', `Splitting into ${numChunks} chunk(s) of up to ${EXECUTION_BATCH_SIZE} swap steps each`);
+  }
 
   interface ChunkRecord { chunk: number; txHash?: Hex; gasUsed?: bigint; success: boolean; error?: string; usdcAfter: bigint }
   const chunkResults: ChunkRecord[] = [];
@@ -972,6 +1227,9 @@ async function main() {
       chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, gasUsed: chunkReceipt.gasUsed, success: true, usdcAfter });
       if (isFirstChunk) firstChunkSuccess = true;
     } catch (e: any) {
+      // Don't swallow a die() raised inside the try above (e.g. chunk-1 revert) —
+      // let the FatalExit propagate to main().catch for alerting + exit.
+      if (e instanceof FatalExit) throw e;
       const msg = (e.shortMessage || e.message || String(e)).substring(0, 200);
       log('chunk', `  ⚠ receipt error: ${msg}`);
       chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, success: false, error: `receipt: ${msg}`, usdcAfter: 0n });
@@ -990,16 +1248,24 @@ async function main() {
   const txHash = lastTxHash ?? ('0x' as Hex);
   const receipt = { blockNumber: lastReceiptBlock ?? 0n, gasUsed: totalGasUsed };
 
+  // Ensure the RPC has caught up to the claim/swap tx before we read balances,
+  // otherwise the post-main `usdcForEpoch` read and the Tier-3 sweep's vault
+  // scan can observe stale pre-claim state and wrongly conclude there's nothing
+  // to sweep (see waitForChainCatchUp).
+  if (lastReceiptBlock) await waitForChainCatchUp(publicClient, lastReceiptBlock, 'sweep');
+
   let bucketed = (await publicClient.readContract({
     address: VAULT_ADDR, abi: VAULT_ABI, functionName: 'usdcForEpoch', args: [targetEpoch],
   })) as bigint;
   log('main', `usdcForEpoch[${targetEpoch}] after main: ${formatUnits(bucketed, 6)} USDC`);
 
-  // ---------------- Tier 3: per-token individual retries, up to MAX_SWEEPS passes ----------------
-  // For every claimable token (except USDC) that still has balance in the
-  // vault, attempt a single-step boosted-slippage swap as its own harvest()
-  // call. Each pass re-scans the vault and re-fetches fresh 0x quotes, so
-  // transient failures (rate limits, brief liquidity moves) get retried.
+  // ---------------- Tier 3: sweep EVERY reward token in the vault, up to MAX_SWEEPS passes ----------------
+  // Scans the vault's full reward-token balance (not just this epoch's claimable
+  // set), so tokens stranded by any prior epoch get converted too. Each token is
+  // a single-step boosted-slippage swap as its own harvest() call. Each pass
+  // re-scans the vault + re-fetches fresh 0x quotes, so transient failures (rate
+  // limits, brief liquidity moves) get retried. USDC/iAERO are excluded by the
+  // sweep universe; the swept USDC buckets to the current targetEpoch.
   const individualResults: Array<IndividualRetryResult & { pass: number }> = [];
   if (!SKIP_INDIVIDUAL_RETRY) {
     const quoteFetcher = createDirectQuoteFetcher(ZERO_X_API_KEY);
@@ -1007,15 +1273,11 @@ async function main() {
 
     for (let pass = 1; pass <= MAX_SWEEPS; pass++) {
       totalPasses = pass;
-      // Find tokens still in vault — these are the retry candidates.
-      const candidates: Array<{ tok: ClaimableToken; bal: bigint }> = [];
-      for (const tok of claimable) {
-        if (tok.address.toLowerCase() === USDC_ADDR.toLowerCase()) continue;
-        const bal = (await publicClient.readContract({
-          address: tok.address, abi: ERC20_BASIC_ABI, functionName: 'balanceOf', args: [VAULT_ADDR],
-        })) as bigint;
-        if (bal > 0n) candidates.push({ tok, bal });
-      }
+      // Re-scan the whole vault — picks up this epoch's un-swapped claims AND
+      // any residue stranded by earlier epochs.
+      const candidates = await scanVaultBalances(
+        publicClient, sweepUniverse.tokens, sweepUniverse.blocklist, claimableByAddr,
+      );
 
       if (candidates.length === 0) {
         log('sweep', `pass ${pass}/${MAX_SWEEPS}: vault is clean, no more sweeps needed`);
@@ -1061,8 +1323,15 @@ async function main() {
 
   // ---------------- Finalize ----------------
   // Single empty-plan harvest call just to flip the finalized flag.
+  //
+  // Guard: never finalize an epoch that still has UNCLAIMED entitlement. A
+  // SWEEP_ON_START drain run deliberately skips claiming, so if it targets an
+  // epoch that hasn't been harvested yet (claimable > 0), finalizing here would
+  // lock in that epoch's rewards unclaimed. Only finalize for a normal harvest,
+  // or for a sweep where there was genuinely nothing left to claim.
+  const shouldFinalize = FINALIZE && (!sweepOnly || claimable.length === 0);
   let finalizeTxHash: Hex | undefined;
-  if (FINALIZE) {
+  if (shouldFinalize) {
     log('finalize', 'Finalizing epoch...');
     try {
       finalizeTxHash = await walletClient.writeContract({
@@ -1082,8 +1351,10 @@ async function main() {
     } catch (e: any) {
       log('finalize', `WARN: finalize call failed (${e.shortMessage || e.message}); epoch left open`);
     }
-  } else {
+  } else if (!FINALIZE) {
     log('finalize', 'FINALIZE=0 — epoch left open');
+  } else {
+    log('finalize', `SWEEP_ON_START drain with ${claimable.length} token(s) still claimable — leaving epoch ${targetEpoch} open for its normal harvest`);
   }
 
   // ---------------- Postflight: residual tokens still in vault or swapper ----------------
@@ -1157,11 +1428,34 @@ async function main() {
   log('summary', `  Stuck in vault:      ${stuckInVault.length} token(s) (admin can rescue if non-USDC)`);
   if (finalizeTxHash) log('summary', `  Finalize tx:         ${finalizeTxHash}`);
   log('summary', '═══════════════════════════════════════════════════════════════');
+
+  // Health gate: if this epoch had swappable rewards but we converted NONE of
+  // them to USDC, the harvest effectively failed even though the claim tx
+  // succeeded. Exit non-zero so Railway marks the run failed (failed-run
+  // webhook / alert) instead of reporting a silent "success" with a near-empty
+  // bucket — the exact failure mode that went unnoticed for epoch 1779926400.
+  const directUsdcClaim = claimable.find(c => c.address.toLowerCase() === USDC_ADDR.toLowerCase())?.claimable ?? 0n;
+  const swapDerivedUsdc = bucketed > directUsdcClaim ? bucketed - directUsdcClaim : 0n;
+  if (finalPlan.totalQuotedUSDC > 0n && swapDerivedUsdc === 0n) {
+    die('summary',
+      `Harvest converted NONE of ${formatUnits(finalPlan.totalQuotedUSDC, 6)} USDC swappable rewards ` +
+      `(bucketed ${formatUnits(bucketed, 6)}, direct USDC claim ${formatUnits(directUsdcClaim, 6)}) — ` +
+      `flagging run as failed for investigation`);
+  }
+
   log('main', 'Done.');
 }
 
-main().catch((err) => {
-  console.error('[fatal]', err);
+main().catch(async (err) => {
+  if (err instanceof FatalExit) {
+    // Expected, already-logged failure raised via die().
+    console.error(`[fatal] ${err.stage}: ${err.message}`);
+    await sendAlert(`run failed (${err.stage})`, err.message);
+  } else {
+    console.error('[fatal]', err);
+    await sendAlert('run crashed (unhandled error)',
+      String(err?.stack || err?.message || err).substring(0, 500));
+  }
   console.error(`[fatal] Run aborted after ${elapsedSec()}`);
   process.exit(1);
 });
