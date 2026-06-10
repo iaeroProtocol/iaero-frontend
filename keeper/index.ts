@@ -154,6 +154,7 @@ const EPOCH_DIST_ABI = parseAbi([
   'function previewClaim(address user, address token, uint256 epoch) view returns (uint256)',
   'function currentEpoch() view returns (uint256)',
   'function balanceOf(address) view returns (uint256)',
+  'function receiptToken() view returns (address)',
 ]);
 
 const VAULT_ABI = parseAbi([
@@ -332,9 +333,12 @@ async function discoverClaimableTokens(
 // run — regardless of which epoch the tokens originated from — and leftovers
 // never accumulate.
 //
-// USDC (the output asset) and iAERO (vault principal, must never be swapped)
-// are always excluded. stiAERO is not a reward-registry token and the Auto-Vault
-// never holds it, so it can't appear here.
+// USDC (the output asset) and iAERO (vault principal) are always excluded. The
+// distributor's stiAERO receipt token must NEVER be swapped either: the vault
+// HOLDS stiAERO (minted on stake, burned on withdraw), so swapping it away would
+// brick withdrawals. It isn't a reward-registry token today, but we exclude it
+// explicitly and dynamically (via receiptToken()) so a registry mishap can never
+// let the sweep touch it.
 async function buildSweepUniverse(
   client: PublicClient,
 ): Promise<{ tokens: Address[]; blocklist: Awaited<ReturnType<typeof fetchSpamBlocklist>> }> {
@@ -342,7 +346,19 @@ async function buildSweepUniverse(
     address: REGISTRY_ADDRESS, abi: REGISTRY_ABI, functionName: 'allTokens',
   })) as readonly Address[];
   const blocklist = await fetchSpamBlocklist();
+
   const excluded = new Set([USDC_ADDR.toLowerCase(), IAERO_ADDR.toLowerCase()]);
+  try {
+    const receipt = (await client.readContract({
+      address: EPOCH_DIST_ADDR, abi: EPOCH_DIST_ABI, functionName: 'receiptToken',
+    })) as Address;
+    if (receipt && receipt !== '0x0000000000000000000000000000000000000000') {
+      excluded.add(receipt.toLowerCase());
+    }
+  } catch {
+    log('discover', 'WARN: could not read receiptToken(); stiAERO not dynamically excluded from sweep');
+  }
+
   const tokens = allTokens.filter(
     t => !excluded.has(t.toLowerCase()) && !blocklist.addresses.has(t.toLowerCase()),
   );
