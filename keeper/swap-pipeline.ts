@@ -510,13 +510,23 @@ export async function getQuoteWithImpact(args: {
         ? Math.max(0, ((inputValueUsd - quotedOutputUsd) / inputValueUsd) * 100)
         : 0;
     } catch {
-      // Fallback: DefiLlama price (if provided) or output itself
+      // The reference quote (our only independent price signal) failed. Use a
+      // caller-supplied DefiLlama price if there is one (the frontend passes it).
       const llama = referencePriceMapEntry ?? 0;
       const sellAmountWhole = formatNumberFromBigint(token.walletBN, token.decimals);
-      inputValueUsd = llama > 0 ? sellAmountWhole * llama : quotedOutputUsd;
-      priceImpact = inputValueUsd > 0
-        ? Math.max(0, ((inputValueUsd - quotedOutputUsd) / inputValueUsd) * 100)
-        : 2;
+      if (llama > 0) {
+        inputValueUsd = sellAmountWhole * llama;
+        priceImpact = inputValueUsd > 0
+          ? Math.max(0, ((inputValueUsd - quotedOutputUsd) / inputValueUsd) * 100)
+          : 2;
+      } else {
+        // No independent price reference at all (the keeper passes none). Impact
+        // is UNKNOWN — fail CLOSED: report it above any auto-deselect threshold so
+        // the caller SKIPS the token, rather than equating input value to output
+        // (impact 0%) which would silently dump a possibly-illiquid token.
+        inputValueUsd = quotedOutputUsd;
+        priceImpact = Number.POSITIVE_INFINITY;
+      }
     }
 
     return {
