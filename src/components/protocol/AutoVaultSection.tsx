@@ -27,6 +27,7 @@ import {
   useDebounce, validateTokenAmount,
 } from '../lib/defi-utils';
 import { getContractAddress } from '../contracts/addresses';
+import { computeStakingApyPct } from '@/lib/staking-apy';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Constants
@@ -35,7 +36,6 @@ import { getContractAddress } from '../contracts/addresses';
 const MIN_DEPOSIT = ethers.parseUnits('0.01', 18);
 const WEEK = 7 * 24 * 60 * 60;
 const EPOCHS_LOOKBACK = 26;   // scan last ~6 months of epochs for pending/claimed lookups
-const APR_LOOKBACK   = 4;     // weeks used to compute APR
 const KEEPER_LAG_SECONDS = 3600;  // keeper runs ~1h after epoch boundary
 
 const VAULT_ABI = parseAbi([
@@ -100,6 +100,14 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
   const resolvedChainId = chainId ?? 8453;
   const VAULT_ADDR  = useMemo<Address>(() => getContractAddress('AutoUSDCVault', resolvedChainId) as Address, [resolvedChainId]);
   const IAERO_ADDR  = useMemo<Address>(() => getContractAddress('iAERO',         resolvedChainId) as Address, [resolvedChainId]);
+  // The epoch staking distributor the vault stakes into — its staking APY is the
+  // depositor's APY. Same resolution the Rewards panel uses.
+  const DIST_ADDR   = useMemo<Address | undefined>(() => {
+    try {
+      return (getContractAddress('StakingDistributor', resolvedChainId)
+        || getContractAddress('EpochStakingDistributor', resolvedChainId)) as Address;
+    } catch { return undefined; }
+  }, [resolvedChainId]);
 
   // ---- State ----
   const [mode, setMode] = useState<'deposit' | 'withdraw'>('deposit');
@@ -112,8 +120,7 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
   const [pendingUSDC, setPendingUSDC] = useState<bigint>(0n);
   const [pendingEpochs, setPendingEpochs] = useState<bigint[]>([]);
   const [claimedAllTime, setClaimedAllTime] = useState<bigint>(0n);
-  const [vaultUsdcLast4w, setVaultUsdcLast4w] = useState<bigint>(0n);
-  const [aprPct, setAprPct] = useState<number | null>(null);
+  const [apyPct, setApyPct] = useState<number | null>(null);
   const [nowTs, setNowTs] = useState<number>(() => Math.floor(Date.now() / 1000));
 
   const [isProcessing, setIsProcessing] = useState(false);
@@ -154,8 +161,7 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
   /**
    * Scan the last EPOCHS_LOOKBACK weekly epochs and ask the vault how much
    * USDC each one owes the user (pending) + how much they've already claimed
-   * from each (all-time). Also pulls vault-wide USDC for last APR_LOOKBACK
-   * epochs so we can estimate APR.
+   * from each (all-time).
    */
   const loadPendingUSDC = useCallback(async () => {
     if (!publicClient || !account || !VAULT_ADDR) return;
@@ -188,19 +194,8 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
       const claimedArr = await Promise.all(claimedPromises);
       const claimedSum = claimedArr.reduce((s, x) => s + x, 0n);
       setClaimedAllTime(claimedSum);
-
-      // Vault-wide USDC for last APR_LOOKBACK weeks (used for APR calc)
-      const aprEpochs = epochs.slice(0, APR_LOOKBACK);
-      const usdcPromises = aprEpochs.map(e =>
-        publicClient.readContract({
-          address: VAULT_ADDR, abi: VAULT_ABI,
-          functionName: 'usdcForEpoch', args: [e],
-        }) as Promise<bigint>
-      );
-      const usdcArr = await Promise.all(usdcPromises);
-      setVaultUsdcLast4w(usdcArr.reduce((s, x) => s + x, 0n));
     } catch (e) {
-      console.warn('[AutoVault] pending/claimed/APR load failed', e);
+      console.warn('[AutoVault] pending/claimed load failed', e);
     }
   }, [publicClient, account, VAULT_ADDR]);
 
@@ -225,23 +220,27 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
     return () => clearInterval(t);
   }, []);
 
-  // Compute APR estimate whenever inputs change.
+  // APY = the protocol-wide staking APY (the vault stakes into the same epoch
+  // distributor, so a depositor earns it). Shared with the Rewards panel via
+  // computeStakingApyPct so the two never drift.
   useEffect(() => {
-    if (totalShares === 0n || vaultUsdcLast4w === 0n) {
-      setAprPct(null);
-      return;
-    }
-    const iAeroPrice = getPriceInUSD('iAERO', 1) || 0;
-    if (iAeroPrice <= 0) { setAprPct(null); return; }
-
-    const tvlUsd  = Number(formatUnits(totalShares, 18)) * iAeroPrice;
-    const usdcUsd = Number(formatUnits(vaultUsdcLast4w, 6)); // USDC ≈ $1
-    if (tvlUsd <= 0) { setAprPct(null); return; }
-
-    const weeklyAvg = usdcUsd / APR_LOOKBACK;
-    const apr = (weeklyAvg / tvlUsd) * 52 * 100;
-    setAprPct(apr);
-  }, [totalShares, vaultUsdcLast4w, getPriceInUSD]);
+    let cancelled = false;
+    (async () => {
+      if (!publicClient || !DIST_ADDR) { setApyPct(null); return; }
+      try {
+        const apy = await computeStakingApyPct({
+          publicClient,
+          distAddr: DIST_ADDR,
+          iaeroUsd: getPriceInUSD('iAERO', 1) || 0,
+        });
+        if (!cancelled) setApyPct(apy);
+      } catch (e) {
+        console.warn('[AutoVault] APY calc failed', e);
+        if (!cancelled) setApyPct(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [publicClient, DIST_ADDR, getPriceInUSD]);
 
   // Next harvest = next Thursday 00:00 UTC + keeper lag.
   const nextHarvestTs = useMemo(() => {
@@ -530,10 +529,10 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
               </a>
             </CardTitle>
             <div className="flex items-center gap-2">
-              {aprPct !== null && aprPct > 0 && (
+              {apyPct !== null && apyPct > 0 && (
                 <Badge className="border-indigo-500/30 text-indigo-300 bg-indigo-500/10">
                   <TrendingUp className="w-3 h-3 mr-1" />
-                  ~{aprPct.toFixed(1)}% APR
+                  ~{apyPct.toFixed(1)}% APY
                 </Badge>
               )}
               <Button
