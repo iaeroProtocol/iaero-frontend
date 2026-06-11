@@ -228,10 +228,14 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
     (async () => {
       if (!publicClient || !DIST_ADDR) { setApyPct(null); return; }
       try {
+        // Same iAERO→AERO price fallback the Rewards panel uses, so the two
+        // panels agree even when the iAERO feed is momentarily missing.
+        let iaeroUsd = getPriceInUSD('iAERO', 1) || 0;
+        if (iaeroUsd <= 0) iaeroUsd = getPriceInUSD('AERO', 1) || 0;
         const apy = await computeStakingApyPct({
           publicClient,
           distAddr: DIST_ADDR,
-          iaeroUsd: getPriceInUSD('iAERO', 1) || 0,
+          iaeroUsd,
         });
         if (!cancelled) setApyPct(apy);
       } catch (e) {
