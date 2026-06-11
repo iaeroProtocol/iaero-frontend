@@ -647,6 +647,56 @@ async function waitForChainCatchUp(client: PublicClient, target: bigint, stage: 
 }
 
 /**
+ * Local nonce manager. viem's `writeContract` auto-fetches the nonce via
+ * `eth_getTransactionCount('pending')` on EVERY send. Against a load-balanced
+ * RPC that lags the tip (the same lag `waitForChainCatchUp` works around), that
+ * read can return a STALE, too-low nonce in the moment right after a tx
+ * confirmed — the next node hasn't seen the prior tx yet. The provider then
+ * rejects the next send with -32602 "Missing or invalid parameters" or
+ * "nonce too low". That is exactly what failed `finalize` (leaving an epoch
+ * open) and several sweep txs in production: awaiting each receipt does NOT
+ * help, because the implicit nonce read hits a different, laggy node.
+ *
+ * We fetch the nonce ONCE and track it locally, incrementing per accepted send,
+ * so the laggy pending-count is never consulted mid-run. On a send error we
+ * resync from chain but never move backwards (max of local vs chain), which
+ * also recovers from a genuine "nonce too low" where the chain is ahead.
+ *
+ * Safe because the keeper sends strictly sequentially (chunks, then each sweep,
+ * then finalize) — there is no concurrent submission to race this counter.
+ */
+class NonceManager {
+  private next: number | null = null;
+  constructor(
+    private readonly client: PublicClient,
+    private readonly address: Address,
+  ) {}
+
+  async init(): Promise<number> {
+    this.next = await this.client.getTransactionCount({ address: this.address, blockTag: 'pending' });
+    return this.next;
+  }
+
+  /** The nonce to attach to the next send. */
+  peek(): number {
+    if (this.next === null) throw new Error('NonceManager.init() not called');
+    return this.next;
+  }
+
+  /** Advance after a tx was accepted into the mempool (a hash was returned). */
+  consume(): void {
+    if (this.next === null) throw new Error('NonceManager.init() not called');
+    this.next += 1;
+  }
+
+  /** Re-sync from chain after a send error, never moving backwards. */
+  async resync(): Promise<void> {
+    const chain = await this.client.getTransactionCount({ address: this.address, blockTag: 'pending' });
+    this.next = Math.max(this.next ?? chain, chain);
+  }
+}
+
+/**
  * If the full plan reverts in simulation, drop steps one at a time until a
  * sub-plan passes. Same pattern as frontend's isolateProblemTokens but tested
  * via the whole vault.harvest call so we catch global-floor (minUSDC) issues
@@ -739,6 +789,7 @@ async function individualRetry(
   vaultBalance: bigint,
   targetEpoch: bigint,
   quoteFetcher: ReturnType<typeof createDirectQuoteFetcher>,
+  nonceManager: NonceManager,
 ): Promise<IndividualRetryResult> {
   const out: IndividualRetryResult = {
     symbol: token.symbol,
@@ -809,8 +860,11 @@ async function individualRetry(
       args: [targetEpoch, [], [step], 0n, false] as any,
       account,
       chain: base,
+      nonce: nonceManager.peek(),
     });
+    nonceManager.consume();
   } catch (e: any) {
+    await nonceManager.resync();
     return { ...out, error: `tx: ${(e.shortMessage || e.message || String(e)).substring(0, 200)}` };
   }
 
@@ -929,6 +983,15 @@ async function main() {
     }
   } catch (e: any) {
     die('init', `RPC health check failed: ${e.shortMessage || e.message || e}`);
+  }
+
+  // Local nonce tracking — never trust the laggy RPC pending-count mid-run.
+  const nonceManager = new NonceManager(publicClient, account.address);
+  try {
+    await nonceManager.init();
+    log('init', `Starting nonce: ${nonceManager.peek()}`);
+  } catch (e: any) {
+    die('init', `Could not fetch starting nonce: ${e.shortMessage || e.message || e}`);
   }
   log('init', '═══════════════════════════════════════════════════════════════');
 
@@ -1209,8 +1272,11 @@ async function main() {
         args: [targetEpoch, chunkTokensToClaim, chunkSteps, chunkArgs.minUSDC, false] as any,
         account,
         chain: base,
+        nonce: nonceManager.peek(),
       });
+      nonceManager.consume();
     } catch (e: any) {
+      await nonceManager.resync();
       const msg = (e.shortMessage || e.message || String(e)).substring(0, 200);
       log('chunk', `  ✗ broadcast failed: ${msg}`);
       chunkResults.push({ chunk: chunkIdx + 1, success: false, error: msg, usdcAfter: 0n });
@@ -1305,7 +1371,7 @@ async function main() {
       for (const { tok, bal } of candidates) {
         log('sweep', `  attempting ${tok.symbol} (${formatUnits(bal, tok.decimals)})...`);
         const r = await individualRetry(
-          publicClient, walletClient, account, tok, bal, targetEpoch, quoteFetcher,
+          publicClient, walletClient, account, tok, bal, targetEpoch, quoteFetcher, nonceManager,
         );
         individualResults.push({ ...r, pass });
         if (r.success) {
@@ -1357,7 +1423,9 @@ async function main() {
         args: [targetEpoch, [], [], 0n, true] as any,
         account,
         chain: base,
+        nonce: nonceManager.peek(),
       });
+      nonceManager.consume();
       const finReceipt = await publicClient.waitForTransactionReceipt({ hash: finalizeTxHash });
       if (finReceipt.status !== 'success') {
         log('finalize', `WARN: finalize tx reverted (${finalizeTxHash}); epoch left open`);
@@ -1365,6 +1433,7 @@ async function main() {
         log('finalize', `Finalized: ${finalizeTxHash}`);
       }
     } catch (e: any) {
+      await nonceManager.resync();
       log('finalize', `WARN: finalize call failed (${e.shortMessage || e.message}); epoch left open`);
     }
   } else if (!FINALIZE) {
