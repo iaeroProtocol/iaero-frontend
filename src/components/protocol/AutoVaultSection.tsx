@@ -389,7 +389,7 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
     setIsProcessing(true);
     setActiveOperation('claim');
     try {
-      setProgressStep(`Claiming ${formatBigNumber(pendingUSDC, 6, 4)} USDC...`);
+      setProgressStep(`Claiming ${formatBigNumber(pendingUSDC, 6, 1)} USDC...`);
       const hash = await writeContractAsync({
         address: VAULT_ADDR,
         abi: VAULT_ABI,
@@ -398,7 +398,7 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
       });
       await publicClient!.waitForTransactionReceipt({ hash });
 
-      const usdcStr = formatBigNumber(pendingUSDC, 6, 4);
+      const usdcStr = formatBigNumber(pendingUSDC, 6, 1);
       showToast(`Claimed ${usdcStr} USDC`, 'success');
       addToHistory('claim', usdcStr, 'USDC', hash);
       setShowSuccess(true);
@@ -485,8 +485,8 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
                   </div>
                   <div>
                     <div className="text-sm text-emerald-200/80">Pending USDC ready to claim</div>
-                    <div className="text-3xl font-bold text-emerald-300">
-                      ${formatBigNumber(pendingUSDC, 6, 4)}
+                    <div className="text-3xl font-bold text-emerald-300 truncate">
+                      ${formatBigNumber(pendingUSDC, 6, 1)}
                     </div>
                     <div className="text-xs text-emerald-200/60 mt-1">
                       across {pendingEpochs.length} epoch{pendingEpochs.length === 1 ? '' : 's'}
@@ -552,36 +552,36 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div className="bg-slate-900/40 rounded-lg p-4">
+            <div className="bg-slate-900/40 rounded-lg p-4 min-w-0">
               <div className="text-xs text-slate-400 uppercase tracking-wide mb-1">Your deposit</div>
-              <div className="text-2xl font-bold text-white">
-                {formatBigNumber(shares, 18, 4)}
+              <div className="text-2xl font-bold text-white truncate">
+                {formatBigNumber(shares, 18, 1)}
               </div>
               <div className="text-xs text-slate-500 mt-1">iAERO</div>
               {positionUsd > 0 && (
                 <div className="text-xs text-slate-400 mt-1">≈ ${positionUsd.toFixed(2)}</div>
               )}
             </div>
-            <div className="bg-slate-900/40 rounded-lg p-4">
+            <div className="bg-slate-900/40 rounded-lg p-4 min-w-0">
               <div className="text-xs text-slate-400 uppercase tracking-wide mb-1">Pending USDC</div>
-              <div className="text-2xl font-bold text-emerald-300">
-                ${formatBigNumber(pendingUSDC, 6, 4)}
+              <div className="text-2xl font-bold text-emerald-300 truncate">
+                ${formatBigNumber(pendingUSDC, 6, 1)}
               </div>
               <div className="text-xs text-slate-500 mt-1">
                 {pendingEpochs.length} epoch{pendingEpochs.length === 1 ? '' : 's'}
               </div>
             </div>
-            <div className="bg-slate-900/40 rounded-lg p-4">
+            <div className="bg-slate-900/40 rounded-lg p-4 min-w-0">
               <div className="text-xs text-slate-400 uppercase tracking-wide mb-1">Claimed all-time</div>
-              <div className="text-2xl font-bold text-white">
-                ${formatBigNumber(claimedAllTime, 6, 4)}
+              <div className="text-2xl font-bold text-white truncate">
+                ${formatBigNumber(claimedAllTime, 6, 1)}
               </div>
               <div className="text-xs text-slate-500 mt-1">USDC</div>
             </div>
-            <div className="bg-slate-900/40 rounded-lg p-4">
+            <div className="bg-slate-900/40 rounded-lg p-4 min-w-0">
               <div className="text-xs text-slate-400 uppercase tracking-wide mb-1">Vault TVL</div>
-              <div className="text-2xl font-bold text-white">
-                {formatBigNumber(totalShares, 18, 2)}
+              <div className="text-2xl font-bold text-white truncate">
+                {formatBigNumber(totalShares, 18, 1)}
               </div>
               <div className="text-xs text-slate-500 mt-1">iAERO total</div>
               {totalShares > 0n && shares > 0n && (
@@ -666,7 +666,7 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
                 <div className="flex items-center justify-between">
                   <Label className="text-slate-300">Amount</Label>
                   <span className="text-xs text-slate-400">
-                    Balance: {formatBigNumber(iAeroBN, 18, 4)} iAERO
+                    Balance: {formatBigNumber(iAeroBN, 18, 1)} iAERO
                   </span>
                 </div>
                 <div className="relative">
@@ -719,7 +719,7 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
                 <div className="flex items-center justify-between">
                   <Label className="text-slate-300">Amount</Label>
                   <span className="text-xs text-slate-400">
-                    Available: {formatBigNumber(shares, 18, 4)} iAERO
+                    Available: {formatBigNumber(shares, 18, 1)} iAERO
                   </span>
                 </div>
                 <div className="relative">
