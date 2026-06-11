@@ -102,6 +102,19 @@ const ZERO_X_API_KEY = process.env.ZERO_EX_API_KEY || process.env.ZERO_X_API_KEY
 const DRY_RUN = process.env.DRY_RUN === '1';
 const FINALIZE = process.env.FINALIZE !== '0';   // default true
 const MIN_USDC_PCT = BigInt(process.env.MIN_USDC_PCT || '95');
+// Hard cap on execution slippage for the Tier-3 cleanup sweep. A sweep must
+// deliver >= (100 - this)% of its quote or the harvest reverts and the token
+// stays in the vault (recoverable). The impact gate (AUTO_DESELECT, 10%) already
+// bounds forced slippage to ~20%; setting this to 1000 (10%) tightens it to
+// match the impact ceiling so leftover tokens can't be sold below 90% of quote.
+// Does not affect the main batch, which is already bounded by MIN_USDC_PCT.
+const MAX_SWEEP_SLIPPAGE_BPS = Number(process.env.MAX_SWEEP_SLIPPAGE_BPS || '1000'); // 10%
+// How long to wait for a broadcast's receipt before treating the tx as STUCK.
+// A reverted tx still mines (returns a receipt, consumes its nonce — no gap); a
+// tx that never mines is the only nonce-gap risk. On timeout we ABORT the run
+// rather than send later txs (finalize/sweeps) behind the stuck nonce — the next
+// run re-reads the pending nonce and self-heals.
+const RECEIPT_TIMEOUT_MS = Number(process.env.RECEIPT_TIMEOUT_MS || '120000'); // 2 min
 // Rehearsal-only knob: forces high per-step slippage (~50%+) so swaps execute
 // against stale fork state. Production should NEVER set this — base+impact
 // scaling at 30-500 bps is the right floor for live execution.
@@ -829,7 +842,9 @@ async function individualRetry(
     return { ...out, error: `impact ${result.lossPercent.toFixed(2)}% > ${AUTO_DESELECT_IMPACT_PERCENT}%` };
   }
 
-  const slippageBps = calculateSlippage(result.lossPercent, true);  // force high
+  // Force high slippage so worse routes execute, but CAP it so the cleanup sweep
+  // can never accept a near-zero fill (bounds value loss to MAX_SWEEP_SLIPPAGE_BPS).
+  const slippageBps = Math.min(calculateSlippage(result.lossPercent, true), MAX_SWEEP_SLIPPAGE_BPS);
   const step = buildSwapStepFromQuote({
     token: tokenForSwap,
     outToken: USDC_ADDR,
@@ -887,10 +902,19 @@ async function individualRetry(
     return { ...out, error: `tx: ${(e.shortMessage || e.message || String(e)).substring(0, 200)}` };
   }
 
+  let receipt;
   try {
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-    if (receipt.status !== 'success') {
-      return { ...out, txHash, error: `reverted (block ${receipt.blockNumber})` };
+    receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: RECEIPT_TIMEOUT_MS });
+  } catch (e: any) {
+    // The receipt never arrived → the sweep tx is stuck/unmined. Its nonce is
+    // consumed locally but not on-chain, so every later tx (more sweeps, finalize)
+    // would queue behind it. Abort the run; the next run self-heals.
+    die('sweep', `${token.symbol} tx ${txHash} not mined in ${Math.round(RECEIPT_TIMEOUT_MS / 1000)}s (stuck?); aborting to avoid nonce-gap pileup`,
+        { txHash, err: e.shortMessage || e.message });
+  }
+  try {
+    if (receipt!.status !== 'success') {
+      return { ...out, txHash, error: `reverted (block ${receipt!.blockNumber})` };
     }
     const usdcAfter = (await publicClient.readContract({
       address: USDC_ADDR, abi: ERC20_BASIC_ABI, functionName: 'balanceOf', args: [VAULT_ADDR],
@@ -1310,33 +1334,41 @@ async function main() {
     }
     log('chunk', `  tx: ${chunkTxHash}`);
 
+    let chunkReceipt;
     try {
-      const chunkReceipt = await publicClient.waitForTransactionReceipt({ hash: chunkTxHash });
-      if (chunkReceipt.status !== 'success') {
-        log('chunk', `  ✗ tx reverted (block ${chunkReceipt.blockNumber})`);
-        chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, success: false, error: `reverted (block ${chunkReceipt.blockNumber})`, usdcAfter: 0n });
-        if (isFirstChunk) die('broadcast', `Chunk 1 reverted; nothing was claimed`, { txHash: chunkTxHash });
-        continue;
-      }
-      lastTxHash = chunkTxHash;
-      lastReceiptBlock = chunkReceipt.blockNumber;
-      totalGasUsed += chunkReceipt.gasUsed;
-      log('chunk', `  ✓ confirmed in block ${chunkReceipt.blockNumber}, gas=${chunkReceipt.gasUsed}`);
-
+      chunkReceipt = await publicClient.waitForTransactionReceipt({ hash: chunkTxHash, timeout: RECEIPT_TIMEOUT_MS });
+    } catch (e: any) {
+      // A THROWN receipt wait (vs a returned reverted receipt) means the tx is
+      // stuck/unmined — its nonce is consumed locally but not on-chain. Continuing
+      // would build finalize + later sweeps on a nonce gap behind it, so abort the
+      // run; the next run re-reads the pending nonce and self-heals.
+      const msg = (e.shortMessage || e.message || String(e)).substring(0, 200);
+      log('chunk', `  ⚠ receipt unobtainable: ${msg}`);
+      chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, success: false, error: `receipt: ${msg}`, usdcAfter: 0n });
+      die('broadcast', `Chunk ${chunkIdx + 1} tx ${chunkTxHash} not mined (stuck?); aborting to avoid nonce-gap`, { txHash: chunkTxHash, msg });
+    }
+    if (chunkReceipt!.status !== 'success') {
+      // Reverted txs still mine and consume their nonce — no gap, safe to continue.
+      log('chunk', `  ✗ tx reverted (block ${chunkReceipt!.blockNumber})`);
+      chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, success: false, error: `reverted (block ${chunkReceipt!.blockNumber})`, usdcAfter: 0n });
+      if (isFirstChunk) die('broadcast', `Chunk 1 reverted; nothing was claimed`, { txHash: chunkTxHash });
+      continue;
+    }
+    lastTxHash = chunkTxHash;
+    lastReceiptBlock = chunkReceipt!.blockNumber;
+    totalGasUsed += chunkReceipt!.gasUsed;
+    log('chunk', `  ✓ confirmed in block ${chunkReceipt!.blockNumber}, gas=${chunkReceipt!.gasUsed}`);
+    try {
       const usdcAfter = (await publicClient.readContract({
         address: VAULT_ADDR, abi: VAULT_ABI, functionName: 'usdcForEpoch', args: [targetEpoch],
       })) as bigint;
-      chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, gasUsed: chunkReceipt.gasUsed, success: true, usdcAfter });
-      if (isFirstChunk) firstChunkSuccess = true;
-    } catch (e: any) {
-      // Don't swallow a die() raised inside the try above (e.g. chunk-1 revert) —
-      // let the FatalExit propagate to main().catch for alerting + exit.
-      if (e instanceof FatalExit) throw e;
-      const msg = (e.shortMessage || e.message || String(e)).substring(0, 200);
-      log('chunk', `  ⚠ receipt error: ${msg}`);
-      chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, success: false, error: `receipt: ${msg}`, usdcAfter: 0n });
-      if (isFirstChunk) die('broadcast', `Chunk 1 receipt error`, { txHash: chunkTxHash, msg });
+      chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, gasUsed: chunkReceipt!.gasUsed, success: true, usdcAfter });
+    } catch {
+      // Post-success read blip — the chunk DID mine (nonce consumed on-chain, no
+      // gap). Record success without the usdcAfter figure rather than aborting.
+      chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, gasUsed: chunkReceipt!.gasUsed, success: true, usdcAfter: 0n });
     }
+    if (isFirstChunk) firstChunkSuccess = true;
   }
 
   if (numChunks > 0 && !firstChunkSuccess && workingSteps.length === 0) {
@@ -1446,7 +1478,7 @@ async function main() {
         nonce: nonceManager.peek(),
       });
       nonceManager.consume();
-      const finReceipt = await publicClient.waitForTransactionReceipt({ hash: finalizeTxHash });
+      const finReceipt = await publicClient.waitForTransactionReceipt({ hash: finalizeTxHash, timeout: RECEIPT_TIMEOUT_MS });
       if (finReceipt.status !== 'success') {
         log('finalize', `WARN: finalize tx reverted (${finalizeTxHash}); epoch left open`);
       } else {
