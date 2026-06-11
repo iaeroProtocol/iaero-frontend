@@ -764,8 +764,13 @@ async function isolateExecutablePlan(
 // Individual retry — per-token boosted-slippage swap for tokens left in the
 // vault after the main batch broadcast. Each retry is its own harvest() call
 // with empty tokensToClaim (the claim already happened in the main broadcast)
-// and a single-step swap plan. minUSDC = 0 (boosted slippage is the floor,
-// not the global percentage).
+// and a single-step swap plan. minUSDC is set to the step's own boosted-slippage
+// floor (quotedOut × (1 − slippageBps)) — NEVER 0. Because the vault calls the
+// swapper with allowPartial:true, a minUSDC of 0 would let a swap pull the token
+// out of the vault, deliver ~0 USDC (unbounded slippage), and strand it in the
+// swapper. A real floor reverts that swap so the token stays in the vault — the
+// documented behaviour (docs/AUTO_VAULT.md: "anything genuinely unswappable
+// stays in the vault until an admin can resolve it manually").
 // ---------------------------------------------------------------------------
 
 interface IndividualRetryResult {
@@ -833,11 +838,25 @@ async function individualRetry(
   });
   step.useAll = true;
 
+  // Per-step USDC floor = the step's own (boosted-slippage) expectation. The vault
+  // always calls the swapper with allowPartial:true, so minTotalOut (this minUSDC)
+  // is the ONLY thing stopping a swap that pulls the token but delivers ~0 USDC
+  // from leaving it STRANDED in the swapper (where the vault sweep can't reach it).
+  // With a real floor, such a swap reverts the whole harvest → the token transfer
+  // rolls back → the token stays in the VAULT, recoverable on the next sweep,
+  // never lost to the swapper. Using minUSDC=0 here is what stranded tokens before.
+  const minOut = (step.quotedOut * BigInt(10000 - slippageBps)) / 10000n;
+  if (minOut === 0n) {
+    // Quote floors to nothing (illiquid dust). Don't attempt — that would pull the
+    // token into the swapper with no protection. Leave it safely in the vault.
+    return { ...out, error: `skipped: quoted floor rounds to 0 (illiquid); left in vault` };
+  }
+
   // Simulate single-step harvest (no claim — tokens already in vault from main broadcast)
   const simErr = await simulateHarvest(
     publicClient,
     account.address,
-    { epoch: targetEpoch, tokens: [], minUSDC: 0n, finalize: false },
+    { epoch: targetEpoch, tokens: [], minUSDC: minOut, finalize: false },
     [step],
   );
   if (simErr) {
@@ -857,7 +876,7 @@ async function individualRetry(
       functionName: 'harvest',
       // viem's strict overload resolution can't infer ABI types through our
       // intermediate variables; the runtime path is exercised by the fork tests.
-      args: [targetEpoch, [], [step], 0n, false] as any,
+      args: [targetEpoch, [], [step], minOut, false] as any,
       account,
       chain: base,
       nonce: nonceManager.peek(),
@@ -877,16 +896,17 @@ async function individualRetry(
       address: USDC_ADDR, abi: ERC20_BASIC_ABI, functionName: 'balanceOf', args: [VAULT_ADDR],
     })) as bigint;
     const usdcOut = usdcAfter > usdcBefore ? usdcAfter - usdcBefore : 0n;
-    // Real success requires USDC was actually delivered. A confirmed tx with
-    // 0 USDC means the swap step failed inside the swapper (allowPartial)
-    // and the input token is now stuck in the swapper.
+    // With minUSDC = minOut (> 0), the swapper reverts any swap that would
+    // deliver under the floor, so a CONFIRMED tx means USDC ≥ minOut was
+    // delivered and the token is converted — it can no longer confirm-with-0
+    // and strand in the swapper. The 0 branch is kept only as a defensive guard.
     return {
       ...out,
       txConfirmed: true,
       success: usdcOut > 0n,
       txHash,
       usdcOut,
-      error: usdcOut === 0n ? 'tx confirmed but 0 USDC delivered (token now stuck in swapper)' : undefined,
+      error: usdcOut === 0n ? 'tx confirmed but 0 USDC delivered (unexpected with floor)' : undefined,
     };
   } catch (e: any) {
     return { ...out, txHash, error: `receipt: ${e.shortMessage || e.message}` };
