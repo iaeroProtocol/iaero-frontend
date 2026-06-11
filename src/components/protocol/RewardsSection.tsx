@@ -7,6 +7,7 @@ import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { usePublicClient, useWriteContract } from 'wagmi';
+import { computeStakingApyPct } from '@/lib/staking-apy';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -118,7 +119,6 @@ const AERODROME_ABI = [
   }
 ] as const;
 
-const REWARDS_JSON_URL = process.env.NEXT_PUBLIC_REWARDS_JSON_URL || "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/estimated_rewards_usd.json";
 const STAKER_REWARDS_JSON_URL = process.env.NEXT_PUBLIC_STAKER_REWARDS_JSON_URL || "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/staker_rewards.json";
 const EPOCHS_JSON_URL = process.env.NEXT_PUBLIC_EPOCHS_JSON_URL || "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/epochs.json";
 const SPAM_BLOCKLIST_URL = process.env.NEXT_PUBLIC_SPAM_BLOCKLIST_URL || 
@@ -179,7 +179,6 @@ const ERC20_FULL_ABI = parseAbi([
 
 const PREVIEW_ABI = parseAbi(['function previewClaim(address user, address token, uint256 epoch) view returns (uint256)']);
 const EPOCH_DIST_ABI = parseAbi(['function claimMany(address[] tokens, uint256[] epochs) external']);
-const DIST_ABI = parseAbi(['function totalStaked() view returns (uint256)']);
 const REGISTRY_ABI = parseAbi(['function allTokens() view returns (address[])']);
 
 const GAS_ESTIMATES = { claimSingle: 120000n, claimAll: 200000n };
@@ -861,9 +860,6 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
   const [priceByAddr, setPriceByAddr] = useState<Record<string, number>>({});
   const [lastEpoch, setLastEpoch] = useState<bigint | undefined>(undefined);
 
-  const E18 = 10n ** 18n;
-  const toE18 = (num: number) => BigInt(Math.round(num * 1e18));
-
   const formatUSD = (v: number, max = 6) => {
     if (!isFinite(v) || v === 0) return "$0";
     const tiny = 1e-6;
@@ -1030,15 +1026,6 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     });
   }
 
-  async function fetchStakersWeeklyUSD(): Promise<bigint> {
-    const r = await fetch(REWARDS_JSON_URL, { cache: "no-store" });
-    if (!r.ok) throw new Error(`rewards json ${r.status}`);
-    const j = await r.json();
-    if (j?.stakersWeeklyUSD_1e18) return BigInt(j.stakersWeeklyUSD_1e18);
-    if (j?.estimatedWeeklyUSD_1e18) return (BigInt(j.estimatedWeeklyUSD_1e18) * 8000n) / 10000n;
-    throw new Error("missing stakersWeeklyUSD");
-  }
-
   // Smart Preflight for claims
   async function smartPreflight(items: any[], account: Address, distributor: Address) {
     try {
@@ -1198,31 +1185,23 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
       .then(map => setPriceByAddr(p => ({...p, ...map})));
   }, [pending, chainId]);
 
-  // APY calculation
+  // APY calculation — shared with the Auto-Vault via computeStakingApyPct so the
+  // two panels compute the identical number and can never drift.
   useEffect(() => {
     if (!connected || !networkSupported || !publicClient) return;
     (async () => {
       setApyLoading(true);
       setApyError(null);
       try {
-        const stakersWeeklyUSD_1e18 = await fetchStakersWeeklyUSD();
-        if (!distAddr) throw new Error("staking distributor address missing");
-        const totalStakedRaw = await publicClient.readContract({
-          address: distAddr as Address,
-          abi: DIST_ABI,
-          functionName: 'totalStaked',
-        }) as bigint;
-        if (!totalStakedRaw || totalStakedRaw === 0n) { setApyPct(0); setApyLoading(false); return; }
         let iaeroUsdNum = Number(prices?.iAERO?.usd ?? 0);
         if (!isFinite(iaeroUsdNum) || iaeroUsdNum <= 0) iaeroUsdNum = Number(prices?.AERO?.usd ?? 0);
-        if (!isFinite(iaeroUsdNum) || iaeroUsdNum <= 0) throw new Error("iAERO/AERO price unavailable");
-        const iaeroUsd_1e18 = toE18(iaeroUsdNum);
-        const annualUSD_1e18 = stakersWeeklyUSD_1e18 * 52n;
-        const tvlUSD_1e18 = (totalStakedRaw * iaeroUsd_1e18) / E18;
-        if (tvlUSD_1e18 === 0n) { setApyPct(0); setApyLoading(false); return; }
-        const apyRatio_1e18 = (annualUSD_1e18 * E18) / tvlUSD_1e18;
-        const apyPct_1e18 = apyRatio_1e18 * 100n;
-        setApyPct(Number(apyPct_1e18) / 1e18);
+        const apy = await computeStakingApyPct({
+          publicClient,
+          distAddr: distAddr ? (distAddr as Address) : undefined,
+          iaeroUsd: iaeroUsdNum,
+        });
+        if (apy === null) { setApyError('APY unavailable'); setApyPct(null); }
+        else setApyPct(apy);
       } catch (e: any) {
         console.error('APY calc error:', e?.message || e);
         setApyError('APY unavailable');
