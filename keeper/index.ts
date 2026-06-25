@@ -801,6 +801,8 @@ interface IndividualRetryResult {
   /** True if the tx confirmed on-chain (regardless of USDC delivered). */
   txConfirmed: boolean;
   txHash?: Hex;
+  /** Block the sweep tx mined in (for post-tx chain catch-up + reporting). */
+  receiptBlock?: bigint;
   usdcOut?: bigint;
   error?: string;
 }
@@ -814,6 +816,7 @@ async function individualRetry(
   targetEpoch: bigint,
   quoteFetcher: ReturnType<typeof createDirectQuoteFetcher>,
   nonceManager: NonceManager,
+  priorBlock?: bigint,
 ): Promise<IndividualRetryResult> {
   const out: IndividualRetryResult = {
     symbol: token.symbol,
@@ -885,6 +888,10 @@ async function individualRetry(
   }
 
   // Capture USDC delta around the broadcast so we can report what was harvested.
+  // Catch up to the previous sweep's block first so usdcBefore isn't served a
+  // stale-LOW balance (missing a prior sweep's delivery) by a lagging node — that
+  // would over-credit THIS token with the prior token's USDC in the per-token log.
+  if (priorBlock) await waitForChainCatchUp(publicClient, priorBlock, 'sweep');
   const usdcBefore = (await publicClient.readContract({
     address: USDC_ADDR, abi: ERC20_BASIC_ABI, functionName: 'balanceOf', args: [VAULT_ADDR],
   })) as bigint;
@@ -920,8 +927,15 @@ async function individualRetry(
   }
   try {
     if (receipt!.status !== 'success') {
-      return { ...out, txHash, error: `reverted (block ${receipt!.blockNumber})` };
+      return { ...out, txHash, receiptBlock: receipt!.blockNumber, error: `reverted (block ${receipt!.blockNumber})` };
     }
+    // Wait for a node that has seen this tx's block BEFORE reading the vault's
+    // USDC balance. A load-balanced RPC can serve the post-tx read from a node
+    // still lagging at the PRE-tx height, returning the old balance so usdcOut
+    // reads 0 even though the swap delivered — the false "confirmed but 0 USDC /
+    // token now in swapper" warning (and it falsely trips the no-progress early
+    // stop). Catching up first makes the delta accurate.
+    await waitForChainCatchUp(publicClient, receipt!.blockNumber, 'sweep');
     const usdcAfter = (await publicClient.readContract({
       address: USDC_ADDR, abi: ERC20_BASIC_ABI, functionName: 'balanceOf', args: [VAULT_ADDR],
     })) as bigint;
@@ -935,11 +949,12 @@ async function individualRetry(
       txConfirmed: true,
       success: usdcOut > 0n,
       txHash,
+      receiptBlock: receipt!.blockNumber,
       usdcOut,
       error: usdcOut === 0n ? 'tx confirmed but 0 USDC delivered (unexpected with floor)' : undefined,
     };
   } catch (e: any) {
-    return { ...out, txHash, error: `receipt: ${e.shortMessage || e.message}` };
+    return { ...out, txHash, receiptBlock: receipt!.blockNumber, error: `receipt: ${e.shortMessage || e.message}` };
   }
 }
 
@@ -1345,25 +1360,59 @@ async function main() {
   }
 
   // ---- Phase 2: SWAP in chunks (swap-only; every failure is NON-fatal) ----
-  const numChunks = sweepOnly ? 0 : Math.ceil(workingSteps.length / EXECUTION_BATCH_SIZE);
+  // Value-aware packing: cap any single step at DOMINANCE of its chunk's quoted
+  // total so one big token (e.g. WETH at ~71% of a fixed slice) can't sink the
+  // whole chunk's aggregate slippage floor when it slips on-chain. A dominant
+  // token lands in its own chunk and only IT defers to the per-token sweep — the
+  // smaller tokens still clear together in a batch. First-fit-decreasing, capped
+  // at EXECUTION_BATCH_SIZE steps. A genuinely solo dominant token is unavoidable
+  // (and harmless — its lone chunk reverting affects nothing else).
+  const DOMINANCE_NUM = 60n, DOMINANCE_DEN = 100n; // a step may be ≤ 60% of its chunk
+  function packChunks(steps: SwapStep[]): SwapStep[][] {
+    const sorted = [...steps].sort((a, b) => (a.quotedOut < b.quotedOut ? 1 : a.quotedOut > b.quotedOut ? -1 : 0));
+    const bins: { steps: SwapStep[]; sum: bigint; max: bigint }[] = [];
+    for (const st of sorted) {
+      let placed = false;
+      for (const b of bins) {
+        // sorted desc ⇒ b.max is the chunk's largest step; adding st (≤ b.max) is
+        // OK iff that largest stays within DOMINANCE of the new chunk total.
+        if (b.steps.length < EXECUTION_BATCH_SIZE &&
+            b.max * DOMINANCE_DEN <= (b.sum + st.quotedOut) * DOMINANCE_NUM) {
+          b.steps.push(st); b.sum += st.quotedOut; placed = true; break;
+        }
+      }
+      if (!placed) bins.push({ steps: [st], sum: st.quotedOut, max: st.quotedOut });
+    }
+    return bins.map(b => b.steps);
+  }
+  let chunkPlans = sweepOnly ? [] : packChunks(workingSteps);
+  // Guard against pathological fragmentation: if value-packing produced far more
+  // chunks than plain fixed slicing would (e.g. exponentially-sized tokens each
+  // forced solo), fall back to fixed slices to bound the tx count — the dominance
+  // benefit isn't worth ~one tx per token, and the fixed path is long-proven.
+  const fixedChunkCount = Math.max(1, Math.ceil(workingSteps.length / EXECUTION_BATCH_SIZE));
+  if (!sweepOnly && chunkPlans.length > fixedChunkCount * 2) {
+    log('broadcast', `value-packing fragmented into ${chunkPlans.length} chunk(s) (>2x the ${fixedChunkCount} fixed slices); falling back to fixed slicing`);
+    chunkPlans = [];
+    for (let i = 0; i < workingSteps.length; i += EXECUTION_BATCH_SIZE) chunkPlans.push(workingSteps.slice(i, i + EXECUTION_BATCH_SIZE));
+  }
+  const numChunks = chunkPlans.length;
   if (sweepOnly) {
     log('broadcast', 'Sweep-only run — proceeding to vault sweep');
   } else if (numChunks > 0) {
-    log('broadcast', `Swapping in ${numChunks} chunk(s) of up to ${EXECUTION_BATCH_SIZE} step(s) — batch failures fall through to the per-token sweep`);
+    log('broadcast', `Swapping in ${numChunks} value-balanced chunk(s) (≤${EXECUTION_BATCH_SIZE} steps, no token >${DOMINANCE_NUM}% of a chunk) — batch failures fall through to the per-token sweep`);
   } else {
     log('broadcast', 'No executable swap steps — proceeding straight to the per-token sweep');
   }
 
   for (let chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
-    const chunkStart = chunkIdx * EXECUTION_BATCH_SIZE;
-    const chunkEnd   = Math.min(chunkStart + EXECUTION_BATCH_SIZE, workingSteps.length);
     // Claim was done up front in Phase 1, so every chunk here is swap-only.
     const chunkTokensToClaim: Address[] = [];
 
     log('chunk', `═════ Swap chunk ${chunkIdx + 1}/${numChunks} ═════`);
 
     // --- JIT refresh THIS chunk's quotes ---
-    let chunkSteps = workingSteps.slice(chunkStart, chunkEnd);
+    let chunkSteps = chunkPlans[chunkIdx];
     if (chunkSteps.length > 0) {
       const refreshed = await refreshQuotes(chunkSteps, claimableByAddr);
       chunkSteps = refreshed.steps;
@@ -1510,9 +1559,10 @@ async function main() {
       for (const { tok, bal } of candidates) {
         log('sweep', `  attempting ${tok.symbol} (${formatUnits(bal, tok.decimals)})...`);
         const r = await individualRetry(
-          publicClient, walletClient, account, tok, bal, targetEpoch, quoteFetcher, nonceManager,
+          publicClient, walletClient, account, tok, bal, targetEpoch, quoteFetcher, nonceManager, lastReceiptBlock,
         );
         individualResults.push({ ...r, pass });
+        if (r.receiptBlock && (!lastReceiptBlock || r.receiptBlock > lastReceiptBlock)) lastReceiptBlock = r.receiptBlock;
         if (r.success) {
           anyDeliveredUSDC = true;
           log('sweep', `    ✓ ${tok.symbol}: ${formatUnits(r.usdcOut || 0n, 6)} USDC (tx ${r.txHash})`);
@@ -1535,7 +1585,10 @@ async function main() {
 
     if (totalPasses > 1) log('sweep', `completed ${totalPasses} sweep pass(es)`);
 
-    // Refresh bucketed total
+    // Refresh bucketed total — catch up to the last sweep tx first so a lagging
+    // node can't serve a stale-low usdcForEpoch (which under-reported the real
+    // bucket, e.g. 222 logged vs 323 on-chain, in a prior run).
+    if (lastReceiptBlock) await waitForChainCatchUp(publicClient, lastReceiptBlock, 'sweep');
     bucketed = (await publicClient.readContract({
       address: VAULT_ADDR, abi: VAULT_ABI, functionName: 'usdcForEpoch', args: [targetEpoch],
     })) as bigint;
@@ -1572,6 +1625,7 @@ async function main() {
       if (finReceipt.status !== 'success') {
         log('finalize', `WARN: finalize tx reverted (${finalizeTxHash}); epoch left open`);
       } else {
+        lastReceiptBlock = finReceipt.blockNumber;
         log('finalize', `Finalized: ${finalizeTxHash}`);
       }
     } catch (e: any) {
@@ -1589,6 +1643,9 @@ async function main() {
   }
 
   // ---------------- Postflight: residual tokens still in vault or swapper ----------------
+  // Catch up to the latest tx first so the residue scan isn't served stale state
+  // (which previously reported already-swapped tokens as "stuck in swapper").
+  if (lastReceiptBlock) await waitForChainCatchUp(publicClient, lastReceiptBlock, 'postflight');
   const stuckInSwapper: Array<{ address: Address; balance: bigint }> = [];
   const stuckInVault: Array<{ address: Address; balance: bigint }> = [];
   for (const tok of claimable) {
