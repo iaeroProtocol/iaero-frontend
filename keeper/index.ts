@@ -276,8 +276,21 @@ async function discoverClaimableTokens(
 
   log('discover', 'Fetching spam blocklist...');
   const blocklist = await fetchSpamBlocklist();
-  const preFiltered = allTokens.filter(t => !blocklist.addresses.has(t.toLowerCase()));
-  log('discover', `Address-filtered ${allTokens.length} → ${preFiltered.length}`);
+  // Defense-in-depth: never let principal (iAERO) or the stiAERO receipt token into
+  // the claim/swap plan, even if a registry/funding mishap ever listed one with a
+  // non-zero previewClaim. The vault's harvest() does NOT reject these as swap
+  // inputs on-chain, so the keeper is the guard (mirrors buildSweepUniverse).
+  const excluded = new Set([IAERO_ADDR.toLowerCase()]);
+  try {
+    const receipt = (await client.readContract({
+      address: EPOCH_DIST_ADDR, abi: EPOCH_DIST_ABI, functionName: 'receiptToken',
+    })) as Address;
+    if (receipt && receipt !== '0x0000000000000000000000000000000000000000') excluded.add(receipt.toLowerCase());
+  } catch {
+    log('discover', 'WARN: could not read receiptToken(); stiAERO not dynamically excluded from claim path');
+  }
+  const preFiltered = allTokens.filter(t => !blocklist.addresses.has(t.toLowerCase()) && !excluded.has(t.toLowerCase()));
+  log('discover', `Address-filtered ${allTokens.length} → ${preFiltered.length} (excl. spam${excluded.size > 1 ? ' + iAERO/stiAERO' : ' + iAERO'})`);
 
   // previewClaim for each token against the vault, in parallel.
   log('discover', 'Querying previewClaim for each token...');
@@ -1543,6 +1556,10 @@ async function main() {
 
     for (let pass = 1; pass <= MAX_SWEEPS; pass++) {
       totalPasses = pass;
+      // Catch up to the last sweep/claim tx first so the balance-based scan reads a
+      // consistent post-tx state (a lagging node could otherwise still show a token
+      // a prior pass already swapped, or miss one a prior pass just claimed).
+      if (lastReceiptBlock) await waitForChainCatchUp(publicClient, lastReceiptBlock, 'sweep');
       // Re-scan the whole vault — picks up this epoch's un-swapped claims AND
       // any residue stranded by earlier epochs.
       const candidates = await scanVaultBalances(
@@ -1563,11 +1580,16 @@ async function main() {
         );
         individualResults.push({ ...r, pass });
         if (r.receiptBlock && (!lastReceiptBlock || r.receiptBlock > lastReceiptBlock)) lastReceiptBlock = r.receiptBlock;
+        // A confirmed single-step sweep provably delivered USDC: its per-step
+        // minOut>0 floor means a confirmed tx can't have delivered 0 / stranded.
+        // So count txConfirmed — not just a freshly-read usdcOut>0 — as progress,
+        // which keeps the pass>=2 early stop from firing when an RPC lag longer
+        // than the catch-up budget makes usdcOut read a stale 0.
+        if (r.success || r.txConfirmed) anyDeliveredUSDC = true;
         if (r.success) {
-          anyDeliveredUSDC = true;
           log('sweep', `    ✓ ${tok.symbol}: ${formatUnits(r.usdcOut || 0n, 6)} USDC (tx ${r.txHash})`);
         } else if (r.txConfirmed) {
-          log('sweep', `    ⚠ ${tok.symbol}: tx confirmed but 0 USDC delivered — token now in swapper (tx ${r.txHash})`);
+          log('sweep', `    ✓ ${tok.symbol}: delivered (post-tx USDC read lagged; tx ${r.txHash})`);
         } else {
           log('sweep', `    ✗ ${tok.symbol}: ${r.error?.substring(0, 160)}`);
         }
@@ -1648,27 +1670,49 @@ async function main() {
   if (lastReceiptBlock) await waitForChainCatchUp(publicClient, lastReceiptBlock, 'postflight');
   const stuckInSwapper: Array<{ address: Address; balance: bigint }> = [];
   const stuckInVault: Array<{ address: Address; balance: bigint }> = [];
-  for (const tok of claimable) {
-    if (tok.address.toLowerCase() === USDC_ADDR.toLowerCase()) continue;
-    try {
-      const inSwapper = (await publicClient.readContract({
-        address: tok.address, abi: ERC20_BASIC_ABI, functionName: 'balanceOf', args: [SWAPPER_ADDRESS],
-      })) as bigint;
-      if (inSwapper > 0n) stuckInSwapper.push({ address: tok.address, balance: inSwapper });
-
-      const inVault = (await publicClient.readContract({
-        address: tok.address, abi: ERC20_BASIC_ABI, functionName: 'balanceOf', args: [VAULT_ADDR],
-      })) as bigint;
-      if (inVault > 0n) stuckInVault.push({ address: tok.address, balance: inVault });
-    } catch {}
+  // Scan every token THIS run touched — this epoch's claimable AND every token the
+  // Tier-3 sweep attempted — not just `claimable`, so a swap that stranded a token
+  // in the swapper, or prior-epoch residue left in the vault, is caught too. (Both
+  // source lists already exclude iAERO/stiAERO; we skip USDC defensively.)
+  {
+    const seen = new Set<string>();
+    const scanList: Address[] = [];
+    for (const a of [...claimable.map(c => c.address), ...individualResults.map(r => r.address)]) {
+      const lc = a.toLowerCase();
+      if (lc === USDC_ADDR.toLowerCase() || seen.has(lc)) continue;
+      seen.add(lc); scanList.push(a);
+    }
+    for (const addr of scanList) {
+      try {
+        const inSwapper = (await publicClient.readContract({
+          address: addr, abi: ERC20_BASIC_ABI, functionName: 'balanceOf', args: [SWAPPER_ADDRESS],
+        })) as bigint;
+        if (inSwapper > 0n) stuckInSwapper.push({ address: addr, balance: inSwapper });
+        const inVault = (await publicClient.readContract({
+          address: addr, abi: ERC20_BASIC_ABI, functionName: 'balanceOf', args: [VAULT_ADDR],
+        })) as bigint;
+        if (inVault > 0n) stuckInVault.push({ address: addr, balance: inVault });
+      } catch {}
+    }
   }
   if (stuckInSwapper.length > 0) {
     log('postflight', `Stuck in swapper (may include other callers'):`);
     for (const s of stuckInSwapper) log('postflight', `  ${s.address}: ${s.balance}`);
   }
   if (stuckInVault.length > 0) {
-    log('postflight', `Still in vault (admin rescue candidates):`);
+    log('postflight', `Still in vault (admin rescue / next-sweep candidates):`);
     for (const s of stuckInVault) log('postflight', `  ${s.address}: ${s.balance}`);
+  }
+  // Escalate residue to an ALERT so a human can act — these were logged-only before
+  // and went unnoticed: a swapper strand is value that left the vault and the keeper
+  // cannot self-recover (swapper.rescueERC20 is owner-only); vault residue gets
+  // swept on a later run but then buckets to a DIFFERENT epoch.
+  if (stuckInSwapper.length > 0 || stuckInVault.length > 0) {
+    const fmt = (a: Array<{ address: Address; balance: bigint }>) => a.map(s => `${s.address}=${s.balance}`).join(', ');
+    await sendAlert('auto-USDC keeper: residual tokens after harvest',
+      `epoch ${targetEpoch} — ` +
+      (stuckInSwapper.length ? `stranded in swapper (may include other callers'; needs owner rescueERC20): ${fmt(stuckInSwapper)}. ` : '') +
+      (stuckInVault.length ? `left in vault (a later run sweeps it to a different epoch): ${fmt(stuckInVault)}.` : ''));
   }
 
   persistRun({
