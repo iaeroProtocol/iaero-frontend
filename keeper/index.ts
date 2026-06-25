@@ -499,9 +499,15 @@ async function buildSwapPlanFor(
       quote:  result.quote,
       slippageBps,
     });
-    // useAll: vault holds full balance post-claim; if the quotedIn ±5% window
-    // is breached the upstream swapper skips this step (allowPartial: true).
-    step.useAll = true;
+    // Sell EXACTLY the quoted (entitlement) amount, not the vault's full balance.
+    // useAll:true was unsafe: the swapper pulls balanceOf(vault) FIRST, then checks
+    // quotedIn ∈ ±5% of the pulled amount. If same-token residue from a prior epoch
+    // sits in the vault, balanceOf = entitlement + residue > quotedIn(entitlement),
+    // the window fails, and the already-pulled tokens are STRANDED IN THE SWAPPER
+    // (allowPartial swallows the skip). With useAll:false the swapper pulls exactly
+    // amountIn = quotedIn = entitlement → window always holds; any residue stays in
+    // the vault for the Tier-3 sweep, which quotes the live balance and handles it.
+    step.useAll = false;
 
     steps.push(step);
     tokensInPlan.push(tok.address);
@@ -1235,35 +1241,126 @@ async function main() {
   const ethBalance = await publicClient.getBalance({ address: account.address });
   log('broadcast', `Keeper ETH balance: ${formatEther(ethBalance)} ETH`);
 
-  // ---------------- Main broadcast — CHUNKED ----------------
-  // Split workingSteps into chunks of at most EXECUTION_BATCH_SIZE. Chunk 1
-  // claims ALL tokens (including those isolation dropped + USDC-as-reward);
-  // chunks 2+ have empty tokensToClaim and just swap. Each chunk refreshes
-  // its own quotes JIT and re-isolates within the chunk if sim fails.
-  // Always finalize=false here; final flip happens via the separate finalize
-  // tx at the very end (after Tier 3 sweep).
-  // sweepOnly ⇒ nothing to claim or main-swap; skip straight to the Tier-3 sweep.
-  const numChunks = sweepOnly ? 0 : Math.max(1, Math.ceil(workingSteps.length / EXECUTION_BATCH_SIZE));
-  if (sweepOnly) {
-    log('broadcast', 'Sweep-only run — no claim/main-swap broadcast; proceeding to vault sweep');
-  } else {
-    log('broadcast', `Splitting into ${numChunks} chunk(s) of up to ${EXECUTION_BATCH_SIZE} swap steps each`);
-  }
+  // ---------------- Main broadcast — CLAIM FIRST, THEN SWAP ----------------
+  // The claim and the swaps are DECOUPLED on purpose. Bundling them (the old
+  // "chunk 1 claims + swaps under a 95% floor" design) meant a single token's
+  // swap slipping below the aggregate floor reverted the whole tx — claim and
+  // all — and the keeper then die()d, never reaching the per-token sweep. That
+  // is exactly what stranded epoch 1781740800.
+  //
+  //   Phase 1: a dedicated claim-only harvest (no swap plan, no slippage floor).
+  //            Banks the directly-claimed USDC + pulls every raw reward token
+  //            into the vault. Cannot revert on slippage. Only a claim that
+  //            banks NOTHING is fatal.
+  //   Phase 2: swap-only chunks. Every failure is NON-fatal — whatever a batch
+  //            can't convert is left in the vault for the Tier-3 per-token sweep
+  //            (boosted slippage), which is now always reached.
+  // finalize=false everywhere here; the flag is flipped by the separate finalize
+  // tx at the very end (after the Tier-3 sweep). sweepOnly skips straight to it.
 
   interface ChunkRecord { chunk: number; txHash?: Hex; gasUsed?: bigint; success: boolean; error?: string; usdcAfter: bigint }
   const chunkResults: ChunkRecord[] = [];
-  let firstChunkSuccess = false;
   let lastTxHash: Hex | undefined;
   let lastReceiptBlock: bigint | undefined;
   let totalGasUsed = 0n;
 
+  // Snapshot the epoch's USDC bucket BEFORE we do anything. On a re-run of an
+  // unfinalized epoch the bucket already holds prior-run USDC, so the end-of-run
+  // health gate must measure THIS run's contribution as a delta, not the absolute.
+  const bucketedAtStart = (await publicClient.readContract({
+    address: VAULT_ADDR, abi: VAULT_ABI, functionName: 'usdcForEpoch', args: [targetEpoch],
+  })) as bigint;
+
+  // ---- Phase 1: CLAIM (dedicated tx, no swaps, no slippage floor) ----
+  // `claimBanked` => at least one batch landed (so we have something to work with).
+  // `allClaimBatchesLanded` => EVERY batch landed; it gates finalize, because
+  // finalizing while a batch's entitlement is still unclaimed would strand it
+  // behind the vault's AlreadyFinalized guard (admin-unfinalize-only recovery).
+  let claimBanked = false;
+  let allClaimBatchesLanded = true;
+  if (!sweepOnly && tokensToClaim.length > 0) {
+    const CLAIM_BATCH = 40; // stay under the vault's 50-token cap
+    for (let i = 0; i < tokensToClaim.length; i += CLAIM_BATCH) {
+      const batch = tokensToClaim.slice(i, i + CLAIM_BATCH);
+      log('claim', `Claiming ${batch.length} token(s) — no swaps, no floor (banks USDC + pulls raw tokens)`);
+      let landed = false;
+      for (let attempt = 1; attempt <= 2 && !landed; attempt++) {
+        // Split send from receipt-wait so the two failure modes get the right
+        // nonce treatment (mirrors the Phase-2 chunk loop and Tier-3 sweep):
+        //   • send throws        → nonce NOT consumed on-chain → resync + retry (no gap)
+        //   • receipt-wait throws→ send DID consume the nonce, tx stuck → die() (a
+        //                          retry would queue behind it on a nonce gap)
+        //   • reverted receipt   → nonce consumed on-chain (no gap) → retry, NO resync
+        let h: Hex;
+        try {
+          h = await walletClient.writeContract({
+            address: VAULT_ADDR, abi: HARVEST_ABI, functionName: 'harvest',
+            args: [targetEpoch, batch, [], 0n, false] as any,
+            account, chain: base, nonce: nonceManager.peek(),
+          });
+          nonceManager.consume();
+          log('claim', `  tx: ${h}`);
+        } catch (e: any) {
+          await nonceManager.resync();
+          const msg = (e.shortMessage || e.message || String(e)).substring(0, 200);
+          log('claim', `  ✗ claim send attempt ${attempt} failed: ${msg}${attempt < 2 ? ' — retrying' : ''}`);
+          if (attempt < 2) { await sleep(2000); continue; }
+          chunkResults.push({ chunk: chunkResults.length + 1, success: false, error: msg, usdcAfter: 0n });
+          continue;
+        }
+        let rcpt;
+        try {
+          rcpt = await publicClient.waitForTransactionReceipt({ hash: h, timeout: RECEIPT_TIMEOUT_MS });
+        } catch (e: any) {
+          die('claim', `claim tx ${h} not mined in ${Math.round(RECEIPT_TIMEOUT_MS / 1000)}s (stuck?); aborting to avoid nonce-gap pileup`,
+              { txHash: h, err: e.shortMessage || e.message });
+        }
+        if (rcpt.status === 'success') {
+          landed = true; claimBanked = true;
+          lastTxHash = h; lastReceiptBlock = rcpt.blockNumber; totalGasUsed += rcpt.gasUsed;
+          chunkResults.push({ chunk: chunkResults.length + 1, txHash: h, gasUsed: rcpt.gasUsed, success: true, usdcAfter: 0n });
+          log('claim', `  ✓ claimed in block ${rcpt.blockNumber}, gas=${rcpt.gasUsed}`);
+        } else {
+          log('claim', `  ✗ claim tx reverted (block ${rcpt.blockNumber})${attempt < 2 ? ' — retrying' : ''}`);
+          if (attempt >= 2) chunkResults.push({ chunk: chunkResults.length + 1, txHash: h, success: false, error: `reverted (block ${rcpt.blockNumber})`, usdcAfter: 0n });
+        }
+      }
+      if (!landed) allClaimBatchesLanded = false;
+    }
+    if (!claimBanked) {
+      // Nothing banked at all — the only genuinely fatal broadcast condition
+      // (almost always RPC/funds, never slippage now). Surface for investigation.
+      die('claim', 'All claim attempts failed — nothing claimed; aborting for investigation');
+    }
+    if (!allClaimBatchesLanded) {
+      // Some (not all) batches landed. We keep going to swap/sweep what we DID
+      // claim, but finalize is suppressed below so the un-claimed batch can be
+      // picked up by a re-run instead of being locked out by AlreadyFinalized.
+      log('claim', 'WARN: a claim batch failed — epoch will be left OPEN (finalize suppressed) so a re-run can claim the rest');
+    }
+    // Let laggy RPC nodes catch up so the swap chunks see the freshly-claimed balances.
+    if (lastReceiptBlock) await waitForChainCatchUp(publicClient, lastReceiptBlock, 'claim');
+  } else if (sweepOnly) {
+    log('claim', 'Sweep-only run — skipping claim; converting existing vault balances');
+  }
+
+  // ---- Phase 2: SWAP in chunks (swap-only; every failure is NON-fatal) ----
+  const numChunks = sweepOnly ? 0 : Math.ceil(workingSteps.length / EXECUTION_BATCH_SIZE);
+  if (sweepOnly) {
+    log('broadcast', 'Sweep-only run — proceeding to vault sweep');
+  } else if (numChunks > 0) {
+    log('broadcast', `Swapping in ${numChunks} chunk(s) of up to ${EXECUTION_BATCH_SIZE} step(s) — batch failures fall through to the per-token sweep`);
+  } else {
+    log('broadcast', 'No executable swap steps — proceeding straight to the per-token sweep');
+  }
+
   for (let chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
     const chunkStart = chunkIdx * EXECUTION_BATCH_SIZE;
     const chunkEnd   = Math.min(chunkStart + EXECUTION_BATCH_SIZE, workingSteps.length);
-    const isFirstChunk = chunkIdx === 0;
-    const chunkTokensToClaim = isFirstChunk ? tokensToClaim : [];
+    // Claim was done up front in Phase 1, so every chunk here is swap-only.
+    const chunkTokensToClaim: Address[] = [];
 
-    log('chunk', `═════ Chunk ${chunkIdx + 1}/${numChunks} ═════`);
+    log('chunk', `═════ Swap chunk ${chunkIdx + 1}/${numChunks} ═════`);
 
     // --- JIT refresh THIS chunk's quotes ---
     let chunkSteps = workingSteps.slice(chunkStart, chunkEnd);
@@ -1299,9 +1396,10 @@ async function main() {
       }
     }
 
-    // If this is not chunk 1 AND we have nothing to do, skip (no claims, no swaps).
-    if (!isFirstChunk && chunkSteps.length === 0) {
-      log('chunk', `  empty plan and no claims needed — skipping broadcast`);
+    // Isolation dropped every step in this chunk — nothing to broadcast. The
+    // dropped tokens stay in the vault and are picked up by the Tier-3 sweep.
+    if (chunkSteps.length === 0) {
+      log('chunk', `  no executable steps — deferring these tokens to the per-token sweep`);
       chunkResults.push({ chunk: chunkIdx + 1, success: true, usdcAfter: 0n });
       continue;
     }
@@ -1322,14 +1420,11 @@ async function main() {
     } catch (e: any) {
       await nonceManager.resync();
       const msg = (e.shortMessage || e.message || String(e)).substring(0, 200);
-      log('chunk', `  ✗ broadcast failed: ${msg}`);
+      log('chunk', `  ✗ swap chunk failed: ${msg}`);
       chunkResults.push({ chunk: chunkIdx + 1, success: false, error: msg, usdcAfter: 0n });
-      if (isFirstChunk) {
-        // First chunk owns the claim — failure here means nothing claimed; abort.
-        die('broadcast', `Chunk 1 (claim chunk) failed; nothing was claimed`, { error: msg });
-      }
-      // For non-first chunks, log and continue — tokens are still in vault
-      // for the Tier 3 sweep to retry individually.
+      // Non-fatal: the claim already banked separately, so these tokens are safe
+      // in the vault. The Tier-3 per-token sweep retries each one individually
+      // with boosted slippage. Never crash the run on a swap failure.
       continue;
     }
     log('chunk', `  tx: ${chunkTxHash}`);
@@ -1349,9 +1444,9 @@ async function main() {
     }
     if (chunkReceipt!.status !== 'success') {
       // Reverted txs still mine and consume their nonce — no gap, safe to continue.
-      log('chunk', `  ✗ tx reverted (block ${chunkReceipt!.blockNumber})`);
+      // Non-fatal: tokens stay in the vault for the Tier-3 per-token sweep.
+      log('chunk', `  ✗ swap chunk reverted (block ${chunkReceipt!.blockNumber})`);
       chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, success: false, error: `reverted (block ${chunkReceipt!.blockNumber})`, usdcAfter: 0n });
-      if (isFirstChunk) die('broadcast', `Chunk 1 reverted; nothing was claimed`, { txHash: chunkTxHash });
       continue;
     }
     lastTxHash = chunkTxHash;
@@ -1368,14 +1463,6 @@ async function main() {
       // gap). Record success without the usdcAfter figure rather than aborting.
       chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, gasUsed: chunkReceipt!.gasUsed, success: true, usdcAfter: 0n });
     }
-    if (isFirstChunk) firstChunkSuccess = true;
-  }
-
-  if (numChunks > 0 && !firstChunkSuccess && workingSteps.length === 0) {
-    // Edge case: workingSteps was empty so numChunks was forced to 1. The
-    // single chunk handles the claim. If that failed we already die()d above.
-    // This path shouldn't normally reach but keep it defensive.
-    log('broadcast', 'No chunks succeeded; continuing to Tier 3 sweep against whatever the vault has');
   }
 
   // Backwards-compat reporting fields (kept so the persistRun shape matches earlier runs)
@@ -1458,12 +1545,15 @@ async function main() {
   // ---------------- Finalize ----------------
   // Single empty-plan harvest call just to flip the finalized flag.
   //
-  // Guard: never finalize an epoch that still has UNCLAIMED entitlement. A
-  // SWEEP_ON_START drain run deliberately skips claiming, so if it targets an
-  // epoch that hasn't been harvested yet (claimable > 0), finalizing here would
-  // lock in that epoch's rewards unclaimed. Only finalize for a normal harvest,
-  // or for a sweep where there was genuinely nothing left to claim.
-  const shouldFinalize = FINALIZE && (!sweepOnly || claimable.length === 0);
+  // Guard: never finalize an epoch that still has UNCLAIMED entitlement. Two ways
+  // that can happen: (a) a SWEEP_ON_START drain run deliberately skips claiming,
+  // and (b) a multi-batch claim where some batch failed (allClaimBatchesLanded
+  // is false). Finalizing in either case would lock the un-claimed entitlement
+  // out behind the vault's AlreadyFinalized guard (admin-unfinalize-only
+  // recovery). Only finalize for a normal harvest whose claim FULLY landed, or a
+  // sweep where there was genuinely nothing left to claim.
+  const claimIncomplete = !sweepOnly && !allClaimBatchesLanded;
+  const shouldFinalize = FINALIZE && (!sweepOnly || claimable.length === 0) && !claimIncomplete;
   let finalizeTxHash: Hex | undefined;
   if (shouldFinalize) {
     log('finalize', 'Finalizing epoch...');
@@ -1490,6 +1580,10 @@ async function main() {
     }
   } else if (!FINALIZE) {
     log('finalize', 'FINALIZE=0 — epoch left open');
+  } else if (claimIncomplete) {
+    log('finalize', `A claim batch failed — leaving epoch ${targetEpoch} OPEN (finalize suppressed) so its un-claimed entitlement isn't stranded behind AlreadyFinalized; re-run to finish`);
+    await sendAlert('claim incomplete — epoch left open',
+      `epoch ${targetEpoch}: at least one claim batch failed; finalize skipped so a re-run can claim the rest`);
   } else {
     log('finalize', `SWEEP_ON_START drain with ${claimable.length} token(s) still claimable — leaving epoch ${targetEpoch} open for its normal harvest`);
   }
@@ -1571,13 +1665,25 @@ async function main() {
   // succeeded. Exit non-zero so Railway marks the run failed (failed-run
   // webhook / alert) instead of reporting a silent "success" with a near-empty
   // bucket — the exact failure mode that went unnoticed for epoch 1779926400.
+  // Measure THIS run's contribution as a delta over the pre-run bucket (a re-run
+  // of an unfinalized epoch starts with prior-run USDC already bucketed, which
+  // would otherwise mask a run that converted nothing). directUsdcClaim is this
+  // run's USDC entitlement (0 on a re-run where USDC was already claimed), so
+  // subtracting it isolates swap-derived USDC banked by THIS run.
   const directUsdcClaim = claimable.find(c => c.address.toLowerCase() === USDC_ADDR.toLowerCase())?.claimable ?? 0n;
-  const swapDerivedUsdc = bucketed > directUsdcClaim ? bucketed - directUsdcClaim : 0n;
+  const bucketedThisRun = bucketed > bucketedAtStart ? bucketed - bucketedAtStart : 0n;
+  const swapDerivedUsdc = bucketedThisRun > directUsdcClaim ? bucketedThisRun - directUsdcClaim : 0n;
   if (finalPlan.totalQuotedUSDC > 0n && swapDerivedUsdc === 0n) {
-    die('summary',
-      `Harvest converted NONE of ${formatUnits(finalPlan.totalQuotedUSDC, 6)} USDC swappable rewards ` +
-      `(bucketed ${formatUnits(bucketed, 6)}, direct USDC claim ${formatUnits(directUsdcClaim, 6)}) — ` +
-      `flagging run as failed for investigation`);
+    // Degraded, NOT fatal. The claim succeeded (USDC banked, raw tokens safe in
+    // the vault), so we do NOT crash the service — the leftover tokens are picked
+    // up by the next run's Tier-3 sweep. Alert a human, but exit 0.
+    log('summary',
+      `WARN: converted NONE of ${formatUnits(finalPlan.totalQuotedUSDC, 6)} USDC swappable rewards ` +
+      `(this-run bucketed Δ ${formatUnits(bucketedThisRun, 6)}, direct USDC claim ${formatUnits(directUsdcClaim, 6)}); ` +
+      `leftover tokens remain in the vault for the next sweep`);
+    await sendAlert('degraded harvest (no swaps converted)',
+      `epoch ${targetEpoch}: claim OK but 0 of ${formatUnits(finalPlan.totalQuotedUSDC, 6)} USDC swappable ` +
+      `rewards converted this run; leftover tokens safe in vault, will retry next run`);
   }
 
   log('main', 'Done.');
