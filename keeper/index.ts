@@ -91,6 +91,11 @@ for (const candidate of [
 
 const VAULT_ADDR      = '0xFE5c929677D97723dc822C86c93c7e2D1B59c774' as Address;
 const IAERO_ADDR      = '0x81034Fb34009115F215f5d5F564AAc9FfA46a1Dc' as Address;
+// stiAERO receipt token — the vault holds it 1:1 with its stake and BURNS it on
+// withdraw, so swapping it away bricks withdrawals. Hardcoded so the exclusion is
+// FAIL-CLOSED even if the dynamic receiptToken() read fails; the dynamic lookup is
+// kept as well, to also catch a future upstream receipt-token change.
+const STIAERO_ADDR    = '0x72C135B8eEBC57A3823f0920233e1A90FF4D683D' as Address;
 const EPOCH_DIST_ADDR = '0x781A80fA817b5a146C440F03EF8643f4aca6588A' as Address;
 const WEEK            = 7n * 24n * 60n * 60n;
 
@@ -280,14 +285,14 @@ async function discoverClaimableTokens(
   // the claim/swap plan, even if a registry/funding mishap ever listed one with a
   // non-zero previewClaim. The vault's harvest() does NOT reject these as swap
   // inputs on-chain, so the keeper is the guard (mirrors buildSweepUniverse).
-  const excluded = new Set([IAERO_ADDR.toLowerCase()]);
+  const excluded = new Set([IAERO_ADDR.toLowerCase(), STIAERO_ADDR.toLowerCase()]);
   try {
     const receipt = (await client.readContract({
       address: EPOCH_DIST_ADDR, abi: EPOCH_DIST_ABI, functionName: 'receiptToken',
     })) as Address;
     if (receipt && receipt !== '0x0000000000000000000000000000000000000000') excluded.add(receipt.toLowerCase());
   } catch {
-    log('discover', 'WARN: could not read receiptToken(); stiAERO not dynamically excluded from claim path');
+    log('discover', 'WARN: could not read receiptToken(); stiAERO still excluded via hardcoded STIAERO_ADDR (claim path)');
   }
   const preFiltered = allTokens.filter(t => !blocklist.addresses.has(t.toLowerCase()) && !excluded.has(t.toLowerCase()));
   log('discover', `Address-filtered ${allTokens.length} → ${preFiltered.length} (excl. spam${excluded.size > 1 ? ' + iAERO/stiAERO' : ' + iAERO'})`);
@@ -373,7 +378,7 @@ async function buildSweepUniverse(
   })) as readonly Address[];
   const blocklist = await fetchSpamBlocklist();
 
-  const excluded = new Set([USDC_ADDR.toLowerCase(), IAERO_ADDR.toLowerCase()]);
+  const excluded = new Set([USDC_ADDR.toLowerCase(), IAERO_ADDR.toLowerCase(), STIAERO_ADDR.toLowerCase()]);
   try {
     const receipt = (await client.readContract({
       address: EPOCH_DIST_ADDR, abi: EPOCH_DIST_ABI, functionName: 'receiptToken',
@@ -382,7 +387,7 @@ async function buildSweepUniverse(
       excluded.add(receipt.toLowerCase());
     }
   } catch {
-    log('discover', 'WARN: could not read receiptToken(); stiAERO not dynamically excluded from sweep');
+    log('discover', 'WARN: could not read receiptToken(); stiAERO still excluded via hardcoded STIAERO_ADDR (sweep)');
   }
 
   const tokens = allTokens.filter(
