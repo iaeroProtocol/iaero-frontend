@@ -54,7 +54,11 @@ export const QUOTE_BATCH_DELAY = 500;  // ms between quote batches
 export const EXECUTION_BATCH_SIZE = 10;
 
 /** Slippage floor / cap (bps). Matches RewardsSection.tsx::calculateSlippage. */
-export const SLIPPAGE_MIN_BPS = 30;
+// Keeper floor of 150 bps (1.5%): the keeper quotes then broadcasts seconds later,
+// so a 30-bps floor made blue-chip legs (e.g. WETH) fail 0x's embedded minOut on
+// normal quote drift and revert their whole chunk to the slow per-token sweep. The
+// aggregate MIN_USDC_PCT floor still bounds total value loss. (Frontend keeps 30.)
+export const SLIPPAGE_MIN_BPS = 150;
 export const SLIPPAGE_MAX_BPS = 500;
 
 /** Boosted slippage used in retry / individual-fallback paths. */
@@ -195,6 +199,13 @@ export interface QuoteRequest {
   buyToken:   string;
   sellAmount: bigint;
   taker:      string;
+  /**
+   * Optional slippage tolerance (bps) to bake into 0x's returned calldata. When
+   * omitted, 0x uses its default (~1%). Setting it makes 0x's embedded minOut match
+   * our intended tolerance — critical on boosted/sweep retries where our contract-
+   * side floor is looser than 0x's default (else 0x reverts before our floor applies).
+   */
+  slippageBps?: number;
 }
 
 /**
@@ -228,6 +239,7 @@ export const browserQuoteFetcher: QuoteFetcher = async (req) => {
     sellAmount: req.sellAmount.toString(),
     taker:      req.taker,
   });
+  if (req.slippageBps != null) params.set('slippageBps', String(req.slippageBps));
   const res = await fetch(`/api/0x/quote?${params}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -251,6 +263,7 @@ export function createDirectQuoteFetcher(apiKey: string): QuoteFetcher {
       sellAmount: req.sellAmount.toString(),
       taker:      req.taker,
     });
+    if (req.slippageBps != null) params.set('slippageBps', String(req.slippageBps));
     const res = await fetch(
       `https://api.0x.org/swap/allowance-holder/quote?${params}`,
       { headers: { '0x-api-key': apiKey, '0x-version': 'v2' } },
@@ -280,7 +293,7 @@ export async function fetch0xQuote(
  * Slippage in bps as a function of measured price impact percent.
  * Matches RewardsSection.tsx::calculateSlippage exactly.
  *
- * Normal mode:  max(30, 30 + ceil(impactBps * 1.5)) capped at 500 bps (5%).
+ * Normal mode:  max(SLIPPAGE_MIN_BPS, SLIPPAGE_MIN_BPS + ceil(impactBps*1.5)) capped at 500 bps (5%).
  * Forced mode:  max(500, impactBps + 1000) capped at 9900 bps (99%).
  */
 export function calculateSlippage(
@@ -466,18 +479,21 @@ export async function getQuoteWithImpact(args: {
   taker?: Address;
   fetcher?: QuoteFetcher;
   referencePriceMapEntry?: number;
+  /** Slippage (bps) baked into the MAIN quote's 0x calldata. Omit for 0x default. */
+  slippageBps?: number;
 }): Promise<QuoteBatchResult> {
   const {
     chainId, token, outToken, outputPrice, outputDecimals,
     taker = SWAPPER_ADDRESS,
     fetcher = browserQuoteFetcher,
     referencePriceMapEntry,
+    slippageBps,
   } = args;
 
   try {
     const mainQuote = await fetcher({
       chainId, sellToken: token.address, buyToken: outToken,
-      sellAmount: token.walletBN, taker,
+      sellAmount: token.walletBN, taker, slippageBps,
     });
     if (!mainQuote?.transaction?.data) {
       return { success: false, token, error: 'No quote available' };

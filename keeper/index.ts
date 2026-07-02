@@ -7,10 +7,15 @@
 // (filtering spam / unswappable), builds a PullStep[] swap plan, and calls
 // `vault.harvest()` to claim + swap into USDC + bucket per-epoch.
 //
-// Uses a vendored copy of the swap pipeline at `./swap-pipeline.ts` (canonical
-// source lives at iaero-frontend/src/lib/swap-pipeline.ts). The vendored copy
-// is byte-identical and CI enforces drift via .github/workflows/keeper-sync.yml.
-// Whenever the canonical file changes, copy it across before committing.
+// Uses a copy of the swap pipeline at `./swap-pipeline.ts`, derived from the
+// frontend's iaero-frontend/src/lib/swap-pipeline.ts but with INTENTIONAL,
+// keeper-only deltas — do NOT blindly copy the frontend file over this one, that
+// would silently revert them:
+//   - SLIPPAGE_MIN_BPS = 150 (frontend: 30). The keeper quotes then broadcasts
+//     seconds later, so it needs a wider floor against quote drift.
+//   - QuoteRequest.slippageBps + both fetchers + getQuoteWithImpact forward it,
+//     so 0x's embedded calldata minOut matches our tolerance.
+// When porting an UNRELATED frontend change, merge it in — keep the deltas above.
 //
 // Usage:
 //   npx tsx protocol/scripts/auto-usdc-vault-keeper.ts             # broadcast
@@ -71,6 +76,7 @@ import {
   type SwapStep,
   type TokenForSwap,
 } from './swap-pipeline';
+import { SWEEP_SLIPPAGE_LADDER_BPS, sweepSlippageForPass } from './sweep-ladder';
 
 // ---------------------------------------------------------------------------
 // Config & env
@@ -128,10 +134,11 @@ const FORCE_HIGH_SLIPPAGE = process.env.FORCE_HIGH_SLIPPAGE === '1';
 // Disabling saves gas on harvests that have many unswappable tokens but loses the
 // "ensure every token gets a swap attempt" guarantee.
 const SKIP_INDIVIDUAL_RETRY = process.env.SKIP_INDIVIDUAL_RETRY === '1';
+// Escalating per-token slippage ladder for the Tier-3 sweep — see ./sweep-ladder.ts.
 // Max number of sweep passes (each pass: scan vault, retry every remaining token).
 // First pass runs as part of the main flow; subsequent passes only fire if tokens
-// still sit in the vault. Set to 1 to disable additional sweeps.
-const MAX_SWEEPS = Number(process.env.MAX_SWEEPS || '3');
+// still sit in the vault. Defaults to the ladder length so every rung is tried.
+const MAX_SWEEPS = Number(process.env.MAX_SWEEPS || String(SWEEP_SLIPPAGE_LADDER_BPS.length));
 // Max swap steps per harvest() tx. Matches the frontend's chunk size and stays
 // well under the upstream RewardSwapper's MAX_STEPS=32 hard cap. Avoids gas-
 // exhaustion when many tokens accrue in a single epoch.
@@ -465,6 +472,13 @@ async function buildSwapPlanFor(
   }
   const quoteFetcher = createDirectQuoteFetcher(ZERO_X_API_KEY);
 
+  // Bake our intended slippage into 0x's calldata so its embedded minOut matches
+  // our contract-side floor. Without this, 0x uses its ~1% default and reverts
+  // blue-chip legs (e.g. WETH) on normal quote→broadcast drift — before our own
+  // (looser) floor ever applies. Use the floor (impact=0); the per-step contract
+  // slippage below is impact-adjusted and always >= this, so 0x's minOut binds first.
+  const quoteSlippageBps = calculateSlippage(0, opts.forceHighSlippage || FORCE_HIGH_SLIPPAGE);
+
   const steps: SwapStep[] = [];
   const tokensInPlan: Address[] = [];
   let totalQuotedUSDC = 0n;
@@ -493,6 +507,7 @@ async function buildSwapPlanFor(
       outputDecimals: 6,
       taker: SWAPPER_ADDRESS,
       fetcher: quoteFetcher,
+      slippageBps: quoteSlippageBps,
     });
 
     if (!result.success) {
@@ -572,6 +587,12 @@ async function refreshQuotes(
         buyToken: USDC_ADDR,
         sellAmount: step.amountIn,
         taker: SWAPPER_ADDRESS,
+        // Re-bake the step's tolerance into the fresh 0x calldata. WITHOUT this the
+        // JIT refresh discards the slippage baked in buildSwapPlanFor and 0x reverts
+        // to its ~1% default minOut on the ACTUAL broadcast — silently defeating the
+        // 150-bps floor. step.slippageBps is the contract-side per-step tolerance
+        // (>=150, impact-adjusted), so 0x's embedded minOut now matches it.
+        slippageBps: step.slippageBps,
       });
       if (!quote?.transaction?.data) throw new Error('no fresh quote data');
       const fresh: SwapStep = {
@@ -834,6 +855,7 @@ async function individualRetry(
   targetEpoch: bigint,
   quoteFetcher: ReturnType<typeof createDirectQuoteFetcher>,
   nonceManager: NonceManager,
+  slippageBpsOverride: number,
   priorBlock?: bigint,
 ): Promise<IndividualRetryResult> {
   const out: IndividualRetryResult = {
@@ -844,8 +866,11 @@ async function individualRetry(
     txConfirmed: false,
   };
 
-  // Re-quote with FORCE high slippage so we accept worse routes than the main
-  // batch's tight 30-bps floor.
+  // This pass's slippage rung (from the escalation ladder), capped at the hard
+  // sweep ceiling so a cleanup swap can never accept a near-zero fill (bounds value
+  // loss to MAX_SWEEP_SLIPPAGE_BPS). Passed to the 0x quote too, so 0x's embedded
+  // minOut matches this tolerance instead of reverting at its ~1% default.
+  const slippageBps = Math.min(slippageBpsOverride, MAX_SWEEP_SLIPPAGE_BPS);
   const tokenForSwap: TokenForSwap = {
     address: token.address,
     symbol: token.symbol,
@@ -861,6 +886,7 @@ async function individualRetry(
     outputDecimals: 6,
     taker: SWAPPER_ADDRESS,
     fetcher: quoteFetcher,
+    slippageBps,
   });
   if (!result.success) {
     return { ...out, error: `quote: ${result.error}` };
@@ -869,9 +895,6 @@ async function individualRetry(
     return { ...out, error: `impact ${result.lossPercent.toFixed(2)}% > ${AUTO_DESELECT_IMPACT_PERCENT}%` };
   }
 
-  // Force high slippage so worse routes execute, but CAP it so the cleanup sweep
-  // can never accept a near-zero fill (bounds value loss to MAX_SWEEP_SLIPPAGE_BPS).
-  const slippageBps = Math.min(calculateSlippage(result.lossPercent, true), MAX_SWEEP_SLIPPAGE_BPS);
   const step = buildSwapStepFromQuote({
     token: tokenForSwap,
     outToken: USDC_ADDR,
@@ -1154,38 +1177,83 @@ async function main() {
   let droppedSteps: SwapStep[] = [];
   let lastError: string | undefined;
   let attemptedRetry = false;
+  // For a deferred (multi-chunk) plan the WARMUP/DRY_RUN gates would otherwise run
+  // ZERO harvest simulation (the per-chunk sim lives in the broadcast loop, which
+  // those gates exit before). A representative first-chunk sim fills that gap.
+  // -1 = not applicable (single-chunk plan, isolated normally below).
+  let representativeExecutable = -1;
 
   if (!sweepOnly) {
     // ---------------- Attempt 1: normal slippage ----------------
     plan = await buildSwapPlanFor(claimable, { forceHighSlippage: false, label: 'normal' });
     let minUSDC = (plan.totalQuotedUSDC * MIN_USDC_PCT) / 100n;
-    let baseArgs: HarvestArgs = { epoch: targetEpoch, tokens: tokensToClaim, minUSDC, finalize: FINALIZE };
+    // Isolation sims claim only the PLAN's tokens, not the full `tokensToClaim`
+    // (which includes non-swappable spam). A single harvest() claiming >50 tokens
+    // reverts on the vault's claim cap; the real broadcast never does that (Phase-1
+    // claims batch at 40, Phase-2 swap chunks claim nothing), so feeding the full
+    // list here would false-revert the sim on spam-heavy epochs. Plan tokens are the
+    // only ones a swap step needs claimed, and a plan is always <= a few dozen.
+    let baseArgs: HarvestArgs = { epoch: targetEpoch, tokens: plan.tokensInPlan, minUSDC, finalize: FINALIZE };
 
     log('main', `minUSDC floor: ${formatUnits(minUSDC, 6)} (${MIN_USDC_PCT}% of ${formatUnits(plan.totalQuotedUSDC, 6)})`);
 
-    // Isolate: if the whole plan would revert, drop steps until it passes.
-    log('simulate', 'Simulating harvest + isolating any problem steps...');
-    const isolated = await isolateExecutablePlan(publicClient, account.address, baseArgs, plan.steps);
-    workingSteps = isolated.plan;
-    droppedSteps = isolated.dropped;
-    lastError = isolated.lastError;
+    // Whole-plan isolation only makes sense for a plan that fits in ONE chunk.
+    // Simulating a plan longer than a chunk always reverts "plan too long" (the
+    // contract caps a harvest() at MAX_STEPS=32) and the isolator then drops good
+    // tokens for a LENGTH reason — they'd swap fine inside a ≤10-step chunk. For
+    // multi-chunk plans, defer problem-step isolation to the per-chunk sim in the
+    // broadcast loop below (each chunk is re-simulated + re-isolated there).
+    if (plan.steps.length > EXECUTION_BATCH_SIZE) {
+      workingSteps = plan.steps;
+      log('simulate',
+          `Plan has ${plan.steps.length} steps (>${EXECUTION_BATCH_SIZE}/chunk); ` +
+          `deferring problem-step isolation to the per-chunk sim in the broadcast loop`);
+      // WARMUP/DRY_RUN gates exit before the per-chunk sim, so for those
+      // validation-only runs still exercise the real harvest() ABI/contract path on
+      // a representative first chunk. isolateExecutablePlan recomputes the floor per
+      // subset, so the chunk-sized (not whole-plan) floor is used.
+      if (WARMUP_RUN || DRY_RUN) {
+        const repChunk = plan.steps.slice(0, EXECUTION_BATCH_SIZE);
+        // Claim only THIS chunk's tokens in the representative sim (<= EXECUTION_BATCH_SIZE),
+        // so it can never trip the vault's 50-token claim cap on a >50-claimable epoch
+        // and false-abort an otherwise-healthy deploy.
+        const repArgs: HarvestArgs = { ...baseArgs, tokens: repChunk.map((s) => s.tokenIn) };
+        const repIso = await isolateExecutablePlan(publicClient, account.address, repArgs, repChunk);
+        representativeExecutable = repIso.plan.length;
+        if (representativeExecutable === 0) {
+          lastError = repIso.lastError;
+          log('simulate', `WARN: representative first-chunk sim produced 0 executable steps` +
+                          `${lastError ? ` (${lastError.substring(0, 120)})` : ''}`);
+        } else {
+          log('simulate', `Representative first-chunk sim: ${representativeExecutable}/${repChunk.length} step(s) executable`);
+        }
+      }
+    } else {
+      // Single-chunk plan: isolate now — if the whole plan would revert, drop
+      // steps until it passes.
+      log('simulate', 'Simulating harvest + isolating any problem steps...');
+      const isolated = await isolateExecutablePlan(publicClient, account.address, baseArgs, plan.steps);
+      workingSteps = isolated.plan;
+      droppedSteps = isolated.dropped;
+      lastError = isolated.lastError;
 
-    // ---------------- Attempt 2: boosted retry if isolation gave us nothing ----------------
-    if (workingSteps.length === 0 && !DRY_RUN) {
-      const reason = lastError
-        ? `last sim error: ${lastError.substring(0, 100)}`
-        : 'isolation reduced plan to 0 swap steps (all swaps would revert under current floor)';
-      log('main', `Normal-slippage plan yields no swaps (${reason}); retrying with boosted slippage...`);
-      attemptedRetry = true;
-      plan = await buildSwapPlanFor(claimable, { forceHighSlippage: true, label: 'boosted' });
-      minUSDC = (plan.totalQuotedUSDC * MIN_USDC_PCT) / 100n;
-      baseArgs = { epoch: targetEpoch, tokens: tokensToClaim, minUSDC, finalize: FINALIZE };
-      log('main', `minUSDC floor (boosted): ${formatUnits(minUSDC, 6)}`);
+      // ---------------- Attempt 2: boosted retry if isolation gave us nothing ----------------
+      if (workingSteps.length === 0 && !DRY_RUN) {
+        const reason = lastError
+          ? `last sim error: ${lastError.substring(0, 100)}`
+          : 'isolation reduced plan to 0 swap steps (all swaps would revert under current floor)';
+        log('main', `Normal-slippage plan yields no swaps (${reason}); retrying with boosted slippage...`);
+        attemptedRetry = true;
+        plan = await buildSwapPlanFor(claimable, { forceHighSlippage: true, label: 'boosted' });
+        minUSDC = (plan.totalQuotedUSDC * MIN_USDC_PCT) / 100n;
+        baseArgs = { epoch: targetEpoch, tokens: plan.tokensInPlan, minUSDC, finalize: FINALIZE };
+        log('main', `minUSDC floor (boosted): ${formatUnits(minUSDC, 6)}`);
 
-      const retried = await isolateExecutablePlan(publicClient, account.address, baseArgs, plan.steps);
-      workingSteps = retried.plan;
-      droppedSteps = retried.dropped;
-      lastError = retried.lastError;
+        const retried = await isolateExecutablePlan(publicClient, account.address, baseArgs, plan.steps);
+        workingSteps = retried.plan;
+        droppedSteps = retried.dropped;
+        lastError = retried.lastError;
+      }
     }
 
     if (workingSteps.length === 0 && tokensToClaim.length === 0) {
@@ -1195,6 +1263,8 @@ async function main() {
       log('main', `No swaps will execute; harvest will only claim raw tokens. Last sim error: ${lastError?.substring(0, 200)}`);
     } else if (droppedSteps.length > 0) {
       log('main', `Final plan: ${workingSteps.length} steps (dropped ${droppedSteps.length} via isolation)`);
+    } else if (plan.steps.length > EXECUTION_BATCH_SIZE) {
+      log('main', `Final plan: ${workingSteps.length} steps (isolation deferred to per-chunk sim)`);
     } else {
       log('main', `Final plan: ${workingSteps.length} steps (all passed isolation)`);
     }
@@ -1214,10 +1284,16 @@ async function main() {
   // swappable rewards exist but no executable swap plan could be built.
   if (WARMUP_RUN) {
     const swappableExisted = finalPlan.totalQuotedUSDC > 0n;
-    const planViable = workingSteps.length > 0 || !swappableExisted;
+    // For a deferred (multi-chunk) plan workingSteps is the whole un-isolated plan,
+    // so gate viability keys off the representative first-chunk sim instead. -1 means
+    // single-chunk (already isolated above) → use workingSteps as before.
+    const planViable = !swappableExisted
+      || (representativeExecutable >= 0 ? representativeExecutable > 0 : workingSteps.length > 0);
     log('broadcast', 'WARM-UP (pre-deploy gate) — validation only, NOT broadcasting');
     log('broadcast', `  swappable rewards quoted: ${formatUnits(finalPlan.totalQuotedUSDC, 6)} USDC`);
-    log('broadcast', `  executable swap steps:    ${workingSteps.length} (dropped ${droppedSteps.length} via isolation)`);
+    log('broadcast', representativeExecutable >= 0
+      ? `  plan steps: ${workingSteps.length} (deferred; representative first-chunk sim: ${representativeExecutable} executable)`
+      : `  executable swap steps:    ${workingSteps.length} (dropped ${droppedSteps.length} via isolation)`);
     persistRun({
       kind:     'auto-usdc-vault-keeper',
       mode:     'warmup',
@@ -1576,12 +1652,15 @@ async function main() {
         break;
       }
 
-      log('sweep', `pass ${pass}/${MAX_SWEEPS}: ${candidates.length} token(s) still in vault — individual retries`);
+      // Escalation ladder: widen slippage each pass. Clamp to the last rung once
+      // passes exceed the ladder length (only happens if MAX_SWEEPS is overridden up).
+      const rungBps = sweepSlippageForPass(pass);
+      log('sweep', `pass ${pass}/${MAX_SWEEPS} (slippage ${rungBps} bps): ${candidates.length} token(s) still in vault — individual retries`);
       let anyDeliveredUSDC = false;
       for (const { tok, bal } of candidates) {
         log('sweep', `  attempting ${tok.symbol} (${formatUnits(bal, tok.decimals)})...`);
         const r = await individualRetry(
-          publicClient, walletClient, account, tok, bal, targetEpoch, quoteFetcher, nonceManager, lastReceiptBlock,
+          publicClient, walletClient, account, tok, bal, targetEpoch, quoteFetcher, nonceManager, rungBps, lastReceiptBlock,
         );
         individualResults.push({ ...r, pass });
         if (r.receiptBlock && (!lastReceiptBlock || r.receiptBlock > lastReceiptBlock)) lastReceiptBlock = r.receiptBlock;
@@ -1600,12 +1679,12 @@ async function main() {
         }
       }
 
-      // Stop early if a pass made no progress: either no USDC was delivered
-      // AND no transient errors (txConfirmed: false) were retried. After
-      // pass 2, if we have neither delivered USDC nor recovered from a
-      // prior transient error, further passes won't help.
-      if (!anyDeliveredUSDC && pass >= 2) {
-        log('sweep', `pass ${pass}: no USDC delivered; remaining tokens are deterministically un-swappable, stopping early`);
+      // Stop early only once we're at the TOP slippage rung and still made no
+      // progress — below the top rung a wider tolerance next pass may yet fill, so
+      // we must let the ladder climb before declaring tokens un-swappable.
+      const atTopRung = pass >= SWEEP_SLIPPAGE_LADDER_BPS.length;
+      if (!anyDeliveredUSDC && atTopRung) {
+        log('sweep', `pass ${pass}: no USDC delivered at top slippage rung (${SWEEP_SLIPPAGE_LADDER_BPS[SWEEP_SLIPPAGE_LADDER_BPS.length - 1]} bps); remaining tokens un-swappable within tolerance, stopping`);
         break;
       }
     }
