@@ -819,6 +819,47 @@ async function isolateExecutablePlan(
 }
 
 // ---------------------------------------------------------------------------
+// Gas padding for harvest() calls. The keeper's swap nests 6 calls deep
+// (keeper → vault.harvest → RewardSwapper → 0x AllowanceHolder → 0x Settler →
+// USDC.transfer). EIP-150 forwards only 63/64 of remaining gas per level, so a
+// raw eth_estimateGas (which returns just-enough for the TOP call) can leave the
+// deepest call short of USDC's reentrancy-guard stipend → "out of gas" even
+// though the tx still has headroom — and the swapper's allowPartial then relabels
+// the failed swap as a bogus "total slippage" revert. That stranded WETH/SERV/
+// cbBTC on the 2026-07-09 harvest (~97-98% of a too-tight limit). The frontend
+// RewardsSection avoids this by padding estimateContractGas ×1.5 (single swaps) /
+// ×1.3 (batches); we mirror that. Padding is ~free — you only pay for gasUsed.
+async function paddedHarvestGas(
+  publicClient: PublicClient,
+  account: Address,
+  args: readonly unknown[],
+  padNum: bigint,
+  padDen: bigint,
+  floor: bigint,
+): Promise<bigint> {
+  try {
+    const est = await publicClient.estimateContractGas({
+      address: VAULT_ADDR, abi: HARVEST_ABI, functionName: 'harvest', args: args as any, account,
+    });
+    const padded = (est * padNum) / padDen;
+    return padded > floor ? padded : floor;
+  } catch (e: any) {
+    log('gas', `estimateContractGas failed (${(e.shortMessage || e.message || '').substring(0, 90)}); using floor ${floor}`);
+    return floor;
+  }
+}
+
+/** Distinguish an out-of-gas revert — which the swapper's allowPartial masks as a
+ *  bogus "total slippage" — from a genuine revert, by how close gasUsed got to the
+ *  limit. A near-100% ratio means bump the gas pad, NOT the slippage/ladder. */
+function oogHint(gasUsed: bigint, gasLimit: bigint): string {
+  if (gasLimit > 0n && gasUsed * 100n >= gasLimit * 92n) {
+    return ` — LIKELY OUT OF GAS (used ${gasUsed}/${gasLimit} = ${(Number(gasUsed) * 100 / Number(gasLimit)).toFixed(0)}%; raise the gas pad, not slippage)`;
+  }
+  return '';
+}
+
+// ---------------------------------------------------------------------------
 // Individual retry — per-token boosted-slippage swap for tokens left in the
 // vault after the main batch broadcast. Each retry is its own harvest() call
 // with empty tokensToClaim (the claim already happened in the main broadcast)
@@ -938,6 +979,10 @@ async function individualRetry(
   })) as bigint;
 
   let txHash: Hex;
+  // Pad ×1.5 (frontend's single-swap multiplier) so the deep USDC transfer never OOGs.
+  const sweepGas = await paddedHarvestGas(
+    publicClient, account.address, [targetEpoch, [], [step], minOut, false], 3n, 2n, 1_000_000n,
+  );
   try {
     txHash = await walletClient.writeContract({
       address: VAULT_ADDR,
@@ -948,6 +993,7 @@ async function individualRetry(
       args: [targetEpoch, [], [step], minOut, false] as any,
       account,
       chain: base,
+      gas: sweepGas,
       nonce: nonceManager.peek(),
     });
     nonceManager.consume();
@@ -968,7 +1014,9 @@ async function individualRetry(
   }
   try {
     if (receipt!.status !== 'success') {
-      return { ...out, txHash, receiptBlock: receipt!.blockNumber, error: `reverted (block ${receipt!.blockNumber})` };
+      const hint = oogHint(receipt!.gasUsed, sweepGas);
+      if (hint) log('sweep', `    ⚠ ${token.symbol}${hint}`);
+      return { ...out, txHash, receiptBlock: receipt!.blockNumber, error: `reverted (block ${receipt!.blockNumber})${hint}` };
     }
     // Wait for a node that has seen this tx's block BEFORE reading the vault's
     // USDC balance. A load-balanced RPC can serve the post-tx read from a node
@@ -1402,10 +1450,14 @@ async function main() {
         //   • reverted receipt   → nonce consumed on-chain (no gap) → retry, NO resync
         let h: Hex;
         try {
+          const claimGas = await paddedHarvestGas(
+            publicClient, account.address, [targetEpoch, batch, [], 0n, false], 13n, 10n,
+            300_000n + 100_000n * BigInt(batch.length),
+          );
           h = await walletClient.writeContract({
             address: VAULT_ADDR, abi: HARVEST_ABI, functionName: 'harvest',
             args: [targetEpoch, batch, [], 0n, false] as any,
-            account, chain: base, nonce: nonceManager.peek(),
+            account, chain: base, gas: claimGas, nonce: nonceManager.peek(),
           });
           nonceManager.consume();
           log('claim', `  tx: ${h}`);
@@ -1549,6 +1601,12 @@ async function main() {
 
     // --- Broadcast this chunk ---
     let chunkTxHash: Hex;
+    // Pad ×1.3 (frontend's batch multiplier); floor scales with step count.
+    const chunkGas = await paddedHarvestGas(
+      publicClient, account.address,
+      [targetEpoch, chunkTokensToClaim, chunkSteps, chunkArgs.minUSDC, false], 13n, 10n,
+      300_000n + 300_000n * BigInt(chunkSteps.length),
+    );
     try {
       chunkTxHash = await walletClient.writeContract({
         address: VAULT_ADDR,
@@ -1557,6 +1615,7 @@ async function main() {
         args: [targetEpoch, chunkTokensToClaim, chunkSteps, chunkArgs.minUSDC, false] as any,
         account,
         chain: base,
+        gas: chunkGas,
         nonce: nonceManager.peek(),
       });
       nonceManager.consume();
@@ -1588,8 +1647,9 @@ async function main() {
     if (chunkReceipt!.status !== 'success') {
       // Reverted txs still mine and consume their nonce — no gap, safe to continue.
       // Non-fatal: tokens stay in the vault for the Tier-3 per-token sweep.
-      log('chunk', `  ✗ swap chunk reverted (block ${chunkReceipt!.blockNumber})`);
-      chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, success: false, error: `reverted (block ${chunkReceipt!.blockNumber})`, usdcAfter: 0n });
+      const hint = oogHint(chunkReceipt!.gasUsed, chunkGas);
+      log('chunk', `  ✗ swap chunk reverted (block ${chunkReceipt!.blockNumber})${hint}`);
+      chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, success: false, error: `reverted (block ${chunkReceipt!.blockNumber})${hint}`, usdcAfter: 0n });
       continue;
     }
     lastTxHash = chunkTxHash;
@@ -1716,6 +1776,9 @@ async function main() {
   let finalizeTxHash: Hex | undefined;
   if (shouldFinalize) {
     log('finalize', 'Finalizing epoch...');
+    const finalizeGas = await paddedHarvestGas(
+      publicClient, account.address, [targetEpoch, [], [], 0n, true], 13n, 10n, 300_000n,
+    );
     try {
       finalizeTxHash = await walletClient.writeContract({
         address: VAULT_ADDR,
@@ -1724,6 +1787,7 @@ async function main() {
         args: [targetEpoch, [], [], 0n, true] as any,
         account,
         chain: base,
+        gas: finalizeGas,
         nonce: nonceManager.peek(),
       });
       nonceManager.consume();
