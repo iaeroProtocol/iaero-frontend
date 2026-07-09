@@ -849,6 +849,16 @@ async function paddedHarvestGas(
   }
 }
 
+/** Distinguish an out-of-gas revert — which the swapper's allowPartial masks as a
+ *  bogus "total slippage" — from a genuine revert, by how close gasUsed got to the
+ *  limit. A near-100% ratio means bump the gas pad, NOT the slippage/ladder. */
+function oogHint(gasUsed: bigint, gasLimit: bigint): string {
+  if (gasLimit > 0n && gasUsed * 100n >= gasLimit * 92n) {
+    return ` — LIKELY OUT OF GAS (used ${gasUsed}/${gasLimit} = ${(Number(gasUsed) * 100 / Number(gasLimit)).toFixed(0)}%; raise the gas pad, not slippage)`;
+  }
+  return '';
+}
+
 // ---------------------------------------------------------------------------
 // Individual retry — per-token boosted-slippage swap for tokens left in the
 // vault after the main batch broadcast. Each retry is its own harvest() call
@@ -1004,7 +1014,9 @@ async function individualRetry(
   }
   try {
     if (receipt!.status !== 'success') {
-      return { ...out, txHash, receiptBlock: receipt!.blockNumber, error: `reverted (block ${receipt!.blockNumber})` };
+      const hint = oogHint(receipt!.gasUsed, sweepGas);
+      if (hint) log('sweep', `    ⚠ ${token.symbol}${hint}`);
+      return { ...out, txHash, receiptBlock: receipt!.blockNumber, error: `reverted (block ${receipt!.blockNumber})${hint}` };
     }
     // Wait for a node that has seen this tx's block BEFORE reading the vault's
     // USDC balance. A load-balanced RPC can serve the post-tx read from a node
@@ -1635,8 +1647,9 @@ async function main() {
     if (chunkReceipt!.status !== 'success') {
       // Reverted txs still mine and consume their nonce — no gap, safe to continue.
       // Non-fatal: tokens stay in the vault for the Tier-3 per-token sweep.
-      log('chunk', `  ✗ swap chunk reverted (block ${chunkReceipt!.blockNumber})`);
-      chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, success: false, error: `reverted (block ${chunkReceipt!.blockNumber})`, usdcAfter: 0n });
+      const hint = oogHint(chunkReceipt!.gasUsed, chunkGas);
+      log('chunk', `  ✗ swap chunk reverted (block ${chunkReceipt!.blockNumber})${hint}`);
+      chunkResults.push({ chunk: chunkIdx + 1, txHash: chunkTxHash, success: false, error: `reverted (block ${chunkReceipt!.blockNumber})${hint}`, usdcAfter: 0n });
       continue;
     }
     lastTxHash = chunkTxHash;
