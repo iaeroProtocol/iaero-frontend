@@ -2328,7 +2328,9 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
           let slippageBps = calculateSlippage(sq.lossPercent, sq.forceHighSlippage);
           // Keep the on-chain Swapper guard at least as loose as the widened 0x
           // slippage for AERO routes (300 bps) so the contract minOut doesn't
-          // re-tighten below what 0x already quoted. 300 <= the 500 bps cap.
+          // re-tighten below what 0x already quoted. (slippageBps is a uint16 on the
+          // Swapper with no hard cap here; the 500 in calculateSlippage is only its
+          // normal-mode ceiling -- force/retry paths already send well above it.)
           if (targetTokenAddr.toLowerCase() === AERO_ADDR.toLowerCase()) {
             slippageBps = Math.max(slippageBps, AERO_ROUTE_SLIPPAGE_BPS);
           }
@@ -2490,9 +2492,13 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
               const gasPadNum = targetTokenAddr.toLowerCase() === AERO_ADDR.toLowerCase() ? 150n : 130n;
               gas = (gas * gasPadNum) / 100n;
             } catch (gasEstError: any) {
-              // Gas estimation failed - use default and try anyway
-              console.log(`  ⚠️ Gas estimation failed, using default: ${DEFAULT_BATCH_GAS.toString()}`);
-              gas = DEFAULT_BATCH_GAS;
+              // Gas estimation failed - use the static default. Pad AERO x1.5 here
+              // too so its OOG headroom isn't lost on the fallback path; USDC keeps
+              // the raw default (unchanged from before).
+              gas = targetTokenAddr.toLowerCase() === AERO_ADDR.toLowerCase()
+                ? (DEFAULT_BATCH_GAS * 150n) / 100n
+                : DEFAULT_BATCH_GAS;
+              console.log(`  ⚠️ Gas estimation failed, using default: ${gas.toString()}`);
             }
             
             const hash = await writeContractAsync({
