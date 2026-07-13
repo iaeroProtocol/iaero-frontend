@@ -623,12 +623,19 @@ function isSpamToken(
 /**
  * Fetch 0x quote via API route
  */
+// AERO pools on Base are thin/volatile, so reward->AERO swaps sit right at 0x's
+// 1% default minOut and trip the whole-batch gas estimate -> isolation -> individual.
+// Widen the baked minOut for AERO-targeted quotes only; USDC routes are deep and
+// unaffected. Kept in sync with the on-chain Swapper guard at the batch build.
+const AERO_ROUTE_SLIPPAGE_BPS = 300;
+
 async function fetch0xQuote(
   chainId: number,
   sellToken: string,
   buyToken: string,
   sellAmount: bigint,
-  taker: string
+  taker: string,
+  slippageBps?: number
 ): Promise<any> {
   const params = new URLSearchParams({
     chainId: String(chainId),
@@ -638,6 +645,13 @@ async function fetch0xQuote(
     taker
   });
   
+  // Default AERO-targeted quotes to the wider AERO slippage; callers can override.
+  const effectiveSlippageBps =
+    slippageBps ?? (buyToken.toLowerCase() === AERO_ADDR.toLowerCase() ? AERO_ROUTE_SLIPPAGE_BPS : undefined);
+  if (effectiveSlippageBps != null) {
+    params.set('slippageBps', String(effectiveSlippageBps));
+  }
+
   const res = await fetch(`/api/0x/quote?${params}`);
   if (!res.ok) {
     const err = await res.json();
@@ -2311,7 +2325,13 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
             [{ type: 'address' }, { type: 'bytes' }],
             [q.transactionTo, q.transactionData]
           );
-          const slippageBps = calculateSlippage(sq.lossPercent, sq.forceHighSlippage);
+          let slippageBps = calculateSlippage(sq.lossPercent, sq.forceHighSlippage);
+          // Keep the on-chain Swapper guard at least as loose as the widened 0x
+          // slippage for AERO routes (300 bps) so the contract minOut doesn't
+          // re-tighten below what 0x already quoted. 300 <= the 500 bps cap.
+          if (targetTokenAddr.toLowerCase() === AERO_ADDR.toLowerCase()) {
+            slippageBps = Math.max(slippageBps, AERO_ROUTE_SLIPPAGE_BPS);
+          }
           const isFullSweep = sq.token.walletBN >= sq.token.fullBalanceBN;
           console.log(`  ${sq.token.symbol}: slippage=${slippageBps/100}%, impact=${sq.lossPercent.toFixed(2)}%, useAll=${isFullSweep}`);
           batchSwaps.push({
@@ -2463,7 +2483,12 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                 args: makeSwapArgs(planToExecute, account as Address),
                 account: account as Address,
               });
-              gas = (gas * 130n) / 100n;
+              // AERO routes traverse deep 0x Settler call stacks where the EIP-150
+              // 63/64 rule can starve inner calls; pad execution gas x1.5 for AERO
+              // vs x1.3 for USDC. Insurance against OOG-at-execution only -- it does
+              // NOT change batching (that's decided by the estimate revert above).
+              const gasPadNum = targetTokenAddr.toLowerCase() === AERO_ADDR.toLowerCase() ? 150n : 130n;
+              gas = (gas * gasPadNum) / 100n;
             } catch (gasEstError: any) {
               // Gas estimation failed - use default and try anyway
               console.log(`  ⚠️ Gas estimation failed, using default: ${DEFAULT_BATCH_GAS.toString()}`);
