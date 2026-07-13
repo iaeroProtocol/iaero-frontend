@@ -2937,7 +2937,26 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         args: [aeroBalance, routes]
       }) as readonly bigint[];
       if (amounts && amounts.length > 0) amountOutMin = (amounts[amounts.length - 1] * 9500n) / 10000n;
-    } catch {}
+    } catch (quoteErr) {
+      console.error('  ❌ AERO->iAERO getAmountsOut failed; will fail closed:', quoteErr);
+    }
+
+    // Fail closed: never submit the Aerodrome swap without a real slippage floor.
+    // amountOutMin defaults to 0n and is only set from a successful getAmountsOut
+    // read above. If that read threw or returned nothing, submitting with
+    // amountOutMin=0 is a 100%-slippage, MEV/sandwich-exposed swap. Abort instead —
+    // the caller wraps this in try/catch and tells the user their AERO is in their
+    // wallet. Note: an immediate re-run of compound can't reconvert it (the rewards
+    // are already spent), but the NEXT compound run auto-sweeps the stranded AERO
+    // because this step swaps the full wallet AERO balance. (The reward-swap path
+    // likewise never permits a 0 floor: calculateSlippage min is 30 bps.)
+    if (amountOutMin <= 0n) {
+      throw new Error(
+        'AERO->iAERO swap aborted: could not obtain a reliable price quote to set a slippage floor ' +
+        '(would have executed with amountOutMin=0 and been MEV-exposed). Your AERO is safe in your wallet ' +
+        'and will be converted on your next compound.'
+      );
+    }
 
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200);
     
