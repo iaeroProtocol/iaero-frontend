@@ -20,6 +20,7 @@ import ToastNotification from '@/components/protocol/ToastNotification';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import Image from 'next/image';
+import { OFFICIAL_DISCORD_URL } from '@/lib/community';
 
 // Custom Discord icon component (since Lucide doesn't have Discord)
 const DiscordIcon = ({ className }: { className?: string }) => (
@@ -113,7 +114,7 @@ export default function IaeroProtocolApp() {
                 <span>Docs</span>
               </a>
               <a 
-                href="https://discord.gg/YypP6DG3" 
+                href={OFFICIAL_DISCORD_URL}
                 target="_blank" 
                 rel="noopener noreferrer"
                 className="text-slate-300 hover:text-white transition-colors"
@@ -184,7 +185,7 @@ export default function IaeroProtocolApp() {
               <BookOpen className="w-5 h-5" />
             </a>
             <a 
-              href="https://discord.gg/Tb9Z4Jvq" 
+              href={OFFICIAL_DISCORD_URL}
               target="_blank" 
               rel="noopener noreferrer"
               className="text-slate-300 hover:text-white transition-colors p-2 rounded-lg bg-slate-800/50 backdrop-blur"
@@ -372,7 +373,7 @@ export default function IaeroProtocolApp() {
                Docs
              </a>
              <a 
-               href="https://discord.gg/Tb9Z4Jvq" 
+               href={OFFICIAL_DISCORD_URL}
                target="_blank" 
                rel="noopener noreferrer"
                className="text-slate-400 hover:text-white transition-colors"
