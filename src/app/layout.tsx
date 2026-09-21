@@ -6,6 +6,7 @@ import '@rainbow-me/rainbowkit/styles.css';
 
 import { Providers } from './providers'; // We'll create this
 import NetworkSwitcher from "@/components/NetworkSwitcher";
+import CommunitySafetyBanner from "@/components/CommunitySafetyBanner";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -29,6 +30,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body className="dark min-h-screen bg-background">
+        <CommunitySafetyBanner />
         <Providers>
           <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900/20 to-slate-900">
             <header className="w-full px-4 sm:px-6 lg:px-8 xl:px-12 2xl:px-16 py-4 flex justify-end">
