@@ -79,3 +79,13 @@ test('status polls must be for the same order and a known status', () => {
   assert.equal(stripChainPrefix('bitcoin.bc1qxyz'), 'bc1qxyz');
   assert.equal(stripChainPrefix('0xabc'), '0xabc');
 });
+
+test('contract wallets, and EIP-7702 delegated EOAs that are not', async () => {
+  const { isContractCode } = await import('../../src/lib/rift/validate.ts');
+  assert.equal(isContractCode(undefined), false);
+  assert.equal(isContractCode('0x'), false);
+  // vitalik.eth on Ethereum and Base, 2026-10-02: a 7702 delegation, still an EOA.
+  assert.equal(isContractCode('0xef01005a7fc11397e9a8ad41bf10bf13f22b0a63f96f6d'), false);
+  assert.equal(isContractCode('0x608060405234801561001057600080fd5b50'), true, 'real bytecode');
+  assert.equal(isContractCode('0xef01005a7fc11397e9a8ad41bf10bf13f22b0a63f96f6d00'), true, 'not exactly a designator');
+});

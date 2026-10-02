@@ -2,20 +2,21 @@
 //
 // "Get iAERO": turn a token you hold into iAERO in one step, routed by Rift (rift.trade). The picker lists
 // your own tokens on Ethereum, Arbitrum and Base that Rift can route, highest USD value first; Bitcoin
-// from another wallet is offered last. You see the iAERO you will get, the route and how long it takes
-// before committing. One click creates the order and, for EVM tokens, asks the wallet for a single plain
-// transfer to the order's one-time deposit address. Rift does the rest; OrderTracker shows every step.
+// from another wallet is offered last. You see the iAERO you will get, what that costs against market
+// prices, the route and how long it takes before committing. One click re-checks the price against your
+// tolerance, creates the order and, for EVM tokens, asks the wallet for a single plain transfer to the
+// order's one-time deposit address. Rift does the rest; OrderTracker shows every step.
 
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   useAccount, useBalance, usePublicClient, useReadContract, useSendTransaction, useSwitchChain, useWriteContract,
 } from 'wagmi';
 import { base } from 'wagmi/chains';
 import { erc20Abi, formatUnits, isAddress } from 'viem';
-import { ArrowLeftRight, Bell, Bitcoin, Info, Loader2, RefreshCw, Route as RouteIcon, ShieldCheck, Timer } from 'lucide-react';
+import { AlertTriangle, ArrowLeftRight, Bell, Bitcoin, Info, Loader2, RefreshCw, Route as RouteIcon, ShieldCheck, Timer } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -27,17 +28,33 @@ import OrderTracker from '@/components/rift/OrderTracker';
 import RecentOrders from '@/components/rift/RecentOrders';
 import { CURATED_TOKENS, KNOWN_SYMBOLS, RIFT_DESTINATION, RIFT_SECURITY_URL, SOURCE_CHAINS } from '@/lib/rift/config';
 import { RiftApiError, createOrder, explainRiftError, fetchQuote } from '@/lib/rift/client';
-import { decimalToRaw, isTerminal, normalizeDecimal, parseOrder, parseQuote } from '@/lib/rift/validate';
+import { decimalToRaw, isContractCode, isTerminal, normalizeDecimal, parseOrder, parseQuote } from '@/lib/rift/validate';
 import { estimateRoute, formatRange } from '@/lib/rift/timing';
 import { isBtcAddress } from '@/lib/rift/bitcoin';
 import { rawToNumber, type Holding } from '@/lib/rift/holdings';
 import { useRiftSupport } from '@/lib/rift/support';
+import { useMarketPrices } from '@/lib/rift/prices';
+import {
+  DEFAULT_TOLERANCE_PCT, TOLERANCE_CHOICES, costLevel, costVsMarketPct, formatPct, priceDropPct, type CostLevel,
+} from '@/lib/rift/cost';
 import { patchOrder, removeOrders, upsertOrder, useStoredOrders } from '@/lib/rift/storage';
-import type { SourceToken, StoredOrder } from '@/lib/rift/types';
+import type { RiftQuote, SourceToken, StoredOrder } from '@/lib/rift/types';
 
 type EvmChainId = 1 | 42161 | 8453;
 const BTC_ASSET = 'bitcoin.btc';
 const BTC_TOKEN = CURATED_TOKENS.find(t => t.asset === BTC_ASSET)!;
+const TOLERANCE_KEY = 'iaero.rift.tolerance.v1';
+/** A quote older than this is re-fetched when you click Buy, and compared with what you saw. */
+const RECHECK_AFTER_MS = 20_000;
+
+const COST_STYLE: Record<CostLevel, string> = {
+  low: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200',
+  medium: 'border-amber-500/25 bg-amber-500/10 text-amber-100',
+  high: 'border-red-500/30 bg-red-500/10 text-red-200',
+};
+
+/** A quote that got worse than the tolerance between seeing it and clicking Buy. */
+interface PriceMove { seenOut: string; quote: RiftQuote; fetchedAt: number; dropPct: number; limit: number }
 
 interface Props {
   showToast: (message: string, type: 'success' | 'error' | 'info' | 'warning') => void;
@@ -58,6 +75,23 @@ const isUserRejection = (e: unknown) => {
   const x = e as { name?: string; code?: number; message?: string; cause?: { code?: number } };
   return x?.name === 'UserRejectedRequestError' || x?.code === 4001 || x?.cause?.code === 4001 || /user (rejected|denied)|rejected the request/i.test(x?.message ?? '');
 };
+/** viem could not reach a chain's RPC ("HTTP request failed."), anywhere in the error's cause chain. */
+const isNetworkError = (e: unknown) => {
+  let x = e as { name?: string; cause?: unknown } | undefined;
+  for (let i = 0; x && i < 6; i++, x = x.cause as typeof x) {
+    if (x.name === 'HttpRequestError' || x.name === 'TimeoutError' || x.name === 'WebSocketRequestError') return true;
+  }
+  return false;
+};
+
+function loadTolerance(): number {
+  try {
+    const v = Number(localStorage.getItem(TOLERANCE_KEY));
+    return (TOLERANCE_CHOICES as readonly number[]).includes(v) ? v : DEFAULT_TOLERANCE_PCT;
+  } catch {
+    return DEFAULT_TOLERANCE_PCT;
+  }
+}
 
 /** Keep only digits and one dot, and no more decimals than the token has. */
 function sanitizeAmount(input: string, decimals: number): string {
@@ -84,7 +118,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
   const { sendTransactionAsync } = useSendTransaction();
   const { writeContractAsync } = useWriteContract();
   const basePublic = usePublicClient({ chainId: base.id });
-  const { prices } = usePrices();
+  const { prices, lastUpdate } = usePrices();
   const orders = useStoredOrders();
 
   const [selected, setSelected] = useState<string | null>(null);
@@ -95,6 +129,15 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [payingId, setPayingId] = useState<string | null>(null);
+  const [tolerance, setTolerance] = useState(DEFAULT_TOLERANCE_PCT);
+  const [moved, setMoved] = useState<PriceMove | null>(null);
+  const [ack, setAck] = useState<{ key: string; pct: number } | null>(null);
+
+  useEffect(() => { setTolerance(loadTolerance()); }, []);
+  const chooseTolerance = (v: number) => {
+    setTolerance(v);
+    try { localStorage.setItem(TOLERANCE_KEY, String(v)); } catch { /* private mode */ }
+  };
 
   // --- Your tokens: balances on Ethereum, Arbitrum and Base, valued in USD, largest first ---
   const holdingsQuery = useQuery({
@@ -158,9 +201,15 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
     }
     setAmount(normalizeDecimal(formatUnits(raw, token.decimals)));
   };
-  const amountUsd = holding && amountState.normalized ? Number(amountState.normalized) * holding.priceUsd : 0;
 
-  // --- Live quote: re-priced every 30 s while shown ---
+  // Market prices for the cost check, both from DeFiLlama; the site's own iAERO price only once it has
+  // really loaded (it starts from placeholder values), and the wallet list's price for the token.
+  const market = useMarketPrices(token?.asset);
+  const inputPriceUsd = market.inputUsd ?? holding?.priceUsd ?? 0;
+  const iaeroUsd = market.iaeroUsd ?? (lastUpdate ? (prices as { iAERO?: { usd?: number } } | undefined)?.iAERO?.usd ?? 0 : 0);
+  const amountUsd = amountState.normalized && inputPriceUsd ? Number(amountState.normalized) * inputPriceUsd : 0;
+
+  // --- Live quote: re-priced every 30 s while shown (paused while a price move waits for your answer) ---
   const quoteAmount = useDebounce(amountState.error ? undefined : amountState.normalized, 600);
   const quoteQuery = useQuery({
     queryKey: ['rift-quote', token?.asset, quoteAmount],
@@ -169,13 +218,38 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
       parseQuote(await fetchQuote({ from: token!.asset, from_amount: quoteAmount! }, signal), {
         destination: RIFT_DESTINATION, fromChain: chainKey, fromAmount: quoteAmount!,
       }),
-    refetchInterval: 30_000,
+    refetchInterval: moved ? false : 30_000,
     staleTime: 20_000,
     retry: false,
   });
   const quote = quoteQuery.data && quoteAmount && amountState.normalized === quoteAmount ? quoteQuery.data : undefined;
   const estimate = useMemo(() => (quote ? estimateRoute(chainKey, quote.route, KNOWN_SYMBOLS) : null), [quote, chainKey]);
-  const iaeroUsd = (prices as { iAERO?: { usd?: number } } | undefined)?.iAERO?.usd ?? 0;
+
+  // What the quote costs against market prices: bridge, swap and network costs together.
+  const cost = useMemo(() => {
+    if (!quote || !inputPriceUsd || !iaeroUsd) return null;
+    const usdIn = Number(quote.from_amount) * inputPriceUsd;
+    const usdOut = Number(quote.estimated_amount_out) * iaeroUsd;
+    const pct = costVsMarketPct(usdIn, usdOut);
+    return pct === null ? null : { pct, level: costLevel(pct), usdIn, usdOut };
+  }, [quote, inputPriceUsd, iaeroUsd]);
+  // A high cost needs a tick, for this token and amount, and again if it gets materially worse.
+  const ackKey = `${token?.asset}|${quoteAmount}`;
+  const acked = !!ack && !!cost && ack.key === ackKey && cost.pct <= ack.pct + 0.5;
+  const needsAck = cost?.level === 'high' && !acked;
+
+  // What you saw: the quote on screen, or the one before it if it changed in the last 3 seconds
+  // (a refresh landing just before your click is not something you had time to read).
+  const shown = useRef<{ key: string; out: string; since: number; prevOut?: string } | null>(null);
+  useEffect(() => {
+    if (!quote) return;
+    const key = `${quote.from}|${quote.from_amount}`;
+    const s = shown.current;
+    if (s && s.key === key && s.out === quote.estimated_amount_out) return;
+    shown.current = { key, out: quote.estimated_amount_out, since: Date.now(), prevOut: s?.key === key ? s.out : undefined };
+  }, [quote]);
+  // A price move belongs to the token and amount it was found for.
+  useEffect(() => { setMoved(null); }, [token?.asset, quoteAmount]);
 
   // --- Orders ---
   useEffect(() => {
@@ -205,16 +279,19 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
     } catch (e) {
       const msg = isUserRejection(e)
         ? 'Payment cancelled in your wallet. You can pay from the order card whenever you are ready.'
-        : `Payment failed: ${errText(e)}`;
+        : isNetworkError(e)
+          ? `Payment failed: could not reach ${c.name}. If your wallet shows the payment as sent, don't pay again: this page picks it up from Rift.`
+          : `Payment failed: ${errText(e)}`;
       setError(msg); showToast(msg, 'error');
     } finally {
       setPayingId(null); setBusy(null);
     }
   }
 
-  async function start() {
+  /** Buy. `accepted` is a new price the user agreed to after a move; otherwise the baseline is what they saw. */
+  async function start(accepted?: PriceMove) {
     if (!address || !token || !quote) return;
-    setError(null);
+    setError(null); setMoved(null);
     try {
       const refund = chain.kind === 'bitcoin' ? btcRefund.trim() : address;
       if (chain.kind === 'bitcoin' && !isBtcAddress(refund)) {
@@ -223,18 +300,41 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
       // iAERO goes to this same address on Base. A smart-contract wallet that exists only on the paying
       // chain could not use it there.
       if (chain.kind === 'evm' && chainKey !== 'base' && sourcePublic && basePublic) {
-        const [srcCode, baseCode] = await Promise.all([sourcePublic.getCode({ address }), basePublic.getCode({ address })]);
-        if (srcCode && srcCode !== '0x' && (!baseCode || baseCode === '0x')) {
+        setBusy('Checking your wallet…');
+        let codes: [string | undefined, string | undefined];
+        try {
+          codes = await Promise.all([sourcePublic.getCode({ address }), basePublic.getCode({ address })]);
+        } catch {
+          throw new Error(`Could not reach ${chain.name} or Base to check your wallet. Nothing was sent; try again in a moment.`);
+        }
+        const [srcCode, baseCode] = codes;
+        if (isContractCode(srcCode) && (!baseCode || baseCode === '0x')) {
           throw new Error(`Your wallet is a smart-contract wallet on ${chain.name} but not on Base, so it could not receive iAERO there.`);
         }
       }
-      // A fresh price if the shown one is over a minute old or close to expiry.
-      let q = quote;
-      if (Date.now() - quoteQuery.dataUpdatedAt > 60_000 || Date.parse(q.expires_at) - Date.now() < 60_000) {
-        setBusy('Refreshing the price…');
+      // The price check. Baseline: the new price the user accepted, or what they saw on screen. A quote
+      // older than 20 s (or close to expiry) is fetched again; if it is worse than the baseline by more than
+      // the tolerance, stop and ask instead of buying.
+      const s = shown.current;
+      const justChanged = !!s?.prevOut && s.key === `${quote.from}|${quote.from_amount}` && Date.now() - s.since < 3000;
+      const seenOut = accepted ? accepted.quote.estimated_amount_out : justChanged ? s!.prevOut! : quote.estimated_amount_out;
+      let q = accepted?.quote ?? quote;
+      let fetchedAt = accepted?.fetchedAt ?? quoteQuery.dataUpdatedAt;
+      if (Date.now() - fetchedAt > RECHECK_AFTER_MS || Date.parse(q.expires_at) - Date.now() < 60_000) {
+        setBusy('Checking the latest price…');
         const r = await quoteQuery.refetch();
-        if (!r.data) throw r.error ?? new Error('Could not refresh the quote');
-        q = r.data;
+        if (r.isError || !r.data) throw r.error ?? new Error('Could not refresh the price');
+        q = r.data; fetchedAt = r.dataUpdatedAt;
+      }
+      const dropPct = priceDropPct(seenOut, q.estimated_amount_out);
+      if (dropPct > tolerance) {
+        setMoved({ seenOut, quote: q, fetchedAt, dropPct, limit: tolerance });
+        return;
+      }
+      // A high cost needs the tick, also when it only became high with this refresh.
+      const freshCost = costVsMarketPct(Number(q.from_amount) * inputPriceUsd, Number(q.estimated_amount_out) * iaeroUsd);
+      if (freshCost !== null && costLevel(freshCost) === 'high' && !(ack && ack.key === ackKey && freshCost <= ack.pct + 0.5)) {
+        throw new Error(`The cost is now ${formatPct(freshCost)} against market price. Nothing was sent: tick the confirmation above to continue.`);
       }
       if (notify && typeof Notification !== 'undefined' && Notification.permission === 'default') {
         try { await Notification.requestPermission(); } catch { /* not supported */ }
@@ -258,6 +358,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
         fromAmount, fromAmountRaw: raw.toString(), estimatedOut: q.estimated_amount_out, route: q.route,
         depositAddress: order.deposit_address, depositDeadline: order.deposit_deadline, toAddress: address,
         refundAddress: refund, status: order.status, statusTimes: { [order.status]: Date.now() }, baseFromBlock, notify,
+        usdIn: inputPriceUsd ? Number(fromAmount) * inputPriceUsd : undefined, iaeroUsd: iaeroUsd || undefined,
       };
       upsertOrder(stored);
       setActiveId(order.id);
@@ -266,7 +367,9 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
       else showToast('Order created. Send the exact BTC amount shown to complete it.', 'info');
     } catch (e) {
       if (e instanceof RiftApiError && e.status === 410) quoteQuery.refetch();
-      const msg = e instanceof RiftApiError ? explainRiftError(e) : errText(e);
+      const msg = e instanceof RiftApiError ? explainRiftError(e)
+        : isNetworkError(e) ? 'Could not reach the network just now. Nothing was sent; try again in a moment.'
+        : errText(e);
       setError(msg); showToast(msg, 'error');
     } finally {
       setBusy(null);
@@ -281,6 +384,8 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
     if (quoteQuery.isFetching && !quote) return { text: 'Finding the best route…', disabled: true };
     if (!quote) return { text: quoteQuery.error ? 'No route available' : 'Waiting for a quote', disabled: true };
     if (chain.kind === 'bitcoin' && !isBtcAddress(btcRefund.trim())) return { text: 'Enter your BTC refund address', disabled: true };
+    if (moved) return { text: 'The price moved: review it above', disabled: true };
+    if (needsAck) return { text: 'Confirm the high cost above to continue', disabled: true };
     return { text: chain.kind === 'bitcoin' ? 'Create Bitcoin payment' : `Buy iAERO with ${token.symbol}`, disabled: !!busy };
   })();
 
@@ -416,6 +521,32 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
                     </div>
                     {quoteQuery.isFetching && <Loader2 className="h-4 w-4 animate-spin text-slate-500" />}
                   </div>
+                  {cost ? (
+                    <div className={`space-y-1 rounded-lg border p-3 text-sm ${COST_STYLE[cost.level]}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span>Cost vs market price</span>
+                        <span className="font-semibold">{cost.pct > 0 ? formatPct(cost.pct) : 'none'}</span>
+                      </div>
+                      <div className="text-[11px] opacity-80">
+                        You pay ≈ {fmtUsd(cost.usdIn)} and get ≈ {fmtUsd(cost.usdOut)} of iAERO at market prices
+                        {cost.pct < 0 && <> ({formatPct(cost.pct)} more)</>}. Includes every bridge, swap and network cost.
+                      </div>
+                      {cost.level === 'high' && (
+                        <label className="flex cursor-pointer items-start gap-2 pt-1 text-xs">
+                          <input
+                            type="checkbox" checked={acked} disabled={!!busy} className="mt-0.5 h-4 w-4 shrink-0 accent-red-500"
+                            onChange={e => setAck(e.target.checked ? { key: ackKey, pct: cost.pct } : null)}
+                          />
+                          <span>
+                            I understand I get about {formatPct(cost.pct)} less than market value. A smaller amount usually costs
+                            less, because large orders move the iAERO price.
+                          </span>
+                        </label>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-slate-500">Cost vs market price unavailable: no current market price for {token?.symbol ?? 'this token'} or iAERO.</div>
+                  )}
                   <div className="grid grid-cols-2 gap-3 text-sm">
                     <div className="rounded-lg bg-slate-800/60 p-3">
                       <div className="flex items-center gap-1.5 text-xs text-slate-400"><Timer className="h-3.5 w-3.5" /> Time to arrive</div>
@@ -432,9 +563,53 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
                     <div className="mb-2 flex items-center gap-1.5 text-xs text-slate-400"><RouteIcon className="h-3.5 w-3.5" /> Route</div>
                     <RouteSteps estimate={estimate} />
                   </div>
-                  <div className="text-[11px] text-slate-500">Price refreshes every 30 seconds; the amount you receive can differ slightly from the estimate.</div>
+                  <div className="space-y-1.5 border-t border-slate-700/40 pt-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs text-slate-400">Max price change before you pay</span>
+                      <div className="flex gap-1">
+                        {TOLERANCE_CHOICES.map(v => (
+                          <button
+                            key={v} type="button" onClick={() => chooseTolerance(v)} disabled={!!busy}
+                            className={`rounded-md px-2 py-0.5 text-xs transition-colors ${
+                              tolerance === v ? 'bg-indigo-500/30 text-white ring-1 ring-indigo-400/60' : 'bg-slate-800 text-slate-400 hover:text-white'
+                            }`}
+                          >
+                            {v}%
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      The price refreshes every 30 seconds and is checked again when you click. If it has dropped by more than {tolerance}%,
+                      nothing is sent and you are asked first.{' '}
+                      {chain.kind === 'bitcoin'
+                        ? 'Rift swaps once your BTC is confirmed, usually within the hour, so the final amount follows the market until then.'
+                        : 'The final amount can still differ slightly, because Rift swaps once your payment arrives.'}
+                    </div>
+                  </div>
                 </>
               )}
+            </div>
+          )}
+
+          {/* The price got worse than the tolerance between seeing it and clicking */}
+          {moved && (
+            <div className="space-y-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
+              <div className="flex gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+                <div>
+                  The price moved. You saw <span className="font-semibold text-white">{fmt(moved.seenOut)} iAERO</span>; it is now{' '}
+                  <span className="font-semibold text-white">{fmt(moved.quote.estimated_amount_out)} iAERO</span>, {formatPct(moved.dropPct)} less
+                  and more than your {moved.limit}% limit. Nothing was sent.
+                  {needsAck && <> The new price costs {formatPct(cost!.pct)} against market: tick the confirmation above first.</>}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={() => start(moved)} disabled={!!busy || needsAck} className="bg-amber-600 text-white hover:bg-amber-700">
+                  Buy at the new price
+                </Button>
+                <Button variant="outline" onClick={() => setMoved(null)} disabled={!!busy} className="border-slate-600 text-slate-200">Cancel</Button>
+              </div>
             </div>
           )}
 
@@ -448,7 +623,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
           </label>
 
           <Button
-            onClick={start} disabled={cta.disabled}
+            onClick={() => start()} disabled={cta.disabled}
             className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy ? <span className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" />{busy}</span> : cta.text}

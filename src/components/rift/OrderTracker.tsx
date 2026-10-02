@@ -28,6 +28,7 @@ import { patchOrder } from '@/lib/rift/storage';
 import { findBtcDeposit } from '@/lib/rift/bitcoin';
 import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, SOURCE_CHAINS } from '@/lib/rift/config';
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
+import { costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
 import type { RiftOrderStatus, StoredOrder } from '@/lib/rift/types';
 
 type EvmChainId = 1 | 42161 | 8453;
@@ -190,6 +191,12 @@ export default function OrderTracker({ order, onPay, paying, onGoToStake, showTo
   if (order.depositFailed) extras.deposit = 'Your payment transaction failed, so nothing was sent. You can pay again below.';
   if (phase === 'detecting') extras.deposit = 'Confirmed on-chain; waiting for Rift to register it.';
 
+  // Once delivered: what arrived against the quote, and the all-in cost against market prices when ordered
+  // (the iAERO price then, so a market move during the trip does not count as cost).
+  const vsQuote = order.status === 'delivered' ? deliveredVsQuotedPct(order.amountOut, order.estimatedOut) : null;
+  const allIn = order.status === 'delivered' && order.usdIn && order.iaeroUsd && order.amountOut
+    ? costVsMarketPct(order.usdIn, Number(order.amountOut) * order.iaeroUsd) : null;
+
   const copy = async (v: string) => { try { await navigator.clipboard.writeText(v); showToast?.('Copied', 'info'); } catch { /* blocked */ } };
 
   return (
@@ -220,7 +227,16 @@ export default function OrderTracker({ order, onPay, paying, onGoToStake, showTo
           {phase === 'delivered' && (
             <div className="space-y-1 text-sm text-slate-300">
               <div><span className="text-lg font-semibold text-emerald-300">{fmt(order.amountOut)} iAERO</span> delivered{progress.elapsedSec > 0 && <> in {formatClock(progress.elapsedSec)}</>}.</div>
-              <div className="text-xs text-slate-500">Quoted {fmt(order.estimatedOut)} iAERO when you ordered.</div>
+              <div className={`text-xs ${vsQuote !== null && vsQuote < -1 ? 'text-amber-300' : 'text-slate-400'}`}>
+                {vsQuote === null ? <>Quoted {fmt(order.estimatedOut)} iAERO when you ordered.</>
+                  : Math.abs(vsQuote) < 0.005 ? <>Exactly the {fmt(order.estimatedOut)} iAERO quoted.</>
+                  : <>{formatPct(vsQuote)} {vsQuote > 0 ? 'more' : 'less'} than the {fmt(order.estimatedOut)} iAERO quoted.</>}
+              </div>
+              {allIn !== null && (
+                <div className="text-xs text-slate-500">
+                  All-in cost vs market price when you ordered: {allIn > 0 ? formatPct(allIn) : `none (${formatPct(allIn)} more)`}.
+                </div>
+              )}
             </div>
           )}
           {(moving || phase === 'delivered') && <Bar value={progress.fraction * 100} className="mt-3" />}

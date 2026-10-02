@@ -124,3 +124,8 @@ export function parseOrderUpdate(json: unknown, orderId: string): OrderUpdate {
   if (str(o, 'id', 'order') !== orderId) throw new Error('Rift returned a different order');
   return { status: parseStatus(o), amountOut: typeof o.amount_out === 'string' ? o.amount_out : null };
 }
+
+/** Whether an address's code makes it a contract wallet. An EIP-7702 delegation (0xef0100 + the delegate's
+ *  address) is not one: the account is still an EOA, and its key controls the same address on every chain. */
+export const isContractCode = (code: string | undefined) =>
+  !!code && code !== '0x' && !/^0xef0100[0-9a-fA-F]{40}$/.test(code);

@@ -92,4 +92,8 @@ export interface StoredOrder {
   /** Base block at order creation: where the delivery scan starts. */
   baseFromBlock?: string;
   notify?: boolean;
+  /** USD value of the payment and the iAERO price when the order was made (market prices), for the
+   *  all-in cost once delivered. */
+  usdIn?: number;
+  iaeroUsd?: number;
 }
