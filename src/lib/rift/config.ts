@@ -1,11 +1,12 @@
 // src/lib/rift/config.ts
 //
 // Where a "Get iAERO" order can start, and where it always ends: iAERO on Base.
-// Rift supports Ethereum, Arbitrum, Base, Bitcoin, Hyperliquid, Ink and Robinhood. Hyperliquid needs a
-// Hyperliquid API signature to pay, Ink had no route in testing, and Robinhood has no relevant tokens,
-// so they are left out of this version.
+// Rift supports Ethereum, Arbitrum, Base, Bitcoin, Hyperliquid (HyperCore spot balances, paid with a signed
+// transfer: hypercore.ts), Ink and Robinhood. Ink had no route in testing and Robinhood has no relevant
+// tokens, so they are left out. HyperEVM tokens have no Rift route (2026-10-02).
 
 import type { SourceChainKey, SourceToken } from './types';
+import { HYPERCORE_TOKENS, spotSendToken } from './hypercore';
 
 export const IAERO_ADDRESS = '0x81034Fb34009115F215f5d5F564AAc9FfA46a1Dc' as const;
 export const IAERO_DECIMALS = 18;
@@ -18,7 +19,7 @@ export const RIFT_SECURITY_URL = 'https://www.rift.trade/docs/security-model';
 export interface SourceChainConfig {
   key: SourceChainKey;
   name: string;
-  kind: 'evm' | 'bitcoin';
+  kind: 'evm' | 'bitcoin' | 'hypercore';
   chainId?: number;
   nativeSymbol: string;
   nativeDecimals: number;
@@ -49,6 +50,11 @@ export const SOURCE_CHAINS: Record<SourceChainKey, SourceChainConfig> = {
     key: 'bitcoin', name: 'Bitcoin', kind: 'bitcoin', nativeSymbol: 'BTC', nativeDecimals: 8,
     nativeAsset: 'bitcoin.btc',
     txUrl: h => `https://mempool.space/tx/${h}`, addressUrl: a => `https://mempool.space/address/${a}`,
+  },
+  hyperliquid: {
+    key: 'hyperliquid', name: 'Hyperliquid', kind: 'hypercore', nativeSymbol: 'HYPE', nativeDecimals: 8,
+    nativeAsset: 'hyperliquid.hype',
+    txUrl: h => `https://app.hyperliquid.xyz/explorer/tx/${h}`, addressUrl: a => `https://app.hyperliquid.xyz/explorer/address/${a}`,
   },
 };
 
@@ -82,6 +88,9 @@ export const CURATED_TOKENS: SourceToken[] = [
   erc20('base', 'cbBTC', 'Coinbase Wrapped BTC', 8, '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf'),
   erc20('base', 'DAI', 'Dai', 18, '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb'),
   native('bitcoin'),
+  ...HYPERCORE_TOKENS.map((t): SourceToken => ({
+    chain: 'hyperliquid', symbol: t.symbol, name: t.name, decimals: t.decimals, asset: t.asset, hlToken: spotSendToken(t),
+  })),
 ];
 
 /** Display names for the assets that appear in Rift routes. */

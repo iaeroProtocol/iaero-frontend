@@ -65,7 +65,7 @@ export default function OrderTracker({ order, onPay, paying, onGoToStake, showTo
   }, [terminal]);
 
   // 1. Rift status: every 4 s while executing, 6 s once paid, 15 s while waiting; backs off on errors.
-  const paid = !!order.depositTxHash || !!order.btc?.txid;
+  const paid = !!order.depositTxHash || !!order.btc?.txid || (chain.kind === 'hypercore' && !!order.depositSentAt);
   useEffect(() => {
     if (terminal) return;
     let stop = false;
@@ -166,7 +166,7 @@ export default function OrderTracker({ order, onPay, paying, onGoToStake, showTo
     status: order.status,
     sourceKind: chain.kind,
     createdAt: order.createdAt,
-    depositSentAt: order.depositTxHash && !order.depositFailed ? order.depositSentAt : undefined,
+    depositSentAt: chain.kind === 'hypercore' ? order.depositSentAt : order.depositTxHash && !order.depositFailed ? order.depositSentAt : undefined,
     depositConfirmedAt: order.depositConfirmedAt,
     btcSeenAt: order.btc?.firstSeenAt,
     fundedAt: order.statusTimes.funded ?? order.statusTimes.executing,
@@ -181,6 +181,7 @@ export default function OrderTracker({ order, onPay, paying, onGoToStake, showTo
   const links: Partial<Record<string, StepLink>> = {};
   if (chain.kind === 'evm' && order.depositTxHash) links.deposit = { href: chain.txUrl(order.depositTxHash), text: 'Your payment transaction' };
   if (chain.kind === 'bitcoin' && order.btc?.txid) links.deposit = { href: chain.txUrl(order.btc.txid), text: 'Your Bitcoin payment' };
+  if (chain.kind === 'hypercore' && order.depositSentAt) links.deposit = { href: chain.addressUrl(order.toAddress), text: 'Your Hyperliquid account' };
   if (order.deliveryTxHash) links.deliver = { href: BASESCAN_TX(order.deliveryTxHash), text: 'Delivery on BaseScan' };
   const extras: Partial<Record<string, React.ReactNode>> = {};
   if (chain.kind === 'bitcoin' && order.btc?.txid && phase === 'confirming') {
@@ -189,7 +190,9 @@ export default function OrderTracker({ order, onPay, paying, onGoToStake, showTo
       : 'Seen in the mempool; waiting for the first confirmation.';
   }
   if (order.depositFailed) extras.deposit = 'Your payment transaction failed, so nothing was sent. You can pay again below.';
-  if (phase === 'detecting') extras.deposit = 'Confirmed on-chain; waiting for Rift to register it.';
+  if (phase === 'detecting') {
+    extras.deposit = chain.kind === 'hypercore' ? 'Sent on Hyperliquid; waiting for Rift to register it.' : 'Confirmed on-chain; waiting for Rift to register it.';
+  }
 
   // Once delivered: what arrived against the quote, and the all-in cost against market prices when ordered
   // (the iAERO price then, so a market move during the trip does not count as cost).
@@ -262,7 +265,7 @@ export default function OrderTracker({ order, onPay, paying, onGoToStake, showTo
         )}
 
         {/* Payment needed */}
-        {phase === 'pay' && chain.kind === 'evm' && (
+        {phase === 'pay' && (chain.kind === 'evm' || chain.kind === 'hypercore') && (
           <div className="space-y-3 rounded-xl border border-indigo-500/20 bg-indigo-500/5 p-4">
             <div className="text-sm text-slate-200">
               {order.depositFailed ? 'Your last payment failed. ' : ''}Send <span className="font-medium text-white">{fmt(order.fromAmount, 8)} {order.token.symbol}</span> on {chain.name} to start.

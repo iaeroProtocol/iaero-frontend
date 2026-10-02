@@ -11,7 +11,7 @@ export const RIFT_API = 'https://api.rift.trade';
 const TIMEOUT_MS = 25_000;
 
 /** Source assets this version supports: native coins or ERC-20 contract addresses. */
-export const SOURCE_ASSET_RE = /^(ethereum\.eth|arbitrum\.eth|base\.eth|bitcoin\.btc|(ethereum|arbitrum|base)\.0x[0-9a-fA-F]{40})$/;
+export const SOURCE_ASSET_RE = /^(ethereum\.eth|arbitrum\.eth|base\.eth|bitcoin\.btc|hyperliquid\.(hype|usdc|btc|eth)|(ethereum|arbitrum|base)\.0x[0-9a-fA-F]{40})$/;
 export const AMOUNT_RE = /^(?=.*[1-9])\d{1,24}(\.\d{1,18})?$/;
 export const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 export const BTC_ADDRESS_RE = /^(bc1[02-9ac-hj-np-z]{8,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/;

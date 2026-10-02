@@ -1,8 +1,8 @@
 // src/components/protocol/GetIaeroSection.tsx
 //
 // "Get iAERO": turn a token you hold into iAERO in one step, routed by Rift (rift.trade). The picker lists
-// your own tokens on Ethereum, Arbitrum and Base that Rift can route, highest USD value first; Bitcoin
-// from another wallet is offered last. You see the iAERO you will get, what that costs against market
+// your own tokens on Ethereum, Arbitrum, Base and Hyperliquid (HyperCore spot) that Rift can route, highest
+// USD value first; Bitcoin from another wallet is offered last. You see the iAERO you will get, what that costs against market
 // prices, the route and how long it takes before committing. One click re-checks the price against your
 // tolerance, creates the order and, for EVM tokens, asks the wallet for a single plain transfer to the
 // order's one-time deposit address. Rift does the rest; OrderTracker shows every step.
@@ -12,10 +12,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  useAccount, useBalance, useGasPrice, usePublicClient, useReadContract, useSendTransaction, useSwitchChain, useWriteContract,
+  useAccount, useBalance, useGasPrice, usePublicClient, useReadContract, useSendTransaction, useSignTypedData, useSwitchChain,
+  useWriteContract,
 } from 'wagmi';
-import { base, mainnet } from 'wagmi/chains';
-import { erc20Abi, formatUnits, isAddress } from 'viem';
+import { arbitrum, base, mainnet } from 'wagmi/chains';
+import { erc20Abi, formatUnits, isAddress, parseSignature } from 'viem';
 import { AlertTriangle, ArrowLeftRight, Bell, Bitcoin, Info, Loader2, RefreshCw, Route as RouteIcon, ShieldCheck, Timer } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -34,6 +35,10 @@ import { isBtcAddress } from '@/lib/rift/bitcoin';
 import { rawToNumber, type Holding } from '@/lib/rift/holdings';
 import { useRiftSupport } from '@/lib/rift/support';
 import { useMarketPrices } from '@/lib/rift/prices';
+import {
+  HL_API, HL_NEW_ADDRESS_FEE_USDC, HL_SIGNATURE_CHAIN_ID, HYPERCORE_TOKENS, hyperCoreToken, parseSpotBalances, spotSendRequest,
+  spotSendResult, spotSendToken, spotSendTypedData,
+} from '@/lib/rift/hypercore';
 import {
   DEFAULT_TOLERANCE_PCT, TOLERANCE_CHOICES, costLevel, costText, costVsMarketPct, formatPct, gasDeskChains, gasDeskUsd,
   priceDropPct, type CostLevel,
@@ -121,6 +126,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
   const { switchChainAsync } = useSwitchChain();
   const { sendTransactionAsync } = useSendTransaction();
   const { writeContractAsync } = useWriteContract();
+  const { signTypedDataAsync } = useSignTypedData();
   const basePublic = usePublicClient({ chainId: base.id });
   const { prices, lastUpdate } = usePrices();
   const orders = useStoredOrders();
@@ -143,11 +149,11 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
     try { localStorage.setItem(TOLERANCE_KEY, String(v)); } catch { /* private mode */ }
   };
 
-  // --- Your tokens: balances on Ethereum, Arbitrum and Base, valued in USD, largest first ---
+  // --- Your tokens: balances on Ethereum, Arbitrum, Base and HyperCore, valued in USD, largest first ---
   const holdingsQuery = useQuery({
     queryKey: ['rift-holdings', address],
     enabled: !!address,
-    queryFn: async (): Promise<{ holdings: Holding[]; warnings: string[] }> => {
+    queryFn: async (): Promise<{ holdings: Holding[]; warnings: string[]; hyperliquidUsdc?: string }> => {
       const res = await fetch(`/api/rift/holdings?address=${address}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`Could not load your tokens (HTTP ${res.status})`);
       return res.json();
@@ -181,7 +187,15 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
     query: { enabled: !!address && chain.kind === 'evm' && !!token?.address },
   });
   const liveBalance = token?.address ? (tokenBal.data as bigint | undefined) : nativeBal.data?.value;
-  const balanceRaw: bigint | undefined = chain.kind !== 'evm' || !token ? undefined : liveBalance ?? (holding ? BigInt(holding.balanceRaw) : undefined);
+  // HyperCore: the list's spendable balance (re-checked live on Buy). Hyperliquid takes 1 USDC from the spot
+  // balance for every transfer to a new address, so USDC keeps that back and other tokens need it on top.
+  const isHyperCore = chain.kind === 'hypercore';
+  const hlFeeRaw = token && isHyperCore && token.symbol === 'USDC' ? decimalToRaw(String(HL_NEW_ADDRESS_FEE_USDC), token.decimals) : 0n;
+  const balanceRaw: bigint | undefined = !token ? undefined
+    : chain.kind === 'evm' ? liveBalance ?? (holding ? BigInt(holding.balanceRaw) : undefined)
+    : isHyperCore && holding ? (BigInt(holding.balanceRaw) > hlFeeRaw ? BigInt(holding.balanceRaw) - hlFeeRaw : 0n)
+    : undefined;
+  const hlUsdcShort = isHyperCore && token?.symbol !== 'USDC' && Number(holdingsQuery.data?.hyperliquidUsdc ?? 0) < HL_NEW_ADDRESS_FEE_USDC;
 
   const amountState = useMemo((): { normalized?: string; raw?: bigint; error?: string } => {
     if (!token || !amount) return {};
@@ -189,12 +203,15 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
       const normalized = normalizeDecimal(amount.endsWith('.') ? amount.slice(0, -1) : amount);
       const raw = decimalToRaw(normalized, token.decimals);
       if (raw === 0n) return {};
-      if (balanceRaw !== undefined && raw > balanceRaw) return { normalized, raw, error: `Insufficient ${token.symbol} balance` };
+      if (balanceRaw !== undefined && raw > balanceRaw) {
+        return { normalized, raw, error: hlFeeRaw ? 'Insufficient USDC: 1 USDC stays for Hyperliquid’s transfer fee' : `Insufficient ${token.symbol} balance` };
+      }
+      if (hlUsdcShort) return { normalized, raw, error: 'Hyperliquid charges 1 USDC per transfer: keep 1 USDC in your spot balance' };
       return { normalized, raw };
     } catch {
       return { error: 'Enter a valid amount' };
     }
-  }, [amount, token, balanceRaw]);
+  }, [amount, token, balanceRaw, hlFeeRaw, hlUsdcShort]);
 
   const setMax = () => {
     if (!token || balanceRaw === undefined) return;
@@ -246,11 +263,11 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
   // What the order costs against market prices: bridge, swap, network and gas-desk costs together.
   const cost = useMemo(() => {
     if (!quote || !inputPriceUsd || !iaeroUsd) return null;
-    const usdIn = Number(quote.from_amount) * inputPriceUsd;
+    const usdIn = Number(quote.from_amount) * inputPriceUsd + (isHyperCore ? HL_NEW_ADDRESS_FEE_USDC : 0);
     const usdOut = expectedOut * iaeroUsd;
     const pct = costVsMarketPct(usdIn, usdOut);
     return pct === null ? null : { pct, level: costLevel(pct), usdIn, usdOut };
-  }, [quote, inputPriceUsd, iaeroUsd, expectedOut]);
+  }, [quote, inputPriceUsd, iaeroUsd, expectedOut, isHyperCore]);
   // A high cost needs a tick, for this token and amount, and again if it gets materially worse.
   const ackKey = `${token?.asset}|${quoteAmount}`;
   const acked = !!ack && !!cost && ack.key === ackKey && cost.pct <= ack.pct + 0.5;
@@ -279,6 +296,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
 
   async function pay(o: StoredOrder) {
     const c = SOURCE_CHAINS[o.sourceChain];
+    if (c.kind === 'hypercore') return payHyperCore(o);
     if (c.kind !== 'evm' || !c.chainId) return;
     setPayingId(o.id); setError(null);
     try {
@@ -299,6 +317,47 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
         ? 'Payment cancelled in your wallet. You can pay from the order card whenever you are ready.'
         : isNetworkError(e)
           ? `Payment failed: could not reach ${c.name}. If your wallet shows the payment as sent, don't pay again: this page picks it up from Rift.`
+          : `Payment failed: ${errText(e)}`;
+      setError(msg); showToast(msg, 'error');
+    } finally {
+      setPayingId(null); setBusy(null);
+    }
+  }
+
+  /** HyperCore: sign a spot transfer to the deposit address (on Arbitrum, the chain the signature's domain
+   *  names) and post it to Hyperliquid. Accepted means final; there is no transaction hash. */
+  async function payHyperCore(o: StoredOrder) {
+    const t = hyperCoreToken(o.token.asset);
+    if (!t) return;
+    setPayingId(o.id); setError(null);
+    let posted = false;
+    try {
+      if (walletChainId !== HL_SIGNATURE_CHAIN_ID) {
+        setBusy('Switch your wallet to Arbitrum to sign…');
+        await switchChainAsync({ chainId: arbitrum.id });
+      }
+      setBusy('Sign the Hyperliquid transfer in your wallet…');
+      const transfer = { destination: o.depositAddress, token: spotSendToken(t), amount: o.fromAmount, time: Date.now() };
+      const sig = parseSignature(await signTypedDataAsync(spotSendTypedData(transfer)));
+      setBusy('Sending on Hyperliquid…');
+      posted = true;
+      const res = await fetch(`${HL_API}/exchange`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(spotSendRequest(transfer, { r: sig.r, s: sig.s, v: Number(sig.v ?? BigInt(27 + (sig.yParity ?? 0))) })),
+      });
+      const text = await res.text();
+      let json: unknown = null;
+      try { json = JSON.parse(text); } catch { /* Hyperliquid answers malformed requests in plain text */ }
+      const result = json ? spotSendResult(json) : { ok: false as const, error: text.slice(0, 200) || `HTTP ${res.status}` };
+      if (!result.ok) { posted = false; throw new Error(`Hyperliquid refused the transfer: ${result.error}`); }
+      const now = Date.now();
+      patchOrder(o.id, { depositSentAt: now, depositConfirmedAt: now, depositFailed: false });
+      showToast('Transfer sent on Hyperliquid. Tracking your order…', 'success');
+    } catch (e) {
+      const msg = isUserRejection(e)
+        ? 'Signature cancelled in your wallet. You can pay from the order card whenever you are ready.'
+        : posted
+          ? `Could not confirm the transfer with Hyperliquid (${errText(e)}). If your Hyperliquid balance shows it sent, don't send again: this page picks it up from Rift.`
           : `Payment failed: ${errText(e)}`;
       setError(msg); showToast(msg, 'error');
     } finally {
@@ -330,6 +389,31 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
           throw new Error(`Your wallet is a smart-contract wallet on ${chain.name} but not on Base, so it could not receive iAERO there.`);
         }
       }
+      // HyperCore: re-check the spendable balance and the 1 USDC fee live; the list can be a minute old.
+      if (chain.kind === 'hypercore') {
+        setBusy('Checking your Hyperliquid balance…');
+        let rows: ReturnType<typeof parseSpotBalances>;
+        try {
+          const res = await fetch(`${HL_API}/info`, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ type: 'spotClearinghouseState', user: address }),
+          });
+          rows = parseSpotBalances(await res.json());
+        } catch {
+          throw new Error('Could not reach Hyperliquid to check your balance. Nothing was sent; try again in a moment.');
+        }
+        const usdcToken = HYPERCORE_TOKENS.find(x => x.symbol === 'USDC')!;
+        const fee = decimalToRaw(String(HL_NEW_ADDRESS_FEE_USDC), usdcToken.decimals);
+        const have = rows.find(r => r.token.asset === token.asset)?.availableRaw ?? 0n;
+        const usdc = rows.find(r => r.token.symbol === 'USDC')?.availableRaw ?? 0n;
+        const need = decimalToRaw(normalizeDecimal(quote.from_amount), token.decimals);
+        if (have < need + (token.symbol === 'USDC' ? fee : 0n)) {
+          throw new Error(`Not enough ${token.symbol} on Hyperliquid for this amount${token.symbol === 'USDC' ? ' plus the 1 USDC transfer fee' : ''}.`);
+        }
+        if (token.symbol !== 'USDC' && usdc < fee) {
+          throw new Error('Hyperliquid charges 1 USDC per transfer to a new address: keep at least 1 USDC in your spot balance.');
+        }
+      }
       // The price check. Baseline: the new price the user accepted, or what they saw on screen. A quote
       // older than 20 s (or close to expiry) is fetched again; if it is worse than the baseline by more than
       // the tolerance, stop and ask instead of buying.
@@ -351,7 +435,8 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
       }
       // A high cost needs the tick, also when it only became high with this refresh.
       const freshExpected = expectedFor(q);
-      const freshCost = costVsMarketPct(Number(q.from_amount) * inputPriceUsd, (freshExpected?.out ?? Number(q.estimated_amount_out)) * iaeroUsd);
+      const hlFeeUsd = chain.kind === 'hypercore' ? HL_NEW_ADDRESS_FEE_USDC : 0;
+      const freshCost = costVsMarketPct(Number(q.from_amount) * inputPriceUsd + hlFeeUsd, (freshExpected?.out ?? Number(q.estimated_amount_out)) * iaeroUsd);
       if (freshCost !== null && costLevel(freshCost) === 'high' && !(ack && ack.key === ackKey && freshCost <= ack.pct + 0.5)) {
         throw new Error(`The cost is now ${formatPct(freshCost)} against market price. Nothing was sent: tick the confirmation above to continue.`);
       }
@@ -366,7 +451,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
       });
       // Never ask the wallet to send anything the order does not say, or to an address of the wrong kind.
       if (decimalToRaw(order.from_amount, token.decimals) !== raw) throw new Error('The order amount does not match your request.');
-      if (chain.kind === 'evm' ? !isAddress(order.deposit_address) : !isBtcAddress(order.deposit_address)) {
+      if (chain.kind === 'bitcoin' ? !isBtcAddress(order.deposit_address) : !isAddress(order.deposit_address)) {
         throw new Error('Rift returned a deposit address of the wrong kind; nothing was sent.');
       }
       let baseFromBlock: string | undefined;
@@ -377,13 +462,13 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
         fromAmount, fromAmountRaw: raw.toString(), estimatedOut: q.estimated_amount_out, route: q.route,
         depositAddress: order.deposit_address, depositDeadline: order.deposit_deadline, toAddress: address,
         refundAddress: refund, status: order.status, statusTimes: { [order.status]: Date.now() }, baseFromBlock, notify,
-        marketUsdIn: inputPriceUsd ? Number(fromAmount) * inputPriceUsd : undefined, marketIaeroUsd: iaeroUsd || undefined,
+        marketUsdIn: inputPriceUsd ? Number(fromAmount) * inputPriceUsd + hlFeeUsd : undefined, marketIaeroUsd: iaeroUsd || undefined,
         expectedOut: freshExpected ? freshExpected.out.toFixed(6) : undefined, gasDeskUsd: freshExpected?.gasUsd,
       };
       upsertOrder(stored);
       setActiveId(order.id);
       setAmount('');
-      if (chain.kind === 'evm') await pay(stored);
+      if (chain.kind !== 'bitcoin') await pay(stored);
       else showToast('Order created. Send the exact BTC amount shown to complete it.', 'info');
     } catch (e) {
       if (e instanceof RiftApiError && e.status === 410) quoteQuery.refetch();
@@ -422,7 +507,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
           <CardTitle className="flex items-center gap-2 text-white">
             <ArrowLeftRight className="h-5 w-5" /> Get iAERO with tokens you hold
           </CardTitle>
-          <p className="text-sm text-slate-400">Pay with any of your tokens on Ethereum, Arbitrum or Base. iAERO arrives in your wallet on Base, automatically.</p>
+          <p className="text-sm text-slate-400">Pay with any of your tokens on Ethereum, Arbitrum, Base or Hyperliquid. iAERO arrives in your wallet on Base, automatically.</p>
         </CardHeader>
         <CardContent className="space-y-5">
           {/* Your tokens */}
@@ -432,7 +517,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
               <div className="rounded-xl border border-slate-700/40 bg-slate-900/40 p-4 text-sm text-slate-400">Connect your wallet to see the tokens you can use.</div>
             ) : holdingsQuery.isLoading ? (
               <div className="flex items-center gap-2 rounded-xl border border-slate-700/40 bg-slate-900/40 p-4 text-sm text-slate-300">
-                <Loader2 className="h-4 w-4 animate-spin" /> Finding your tokens on Ethereum, Arbitrum and Base…
+                <Loader2 className="h-4 w-4 animate-spin" /> Finding your tokens on Ethereum, Arbitrum, Base and Hyperliquid…
               </div>
             ) : holdingsQuery.error ? (
               <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-300">{(holdingsQuery.error as Error).message}</div>
@@ -455,7 +540,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
                   </button>
                 ))}
                 {!usable.length && !checking && (
-                  <div className="p-4 text-sm text-slate-400">No tokens worth $1 or more that Rift can route were found in this wallet on Ethereum, Arbitrum or Base.</div>
+                  <div className="p-4 text-sm text-slate-400">No tokens worth $1 or more that Rift can route were found in this wallet on Ethereum, Arbitrum, Base or Hyperliquid.</div>
                 )}
                 {!usable.length && checking > 0 && (
                   <div className="flex items-center gap-2 p-4 text-sm text-slate-300"><Loader2 className="h-4 w-4 animate-spin" /> Checking which of your tokens Rift can route…</div>
@@ -499,15 +584,15 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
                 />
                 <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
                   <span className="text-sm text-slate-400">{token.symbol}</span>
-                  {chain.kind === 'evm' && balanceRaw !== undefined && (
+                  {(chain.kind === 'evm' || isHyperCore) && balanceRaw !== undefined && (
                     <Button variant="ghost" size="sm" onClick={setMax} disabled={!!busy} className="h-7 px-2 text-indigo-400 hover:text-indigo-300">MAX</Button>
                   )}
                 </div>
               </div>
               <div className="flex justify-between text-sm">
                 {amountState.error ? <span className="text-red-400">{amountState.error}</span>
-                  : chain.kind === 'evm' && balanceRaw !== undefined
-                    ? <span className="text-slate-400">Balance: {fmt(formatUnits(balanceRaw, token.decimals), 6)} {token.symbol} on {chain.name}</span>
+                  : (chain.kind === 'evm' || isHyperCore) && balanceRaw !== undefined
+                    ? <span className="text-slate-400">{hlFeeRaw ? 'Spendable' : 'Balance'}: {fmt(formatUnits(balanceRaw, token.decimals), 6)} {token.symbol} on {chain.name}</span>
                     : <span className="text-slate-400">You will pay from any Bitcoin wallet using a QR code or address.</span>}
                 {amountUsd > 0 && <span className="text-slate-500">≈ {fmtUsd(amountUsd)}</span>}
               </div>
@@ -662,6 +747,13 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
           >
             {busy ? <span className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" />{busy}</span> : cta.text}
           </Button>
+          {isHyperCore && isConnected && token && (
+            <div className="flex gap-2 text-xs text-slate-500">
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              You sign one Hyperliquid transfer, not a transaction; your wallet switches to Arbitrum to sign it. Hyperliquid takes 1 USDC
+              from your spot balance for sending to a new address, which the cost above includes.
+            </div>
+          )}
           {chain.kind === 'evm' && chainKey !== 'base' && isConnected && token && (
             <div className="flex gap-2 text-xs text-slate-500">
               <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />

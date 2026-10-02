@@ -39,7 +39,7 @@ test('market prices: DeFiLlama ids and parsing', async () => {
   assert.equal(llamaIdOf('bitcoin.btc'), 'coingecko:bitcoin');
   assert.equal(llamaIdOf('arbitrum.eth'), 'coingecko:ethereum');
   assert.equal(llamaIdOf('base.0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'), 'base:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913');
-  assert.equal(llamaIdOf('hyperliquid.usdc'), null);
+  assert.equal(llamaIdOf('ink.kbtc'), null);
   const now = 1790922940_000;
   const json = { coins: {
     'base:0x81034fb34009115f215f5d5f564aac9ffa46a1dc': { price: 0.5975797707224795, timestamp: 1790922110, confidence: 0.99 },
@@ -84,4 +84,12 @@ test("Rift's gas desk: once per chain, Ethereum scaled by gas price", async () =
   assert.ok(gasDeskUsd([1], 10_000_000_000n, 2727) > 40, '10 gwei would make it about $44');
   assert.equal(gasDeskUsd([1, 8453], undefined, 2727), null);
   assert.equal(gasDeskUsd([42161, 8453], undefined, undefined), 0.2, 'Layer 2 only needs no Ethereum gas price');
+});
+
+test('HyperCore assets price by CoinGecko id', async () => {
+  const { llamaIdOf } = await import('../../src/lib/rift/cost.ts');
+  assert.equal(llamaIdOf('hyperliquid.hype'), 'coingecko:hyperliquid');
+  assert.equal(llamaIdOf('hyperliquid.btc'), 'coingecko:bitcoin');
+  assert.equal(llamaIdOf('hyperliquid.usdc'), 'coingecko:usd-coin');
+  assert.equal(llamaIdOf('hyperliquid.purr'), null);
 });

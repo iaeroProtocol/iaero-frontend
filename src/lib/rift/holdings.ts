@@ -5,7 +5,7 @@
 // Blockscout API (no key); tokens Blockscout cannot price are looked up on DeFiLlama (also keyless).
 // Pure parsing here; the fetching runs server side in /api/rift/holdings.
 
-export type HoldingChain = 'ethereum' | 'arbitrum' | 'base';
+export type HoldingChain = 'ethereum' | 'arbitrum' | 'base' | 'hyperliquid';
 
 export interface Holding {
   chain: HoldingChain;
@@ -21,6 +21,7 @@ export interface Holding {
   icon?: string;
 }
 
+/** EVM chains read through Blockscout; HyperCore spot balances come from Hyperliquid's API (hypercore.ts). */
 export const HOLDING_CHAINS: { chain: HoldingChain; blockscout: string; llama: string }[] = [
   { chain: 'ethereum', blockscout: 'https://eth.blockscout.com', llama: 'ethereum' },
   { chain: 'arbitrum', blockscout: 'https://arbitrum.blockscout.com', llama: 'arbitrum' },

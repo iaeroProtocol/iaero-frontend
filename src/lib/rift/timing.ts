@@ -53,6 +53,8 @@ export const DEPOSIT_TIMING: Record<string, [number, number]> = {
   arbitrum: [10, 120],
   ethereum: [60, 300],
   bitcoin: [20 * 60, 60 * 60],
+  // A HyperCore transfer is final when Hyperliquid accepts it; Rift sees it within seconds.
+  hyperliquid: [5, 60],
 };
 
 export const VENUE_TIMING: Record<string, [number, number]> = {
@@ -149,7 +151,7 @@ export type Phase =
 
 export interface ProgressInput {
   status: string;
-  sourceKind: 'evm' | 'bitcoin';
+  sourceKind: 'evm' | 'bitcoin' | 'hypercore';
   createdAt: number;
   depositSentAt?: number;
   depositConfirmedAt?: number;

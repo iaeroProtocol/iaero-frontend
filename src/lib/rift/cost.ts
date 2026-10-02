@@ -65,6 +65,11 @@ export const v2AeroPerIaero = (reserveIaero: bigint, reserveAero: bigint): numbe
 /** DeFiLlama coin id for a Rift asset id: natives by CoinGecko id, ERC-20s by `<chain>:<address>`. */
 export function llamaIdOf(asset: string): string | null {
   if (asset === 'bitcoin.btc') return 'coingecko:bitcoin';
+  const hyper: Record<string, string> = {
+    'hyperliquid.hype': 'coingecko:hyperliquid', 'hyperliquid.usdc': 'coingecko:usd-coin',
+    'hyperliquid.btc': 'coingecko:bitcoin', 'hyperliquid.eth': 'coingecko:ethereum',
+  };
+  if (hyper[asset.toLowerCase()]) return hyper[asset.toLowerCase()];
   const m = /^(ethereum|arbitrum|base)\.(eth|0x[0-9a-f]{40})$/.exec(asset.toLowerCase());
   if (!m) return null;
   return m[2] === 'eth' ? 'coingecko:ethereum' : `${m[1]}:${m[2]}`;

@@ -48,7 +48,7 @@ export interface RiftOrder {
   created_at: string;
 }
 
-export type SourceChainKey = 'ethereum' | 'arbitrum' | 'base' | 'bitcoin';
+export type SourceChainKey = 'ethereum' | 'arbitrum' | 'base' | 'bitcoin' | 'hyperliquid';
 
 export interface SourceToken {
   chain: SourceChainKey;
@@ -59,6 +59,8 @@ export interface SourceToken {
   address?: `0x${string}`;
   /** Rift asset id: `<chain>.<ticker>` for native coins, `<chain>.<0xaddress>` for ERC-20s. */
   asset: string;
+  /** HyperCore token as a spot transfer names it ("HYPE:0x0d01..."). */
+  hlToken?: string;
   custom?: boolean;
 }
 
@@ -77,7 +79,7 @@ export interface StoredOrder {
   depositDeadline: string;
   toAddress: string;
   refundAddress?: string | null;
-  /** EVM payment from this app. */
+  /** EVM payment from this app (a HyperCore transfer has no hash: depositSentAt alone marks it). */
   depositTxHash?: string;
   depositSentAt?: number;
   depositConfirmedAt?: number;
