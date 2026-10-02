@@ -53,3 +53,27 @@ test('route checks use the balance, capped near $100', () => {
   assert.match(probeAmount({ balanceRaw: '1000000000000000000000000', decimals: 24, priceUsd: 0 }), /^1(\.0+)?$|^1$/);
   assert.ok(probeAmount({ balanceRaw: '123456789012345678901234567', decimals: 24, priceUsd: 0 }).split('.')[1].length <= 18, 'never more than 18 decimals');
 });
+
+test('on-chain balances replace stale Blockscout ones; curated tokens fill its gaps', async () => {
+  const { blockscoutCandidates, mergeCandidates, candidatesToHoldings, nativeHolding } = await import('../../src/lib/rift/holdings.ts');
+  const USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', CBBTC = '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf';
+  // 0x010B…9831 on Base, 2026-10-02: Blockscout said 1,402.605006 USDC (on-chain: 0) and had no cbBTC row.
+  const rows = [
+    tok(USDC, 'USDC', 6, '1402605006', '0.999876'),
+    tok('0x5cda0e1ca4ce2af96315f7f8963c85399c172204', 'WTCOIN', 18, '0', '193.31'),
+    tok('0x1111111111111111111111111111111111111111', 'SPAM', 18, '6000000000000000000000000', null),
+    tok('0x2222222222222222222222222222222222222222', 'ZERO', 18, '0', null),
+    tok(IAERO.slice(5), 'iAERO', 18, '10000000000000000', '0.59'),
+  ];
+  const listed = blockscoutCandidates(rows, [IAERO]);
+  assert.deepEqual(listed.map(c => c.symbol), ['USDC', 'WTCOIN', 'SPAM'], 'priced at any balance, unpriced only with a balance, iAERO excluded');
+  const curated = [{ address: USDC, symbol: 'USDC', name: 'USD Coin', decimals: 6, priceUsd: 0 }, { address: CBBTC, symbol: 'cbBTC', name: 'Coinbase Wrapped BTC', decimals: 8, priceUsd: 0 }];
+  const all = mergeCandidates(listed, curated);
+  assert.deepEqual(all.map(c => c.symbol), ['USDC', 'WTCOIN', 'SPAM', 'cbBTC']);
+  const held = candidatesToHoldings('base', all, [0n, 460076320000000000n, null, 4981205n]);
+  assert.deepEqual(held.map(h => [h.symbol, h.balanceRaw]), [['WTCOIN', '460076320000000000'], ['cbBTC', '4981205']]);
+  assert.equal(held[1].asset, `base.${CBBTC}`);
+  assert.equal(held[1].priceUsd, 0, 'priced later, from DeFiLlama');
+  assert.equal(nativeHolding('base', 0n, 2700), null);
+  assert.equal(nativeHolding('base', 10n ** 18n, 2700).valueUsd, 2700);
+});

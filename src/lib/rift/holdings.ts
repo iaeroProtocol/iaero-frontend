@@ -1,11 +1,14 @@
 // src/lib/rift/holdings.ts
 //
 // What the connected wallet holds on the EVM chains Rift can pay from, valued in USD, so the "Get iAERO"
-// picker can list the user's own tokens, largest first. Balances and USD rates come from each chain's public
-// Blockscout API (no key); tokens Blockscout cannot price are looked up on DeFiLlama (also keyless).
+// picker can list the user's own tokens, largest first. Blockscout (no key) says which tokens the wallet has
+// held and prices most of them; the balances themselves are read on-chain, because Blockscout's can be stale
+// (on 2026-10-02 it showed 1,402.6 USDC on Base for a wallet holding none, and missed its cbBTC). Tokens
+// Blockscout cannot price are looked up on DeFiLlama (also keyless).
 // Pure parsing here; the fetching runs server side in /api/rift/holdings.
 
-export type HoldingChain = 'ethereum' | 'arbitrum' | 'base' | 'hyperliquid';
+export type EvmHoldingChain = 'ethereum' | 'arbitrum' | 'base';
+export type HoldingChain = EvmHoldingChain | 'hyperliquid';
 
 export interface Holding {
   chain: HoldingChain;
@@ -22,10 +25,10 @@ export interface Holding {
 }
 
 /** EVM chains read through Blockscout; HyperCore spot balances come from Hyperliquid's API (hypercore.ts). */
-export const HOLDING_CHAINS: { chain: HoldingChain; blockscout: string; llama: string }[] = [
-  { chain: 'ethereum', blockscout: 'https://eth.blockscout.com', llama: 'ethereum' },
-  { chain: 'arbitrum', blockscout: 'https://arbitrum.blockscout.com', llama: 'arbitrum' },
-  { chain: 'base', blockscout: 'https://base.blockscout.com', llama: 'base' },
+export const HOLDING_CHAINS: { chain: EvmHoldingChain; chainId: 1 | 42161 | 8453; blockscout: string; llama: string }[] = [
+  { chain: 'ethereum', chainId: 1, blockscout: 'https://eth.blockscout.com', llama: 'ethereum' },
+  { chain: 'arbitrum', chainId: 42161, blockscout: 'https://arbitrum.blockscout.com', llama: 'arbitrum' },
+  { chain: 'base', chainId: 8453, blockscout: 'https://base.blockscout.com', llama: 'base' },
 ];
 
 /** Below this a holding is dust and not worth listing. */
@@ -115,4 +118,81 @@ export function probeAmount(h: Pick<Holding, 'balanceRaw' | 'decimals' | 'priceU
   // At most 18 decimals: the quote API takes no more, and the cut is far below a token's smallest real value.
   const frac = s.slice(s.length - h.decimals).slice(0, 18).replace(/0+$/, '');
   return frac ? `${int}.${frac}` : int === '0' ? '0.000000000000000001' : int;
+}
+
+// --- On-chain balances ---
+
+/** A token whose balance is worth reading on-chain. */
+export interface TokenCandidate {
+  address: `0x${string}`;
+  symbol: string;
+  name: string;
+  decimals: number;
+  /** USD price if known (Blockscout); 0 to look up later. */
+  priceUsd: number;
+  icon?: string;
+}
+
+/** At most this many tokens Blockscout cannot price are read (and then looked up on DeFiLlama). */
+export const MAX_UNPRICED_CANDIDATES = 60;
+
+/**
+ * Tokens from Blockscout's /token-balances worth reading on-chain: every priced ERC-20 whatever balance
+ * Blockscout shows (it can be stale either way), plus unpriced ones Blockscout shows a balance for (the
+ * long tail of airdropped spam, most of which nothing prices), largest first, capped.
+ */
+export function blockscoutCandidates(json: unknown, exclude: string[] = []): TokenCandidate[] {
+  if (!Array.isArray(json)) return [];
+  const priced: TokenCandidate[] = [];
+  const unpriced: { c: TokenCandidate; held: number }[] = [];
+  for (const row of json as BlockscoutTokenBalance[]) {
+    const t = row?.token;
+    const address = (t?.address_hash ?? t?.address ?? '').toLowerCase();
+    if (!t || t.type !== 'ERC-20' || !/^0x[0-9a-f]{40}$/.test(address)) continue;
+    if (t.reputation && t.reputation !== 'ok') continue;
+    if (exclude.some(e => e.endsWith(`.${address}`))) continue;
+    const decimals = Number(t.decimals ?? '');
+    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) continue;
+    const symbol = ((t.symbol ?? '').trim() || `${address.slice(0, 6)}…`).slice(0, 16);
+    const c: TokenCandidate = {
+      address: address as `0x${string}`, symbol, name: (t.name ?? symbol).slice(0, 48), decimals,
+      priceUsd: Number(t.exchange_rate ?? 0) || 0, icon: t.icon_url ?? undefined,
+    };
+    if (c.priceUsd > 0) priced.push(c);
+    else {
+      const raw = String(row.value ?? '0');
+      if (/^\d+$/.test(raw) && raw !== '0') unpriced.push({ c, held: rawToNumber(raw, decimals) });
+    }
+  }
+  unpriced.sort((a, b) => b.held - a.held);
+  return [...priced, ...unpriced.slice(0, MAX_UNPRICED_CANDIDATES).map(u => u.c)];
+}
+
+/** The first list plus whatever the second adds (by address). */
+export function mergeCandidates(first: TokenCandidate[], more: TokenCandidate[]): TokenCandidate[] {
+  const seen = new Set(first.map(c => c.address.toLowerCase()));
+  return [...first, ...more.filter(c => !seen.has(c.address.toLowerCase()))];
+}
+
+/** Holdings from on-chain balances, in candidate order; a failed read (null) or zero balance is dropped. */
+export function candidatesToHoldings(chain: HoldingChain, candidates: TokenCandidate[], balances: (bigint | null)[]): Holding[] {
+  const out: Holding[] = [];
+  candidates.forEach((c, i) => {
+    const bal = balances[i];
+    if (bal === null || bal === undefined || bal <= 0n) return;
+    const balanceRaw = bal.toString();
+    out.push({
+      chain, asset: `${chain}.${c.address.toLowerCase()}`, symbol: c.symbol, name: c.name, decimals: c.decimals,
+      address: c.address.toLowerCase() as `0x${string}`, balanceRaw, priceUsd: c.priceUsd,
+      valueUsd: c.priceUsd * rawToNumber(balanceRaw, c.decimals), icon: c.icon,
+    });
+  });
+  return out;
+}
+
+/** Native ETH from an on-chain balance. */
+export function nativeHolding(chain: HoldingChain, balance: bigint, priceUsd: number): Holding | null {
+  if (balance <= 0n) return null;
+  const balanceRaw = balance.toString();
+  return { chain, asset: `${chain}.eth`, symbol: 'ETH', name: 'Ether', decimals: 18, balanceRaw, priceUsd, valueUsd: priceUsd * rawToNumber(balanceRaw, 18) };
 }
