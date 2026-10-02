@@ -30,10 +30,10 @@ export default function StatsCards({ stats, formatNumber, loading }: StatsCardsP
     (async () => {
       try {
         setAprLoading(true);
+        // Read on Base whatever chain the wallet is on; null (shown as "—") when it can't be worked out.
         const res = await calculateStakingAPR();
         if (!alive) return;
-        const aeroApr = Number(res?.aero);
-        setApr(Number.isFinite(aeroApr) ? aeroApr : null);
+        setApr(res && Number.isFinite(res.aero) ? res.aero : null);
       } finally {
         if (!alive) return;
         setAprLoading(false);

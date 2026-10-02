@@ -1,7 +1,7 @@
 // src/contracts/hooks/useVault.ts
 import { useState, useCallback } from "react";
-import { useAccount, useWriteContract, usePublicClient } from 'wagmi';
-import { useProtocolChainId } from '@/lib/protocol-chain';
+import { useAccount } from 'wagmi';
+import { useProtocolChainId, useProtocolPublicClient, useProtocolWriteContract } from '@/lib/protocol-chain';
 import { getContractAddress } from "../addresses";
 import { ABIS } from "../abis";
 import { useProtocol } from "../../contexts/ProtocolContext";
@@ -52,11 +52,12 @@ const parseEther = (value: string): bigint => {
 export const useVault = () => {
   const { address } = useAccount();
   const chainId = useProtocolChainId();
-  const publicClient = usePublicClient();
+  // Reads, writes and receipts on Base (or Base Sepolia), wherever the wallet is: see protocol-chain.ts.
+  const publicClient = useProtocolPublicClient();
   const { loadBalances, loadAllowances, setTransactionLoading } = useProtocol();
   
   const [loading, setLoading] = useState(false);
-  const { writeContractAsync } = useWriteContract();
+  const { writeContractAsync } = useProtocolWriteContract();
 
   const getAddr = useCallback((name: any) => {
     try {
