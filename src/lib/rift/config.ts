@@ -52,8 +52,6 @@ export const SOURCE_CHAINS: Record<SourceChainKey, SourceChainConfig> = {
   },
 };
 
-export const SOURCE_CHAIN_ORDER: SourceChainKey[] = ['ethereum', 'arbitrum', 'base', 'bitcoin'];
-
 export const BASESCAN_TX = (hash: string) => `https://basescan.org/tx/${hash}`;
 
 const erc20 = (chain: SourceChainKey, symbol: string, name: string, decimals: number, address: `0x${string}`): SourceToken =>
@@ -63,7 +61,7 @@ const native = (chain: SourceChainKey): SourceToken => {
   return { chain, symbol: c.nativeSymbol, name: chain === 'bitcoin' ? 'Bitcoin' : 'Ether', decimals: c.nativeDecimals, asset: c.nativeAsset };
 };
 
-/** Popular tokens per chain. Any other ERC-20 can be pasted by contract address. */
+/** Tokens Rift is known to route, taken as supported without a check (support.ts); other holdings are checked. */
 export const CURATED_TOKENS: SourceToken[] = [
   native('ethereum'),
   erc20('ethereum', 'USDC', 'USD Coin', 6, '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'),
@@ -85,8 +83,6 @@ export const CURATED_TOKENS: SourceToken[] = [
   erc20('base', 'DAI', 'Dai', 18, '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb'),
   native('bitcoin'),
 ];
-
-export const tokensFor = (chain: SourceChainKey) => CURATED_TOKENS.filter(t => t.chain === chain);
 
 /** Display names for the assets that appear in Rift routes. */
 export const KNOWN_SYMBOLS: Record<string, string> = {

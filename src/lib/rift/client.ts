@@ -27,7 +27,7 @@ async function call(path: string, init?: RequestInit): Promise<unknown> {
   return data;
 }
 
-export const fetchQuote = (body: { from: string; from_amount: string }, signal?: AbortSignal) =>
+export const fetchQuote = (body: { from: string; from_amount: string; quote_mode?: 'fast' | 'optimal' }, signal?: AbortSignal) =>
   call('/quote', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal });
 
 export const createOrder = (body: { quote_id: string; to_address: string; refund_address?: string }) =>

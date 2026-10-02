@@ -1,10 +1,10 @@
 // src/components/protocol/GetIaeroSection.tsx
 //
-// "Get iAERO": buy iAERO with any token on Ethereum, Arbitrum or Base, or with BTC, in one step, routed by
-// Rift (rift.trade). The user picks what to pay with and sees the iAERO they will get, the route, and how
-// long it should take. One click creates the order and, on EVM chains, asks the wallet for a single plain
-// transfer to the order's one-time deposit address. Rift does the rest, and OrderTracker shows every step
-// until iAERO arrives on Base.
+// "Get iAERO": turn a token you hold into iAERO in one step, routed by Rift (rift.trade). The picker lists
+// your own tokens on Ethereum, Arbitrum and Base that Rift can route, highest USD value first; Bitcoin
+// from another wallet is offered last. You see the iAERO you will get, the route and how long it takes
+// before committing. One click creates the order and, for EVM tokens, asks the wallet for a single plain
+// transfer to the order's one-time deposit address. Rift does the rest; OrderTracker shows every step.
 
 'use client';
 
@@ -15,7 +15,7 @@ import {
 } from 'wagmi';
 import { base } from 'wagmi/chains';
 import { erc20Abi, formatUnits, isAddress } from 'viem';
-import { ArrowLeftRight, Bell, Info, Loader2, Route as RouteIcon, ShieldCheck, Timer } from 'lucide-react';
+import { ArrowLeftRight, Bell, Bitcoin, Info, Loader2, RefreshCw, Route as RouteIcon, ShieldCheck, Timer } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -25,17 +25,19 @@ import { useDebounce } from '@/components/lib/defi-utils';
 import RouteSteps from '@/components/rift/RouteSteps';
 import OrderTracker from '@/components/rift/OrderTracker';
 import RecentOrders from '@/components/rift/RecentOrders';
-import {
-  KNOWN_SYMBOLS, RIFT_DESTINATION, RIFT_SECURITY_URL, SOURCE_CHAINS, SOURCE_CHAIN_ORDER, tokensFor,
-} from '@/lib/rift/config';
+import { CURATED_TOKENS, KNOWN_SYMBOLS, RIFT_DESTINATION, RIFT_SECURITY_URL, SOURCE_CHAINS } from '@/lib/rift/config';
 import { RiftApiError, createOrder, explainRiftError, fetchQuote } from '@/lib/rift/client';
 import { decimalToRaw, isTerminal, normalizeDecimal, parseOrder, parseQuote } from '@/lib/rift/validate';
 import { estimateRoute, formatRange } from '@/lib/rift/timing';
 import { isBtcAddress } from '@/lib/rift/bitcoin';
+import { rawToNumber, type Holding } from '@/lib/rift/holdings';
+import { useRiftSupport } from '@/lib/rift/support';
 import { patchOrder, removeOrders, upsertOrder, useStoredOrders } from '@/lib/rift/storage';
-import type { SourceChainKey, SourceToken, StoredOrder } from '@/lib/rift/types';
+import type { SourceToken, StoredOrder } from '@/lib/rift/types';
 
 type EvmChainId = 1 | 42161 | 8453;
+const BTC_ASSET = 'bitcoin.btc';
+const BTC_TOKEN = CURATED_TOKENS.find(t => t.asset === BTC_ASSET)!;
 
 interface Props {
   showToast: (message: string, type: 'success' | 'error' | 'info' | 'warning') => void;
@@ -47,6 +49,7 @@ const fmt = (v: string | number | undefined, digits = 4) => {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: digits }) : '—';
 };
+const fmtUsd = (n: number) => n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: n >= 1000 ? 0 : 2 });
 const errText = (e: unknown) => {
   const x = e as { shortMessage?: string; message?: string };
   return x?.shortMessage ?? x?.message ?? String(e);
@@ -64,6 +67,17 @@ function sanitizeAmount(input: string, decimals: number): string {
   return v;
 }
 
+const toSourceToken = (h: Holding): SourceToken => ({ chain: h.chain, symbol: h.symbol, name: h.name, decimals: h.decimals, address: h.address, asset: h.asset });
+
+function TokenIcon({ src, symbol }: { src?: string; symbol: string }) {
+  const [broken, setBroken] = useState(false);
+  if (src && !broken) {
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src={src} alt="" className="h-8 w-8 shrink-0 rounded-full bg-slate-700" onError={() => setBroken(true)} />;
+  }
+  return <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-semibold text-slate-200">{symbol.slice(0, 3)}</div>;
+}
+
 export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
   const { address, isConnected, chainId: walletChainId } = useAccount();
   const { switchChainAsync } = useSwitchChain();
@@ -73,13 +87,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
   const { prices } = usePrices();
   const orders = useStoredOrders();
 
-  // --- What the user pays with ---
-  const [chainKey, setChainKey] = useState<SourceChainKey>('ethereum');
-  const [pickedDefault, setPickedDefault] = useState(false);
-  const [tokenAsset, setTokenAsset] = useState<string>(SOURCE_CHAINS.ethereum.nativeAsset);
-  const [customAddress, setCustomAddress] = useState('');
-  const [customToken, setCustomToken] = useState<SourceToken | null>(null);
-  const [customError, setCustomError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
   const [amount, setAmount] = useState('');
   const [btcRefund, setBtcRefund] = useState('');
   const [notify, setNotify] = useState(true);
@@ -87,57 +95,46 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [payingId, setPayingId] = useState<string | null>(null);
+
+  // --- Your tokens: balances on Ethereum, Arbitrum and Base, valued in USD, largest first ---
+  const holdingsQuery = useQuery({
+    queryKey: ['rift-holdings', address],
+    enabled: !!address,
+    queryFn: async (): Promise<{ holdings: Holding[]; warnings: string[] }> => {
+      const res = await fetch(`/api/rift/holdings?address=${address}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`Could not load your tokens (HTTP ${res.status})`);
+      return res.json();
+    },
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  const holdings = useMemo(() => holdingsQuery.data?.holdings ?? [], [holdingsQuery.data]);
+  const support = useRiftSupport(holdings);
+  const usable = useMemo(() => holdings.filter(h => support[h.asset] === 'supported'), [holdings, support]);
+  const checking = holdings.filter(h => support[h.asset] === 'checking').length;
+
+  // Start on the most valuable usable token; keep a choice that is still usable.
   useEffect(() => {
-    // Start on the chain the wallet is already on, if supported.
-    if (pickedDefault || !walletChainId) return;
-    const match = SOURCE_CHAIN_ORDER.find(k => SOURCE_CHAINS[k].chainId === walletChainId);
-    if (match) { setChainKey(match); setTokenAsset(SOURCE_CHAINS[match].nativeAsset); }
-    setPickedDefault(true);
-  }, [walletChainId, pickedDefault]);
+    if (selected === BTC_ASSET) return;
+    if (selected && usable.some(h => h.asset === selected)) return;
+    if (usable.length) { setSelected(usable[0].asset); setAmount(''); }
+  }, [usable, selected]);
+
+  const holding = usable.find(h => h.asset === selected) ?? null;
+  const token: SourceToken | null = selected === BTC_ASSET ? BTC_TOKEN : holding ? toSourceToken(holding) : null;
+  const chainKey = token?.chain ?? 'base';
   const chain = SOURCE_CHAINS[chainKey];
   const evmChainId = chain.chainId as EvmChainId | undefined;
-  const curated = tokensFor(chainKey);
   const sourcePublic = usePublicClient({ chainId: evmChainId });
 
-  const selectChain = (k: SourceChainKey) => {
-    setChainKey(k);
-    setTokenAsset(SOURCE_CHAINS[k].nativeAsset);
-    setCustomAddress(''); setCustomToken(null); setCustomError(null); setAmount(''); setError(null);
-  };
-
-  // Any other ERC-20, by contract address: read its symbol and decimals on that chain.
-  useEffect(() => {
-    setCustomToken(null); setCustomError(null);
-    if (tokenAsset !== 'custom' || chain.kind !== 'evm') return;
-    const a = customAddress.trim();
-    if (!a) return;
-    if (!isAddress(a)) { setCustomError('Not a valid token contract address.'); return; }
-    if (`${chainKey}.${a.toLowerCase()}` === RIFT_DESTINATION) { setCustomError('That is iAERO already.'); return; }
-    if (!sourcePublic) return;
-    let stop = false;
-    (async () => {
-      try {
-        const [decimals, symbol] = await Promise.all([
-          sourcePublic.readContract({ address: a as `0x${string}`, abi: erc20Abi, functionName: 'decimals' }),
-          sourcePublic.readContract({ address: a as `0x${string}`, abi: erc20Abi, functionName: 'symbol' }).catch(() => `${a.slice(0, 6)}…`),
-        ]);
-        if (!stop) setCustomToken({ chain: chainKey, symbol: String(symbol), name: String(symbol), decimals: Number(decimals), address: a as `0x${string}`, asset: `${chainKey}.${a.toLowerCase()}`, custom: true });
-      } catch {
-        if (!stop) setCustomError(`No ERC-20 token at this address on ${chain.name}.`);
-      }
-    })();
-    return () => { stop = true; };
-  }, [tokenAsset, customAddress, chainKey, chain.kind, chain.name, sourcePublic]);
-
-  const token: SourceToken | null = tokenAsset === 'custom' ? customToken : curated.find(t => t.asset === tokenAsset) ?? null;
-
-  // --- Amount and balance ---
+  // Live balance of the chosen token (the list's balance is up to a minute old).
   const nativeBal = useBalance({ address, chainId: evmChainId, query: { enabled: !!address && chain.kind === 'evm' && !!token && !token.address } });
   const tokenBal = useReadContract({
     address: token?.address, abi: erc20Abi, functionName: 'balanceOf', args: address ? [address] : undefined, chainId: evmChainId,
     query: { enabled: !!address && chain.kind === 'evm' && !!token?.address },
   });
-  const balanceRaw: bigint | undefined = chain.kind !== 'evm' || !token ? undefined : token.address ? (tokenBal.data as bigint | undefined) : nativeBal.data?.value;
+  const liveBalance = token?.address ? (tokenBal.data as bigint | undefined) : nativeBal.data?.value;
+  const balanceRaw: bigint | undefined = chain.kind !== 'evm' || !token ? undefined : liveBalance ?? (holding ? BigInt(holding.balanceRaw) : undefined);
 
   const amountState = useMemo((): { normalized?: string; raw?: bigint; error?: string } => {
     if (!token || !amount) return {};
@@ -161,6 +158,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
     }
     setAmount(normalizeDecimal(formatUnits(raw, token.decimals)));
   };
+  const amountUsd = holding && amountState.normalized ? Number(amountState.normalized) * holding.priceUsd : 0;
 
   // --- Live quote: re-priced every 30 s while shown ---
   const quoteAmount = useDebounce(amountState.error ? undefined : amountState.normalized, 600);
@@ -277,7 +275,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
 
   const cta = (() => {
     if (!isConnected) return { text: 'Connect a wallet to receive iAERO on Base', disabled: true };
-    if (!token) return { text: tokenAsset === 'custom' ? 'Enter a token address' : 'Choose a token', disabled: true };
+    if (!token) return { text: 'Choose a token to pay with', disabled: true };
     if (!amountState.normalized) return { text: 'Enter an amount', disabled: true };
     if (amountState.error) return { text: amountState.error, disabled: true };
     if (quoteQuery.isFetching && !quote) return { text: 'Finding the best route…', disabled: true };
@@ -286,93 +284,109 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
     return { text: chain.kind === 'bitcoin' ? 'Create Bitcoin payment' : `Buy iAERO with ${token.symbol}`, disabled: !!busy };
   })();
 
+  const choose = (asset: string) => { if (asset !== selected) { setSelected(asset); setAmount(''); setError(null); } };
+
   return (
     <div className="grid gap-6 lg:grid-cols-2">
       {/* Order form */}
       <Card className="border-slate-700/50 bg-slate-800/50 backdrop-blur-xl">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-white">
-            <ArrowLeftRight className="h-5 w-5" /> Get iAERO with any token
+            <ArrowLeftRight className="h-5 w-5" /> Get iAERO with tokens you hold
           </CardTitle>
-          <p className="text-sm text-slate-400">Pay on Ethereum, Arbitrum, Base or Bitcoin. iAERO arrives in your wallet on Base, automatically.</p>
+          <p className="text-sm text-slate-400">Pay with any of your tokens on Ethereum, Arbitrum or Base. iAERO arrives in your wallet on Base, automatically.</p>
         </CardHeader>
         <CardContent className="space-y-5">
-          {/* Chain */}
+          {/* Your tokens */}
           <div className="space-y-2">
-            <Label className="text-slate-300">Pay from</Label>
-            <div className="grid grid-cols-4 gap-2">
-              {SOURCE_CHAIN_ORDER.map(k => (
-                <button
-                  key={k} type="button" onClick={() => selectChain(k)} disabled={!!busy}
-                  className={`rounded-lg border px-2 py-2 text-sm transition-colors ${chainKey === k ? 'border-indigo-500 bg-indigo-500/15 text-white' : 'border-slate-600 text-slate-300 hover:border-slate-400'}`}
-                >
-                  {SOURCE_CHAINS[k].name}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Token */}
-          <div className="space-y-2">
-            <Label className="text-slate-300">Token</Label>
-            <div className="flex flex-wrap gap-2">
-              {curated.map(t => (
-                <button
-                  key={t.asset} type="button" onClick={() => { setTokenAsset(t.asset); setError(null); }} disabled={!!busy}
-                  className={`rounded-full border px-3 py-1 text-sm ${tokenAsset === t.asset ? 'border-indigo-500 bg-indigo-500/15 text-white' : 'border-slate-600 text-slate-300 hover:border-slate-400'}`}
-                >
-                  {t.symbol}
-                </button>
-              ))}
-              {chain.kind === 'evm' && (
-                <button
-                  type="button" onClick={() => setTokenAsset('custom')} disabled={!!busy}
-                  className={`rounded-full border px-3 py-1 text-sm ${tokenAsset === 'custom' ? 'border-indigo-500 bg-indigo-500/15 text-white' : 'border-slate-600 text-slate-300 hover:border-slate-400'}`}
-                >
-                  Other token…
-                </button>
-              )}
-            </div>
-            {tokenAsset === 'custom' && (
-              <div className="space-y-1">
-                <Input
-                  placeholder={`Token contract address on ${chain.name} (0x…)`} value={customAddress}
-                  onChange={e => setCustomAddress(e.target.value)} className="border-slate-600 bg-slate-900/50 font-mono text-sm text-white"
-                />
-                <div className="text-xs">
-                  {customError ? <span className="text-red-400">{customError}</span>
-                    : customToken ? <span className="text-emerald-400">{customToken.symbol} · {customToken.decimals} decimals</span>
-                    : <span className="text-slate-500">Rift quotes any token that has a route.</span>}
-                </div>
+            <Label className="text-slate-300">Pay with</Label>
+            {!isConnected ? (
+              <div className="rounded-xl border border-slate-700/40 bg-slate-900/40 p-4 text-sm text-slate-400">Connect your wallet to see the tokens you can use.</div>
+            ) : holdingsQuery.isLoading ? (
+              <div className="flex items-center gap-2 rounded-xl border border-slate-700/40 bg-slate-900/40 p-4 text-sm text-slate-300">
+                <Loader2 className="h-4 w-4 animate-spin" /> Finding your tokens on Ethereum, Arbitrum and Base…
+              </div>
+            ) : holdingsQuery.error ? (
+              <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-300">{(holdingsQuery.error as Error).message}</div>
+            ) : (
+              <div className="max-h-80 divide-y divide-slate-800 overflow-y-auto rounded-xl border border-slate-700/40 bg-slate-900/40">
+                {usable.map(h => (
+                  <button
+                    key={h.asset} type="button" onClick={() => choose(h.asset)} disabled={!!busy}
+                    className={`flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors ${selected === h.asset ? 'bg-indigo-500/15' : 'hover:bg-slate-800/60'}`}
+                  >
+                    <TokenIcon src={h.icon} symbol={h.symbol} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate font-medium text-white">{h.symbol}</span>
+                        <span className="shrink-0 rounded bg-slate-700/60 px-1.5 py-0.5 text-[10px] text-slate-300">{SOURCE_CHAINS[h.chain].name}</span>
+                      </div>
+                      <div className="truncate text-xs text-slate-400">{fmt(rawToNumber(h.balanceRaw, h.decimals), 6)} {h.symbol}</div>
+                    </div>
+                    <div className="text-right text-sm font-medium text-white">{fmtUsd(h.valueUsd)}</div>
+                  </button>
+                ))}
+                {!usable.length && !checking && (
+                  <div className="p-4 text-sm text-slate-400">No tokens worth $1 or more that Rift can route were found in this wallet on Ethereum, Arbitrum or Base.</div>
+                )}
+                {!usable.length && checking > 0 && (
+                  <div className="flex items-center gap-2 p-4 text-sm text-slate-300"><Loader2 className="h-4 w-4 animate-spin" /> Checking which of your tokens Rift can route…</div>
+                )}
               </div>
             )}
+            {!!holdingsQuery.data?.warnings?.length && (
+              <div className="text-xs text-amber-300/90">
+                Some balances could not be loaded ({holdingsQuery.data.warnings.map(w => w.split(':')[0]).filter((c, i, all) => all.indexOf(c) === i).join(', ')}). Refresh to try again.
+              </div>
+            )}
+            {isConnected && !holdingsQuery.isLoading && (
+              <div className="flex items-center justify-between gap-2 text-xs text-slate-500">
+                <span>
+                  {checking > 0 ? `Checking routes for ${checking} more token${checking === 1 ? '' : 's'}…` : 'Highest value first. Tokens under $1 and those without a route are hidden.'}
+                </span>
+                <button type="button" onClick={() => holdingsQuery.refetch()} className="flex shrink-0 items-center gap-1 hover:text-white">
+                  <RefreshCw className={`h-3.5 w-3.5 ${holdingsQuery.isFetching ? 'animate-spin' : ''}`} /> Refresh
+                </button>
+              </div>
+            )}
+            <button
+              type="button" onClick={() => choose(BTC_ASSET)} disabled={!!busy}
+              className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+                selected === BTC_ASSET ? 'border-indigo-500 bg-indigo-500/15 text-white' : 'border-slate-700/50 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+              }`}
+            >
+              <Bitcoin className="h-4 w-4 text-amber-400" /> Paying with Bitcoin from another wallet? Use BTC
+            </button>
           </div>
 
           {/* Amount */}
-          <div className="space-y-2">
-            <Label className="text-slate-300">Amount</Label>
-            <div className="relative">
-              <Input
-                type="text" inputMode="decimal" placeholder="0.0" value={amount} disabled={!token || !!busy}
-                onChange={e => token && setAmount(sanitizeAmount(e.target.value, token.decimals))}
-                className={`border-slate-600 bg-slate-900/50 pr-24 text-white placeholder-slate-400 ${amountState.error ? 'border-red-500/50' : ''}`}
-              />
-              <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
-                <span className="text-sm text-slate-400">{token?.symbol}</span>
-                {chain.kind === 'evm' && balanceRaw !== undefined && (
-                  <Button variant="ghost" size="sm" onClick={setMax} disabled={!!busy} className="h-7 px-2 text-indigo-400 hover:text-indigo-300">MAX</Button>
-                )}
+          {token && (
+            <div className="space-y-2">
+              <Label className="text-slate-300">Amount</Label>
+              <div className="relative">
+                <Input
+                  type="text" inputMode="decimal" placeholder="0.0" value={amount} disabled={!!busy}
+                  onChange={e => setAmount(sanitizeAmount(e.target.value, token.decimals))}
+                  className={`border-slate-600 bg-slate-900/50 pr-28 text-white placeholder-slate-400 ${amountState.error ? 'border-red-500/50' : ''}`}
+                />
+                <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                  <span className="text-sm text-slate-400">{token.symbol}</span>
+                  {chain.kind === 'evm' && balanceRaw !== undefined && (
+                    <Button variant="ghost" size="sm" onClick={setMax} disabled={!!busy} className="h-7 px-2 text-indigo-400 hover:text-indigo-300">MAX</Button>
+                  )}
+                </div>
+              </div>
+              <div className="flex justify-between text-sm">
+                {amountState.error ? <span className="text-red-400">{amountState.error}</span>
+                  : chain.kind === 'evm' && balanceRaw !== undefined
+                    ? <span className="text-slate-400">Balance: {fmt(formatUnits(balanceRaw, token.decimals), 6)} {token.symbol} on {chain.name}</span>
+                    : <span className="text-slate-400">You will pay from any Bitcoin wallet using a QR code or address.</span>}
+                {amountUsd > 0 && <span className="text-slate-500">≈ {fmtUsd(amountUsd)}</span>}
               </div>
             </div>
-            <div className="text-sm">
-              {amountState.error ? <span className="text-red-400">{amountState.error}</span>
-                : chain.kind === 'evm' && token && balanceRaw !== undefined
-                  ? <span className="text-slate-400">Balance: {fmt(formatUnits(balanceRaw, token.decimals), 6)} {token.symbol} on {chain.name}</span>
-                  : chain.kind === 'bitcoin' ? <span className="text-slate-400">You will pay from any Bitcoin wallet using a QR code or address.</span> : null}
-            </div>
-          </div>
+          )}
 
-          {chain.kind === 'bitcoin' && (
+          {chain.kind === 'bitcoin' && token && (
             <div className="space-y-2">
               <Label className="text-slate-300">Your Bitcoin refund address</Label>
               <Input
@@ -398,7 +412,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
                     <div>
                       <div className="text-xs text-slate-400">You receive (estimated)</div>
                       <div className="text-2xl font-semibold text-white">{fmt(quote.estimated_amount_out)} iAERO</div>
-                      {iaeroUsd > 0 && <div className="text-xs text-slate-500">≈ ${fmt(Number(quote.estimated_amount_out) * iaeroUsd, 2)}</div>}
+                      {iaeroUsd > 0 && <div className="text-xs text-slate-500">≈ {fmtUsd(Number(quote.estimated_amount_out) * iaeroUsd)}</div>}
                     </div>
                     {quoteQuery.isFetching && <Loader2 className="h-4 w-4 animate-spin text-slate-500" />}
                   </div>
@@ -439,7 +453,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
           >
             {busy ? <span className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" />{busy}</span> : cta.text}
           </Button>
-          {chain.kind === 'evm' && chainKey !== 'base' && isConnected && (
+          {chain.kind === 'evm' && chainKey !== 'base' && isConnected && token && (
             <div className="flex gap-2 text-xs text-slate-500">
               <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               Your wallet switches to {chain.name} for the payment (one plain transfer, no approvals). You can switch back to Base after.
@@ -470,7 +484,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
             <CardContent className="space-y-3 p-6 text-sm text-slate-400">
               <div className="font-medium text-white">How it works</div>
               <ol className="list-decimal space-y-1.5 pl-5">
-                <li>Choose what to pay with. You see the iAERO you’ll get, the route, and how long it takes, before you commit.</li>
+                <li>Pick one of your tokens. You see the iAERO you’ll get, the route, and how long it takes, before you commit.</li>
                 <li>Confirm one payment in your wallet (or send BTC from any wallet).</li>
                 <li>Rift bridges and swaps automatically; this page shows each step live, even if you close it and come back.</li>
                 <li>iAERO lands in your wallet on Base.</li>
