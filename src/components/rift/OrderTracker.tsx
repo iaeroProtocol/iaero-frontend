@@ -193,7 +193,10 @@ export default function OrderTracker({ order, onPay, paying, onGoToStake, showTo
 
   // Once delivered: what arrived against the quote, and the all-in cost against market prices when ordered
   // (the iAERO price then, so a market move during the trip does not count as cost).
-  const vsQuote = order.status === 'delivered' ? deliveredVsQuotedPct(order.amountOut, order.estimatedOut) : null;
+  // Against what the page said to expect (Rift's quote minus its gas charge); the first orders only have the quote.
+  const target = order.expectedOut ?? order.estimatedOut;
+  const targetWord = order.expectedOut ? 'expected' : 'quoted';
+  const vsQuote = order.status === 'delivered' ? deliveredVsQuotedPct(order.amountOut, target) : null;
   const allIn = order.status === 'delivered' && order.marketUsdIn && order.marketIaeroUsd && order.amountOut
     ? costVsMarketPct(order.marketUsdIn, Number(order.amountOut) * order.marketIaeroUsd) : null;
 
@@ -228,9 +231,10 @@ export default function OrderTracker({ order, onPay, paying, onGoToStake, showTo
             <div className="space-y-1 text-sm text-slate-300">
               <div><span className="text-lg font-semibold text-emerald-300">{fmt(order.amountOut)} iAERO</span> delivered{progress.elapsedSec > 0 && <> in {formatClock(progress.elapsedSec)}</>}.</div>
               <div className={`text-xs ${vsQuote !== null && vsQuote < -1 ? 'text-amber-300' : 'text-slate-400'}`}>
-                {vsQuote === null ? <>Quoted {fmt(order.estimatedOut)} iAERO when you ordered.</>
-                  : Math.abs(vsQuote) < 0.005 ? <>Exactly the {fmt(order.estimatedOut)} iAERO quoted.</>
-                  : <>{formatPct(vsQuote)} {vsQuote > 0 ? 'more' : 'less'} than the {fmt(order.estimatedOut)} iAERO quoted.</>}
+                {vsQuote === null ? <>{targetWord === 'expected' ? 'Expected' : 'Quoted'} {fmt(target)} iAERO when you ordered.</>
+                  : Math.abs(vsQuote) < 0.005 ? <>Exactly the {fmt(target)} iAERO {targetWord}.</>
+                  : <>{formatPct(vsQuote)} {vsQuote > 0 ? 'more' : 'less'} than the {fmt(target)} iAERO {targetWord}.</>}
+                {order.expectedOut && <> Rift quoted {fmt(order.estimatedOut)} before about ${(order.gasDeskUsd ?? 0).toFixed(2)} of gas charges.</>}
               </div>
               {allIn !== null && (
                 <div className="text-xs text-slate-500">

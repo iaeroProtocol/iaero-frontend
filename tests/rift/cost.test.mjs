@@ -66,3 +66,22 @@ test('iAERO market price from its Aerodrome pools, and cost wording', async () =
   assert.equal(costText(0), 'about 0%');
   assert.equal(costText(-0.3), 'about 0%', 'never "better than market"');
 });
+
+test("Rift's gas desk: once per chain, Ethereum scaled by gas price", async () => {
+  const { gasDeskChains, gasDeskUsd } = await import('../../src/lib/rift/cost.ts');
+  // The RESOLV order's route (2026-10-02): two steps on Ethereum, one on Base.
+  const route = [
+    { venue: 'nordstern', execution: { mode: 'evm_gas_desk', chain: 1 } },
+    { venue: 'across', execution: { mode: 'evm_gas_desk', chain: 1 } },
+    { venue: 'nordstern', execution: { mode: 'evm_gas_desk', chain: 8453 } },
+  ];
+  assert.deepEqual(gasDeskChains(route), [1, 8453]);
+  assert.deepEqual(gasDeskChains([{ venue: 'unit', execution: { mode: 'bitcoin' } }, { venue: 'x' }]), []);
+  // 0.1 gwei, ETH $2,727: about $0.44 on Ethereum plus $0.10 on Base. Charged on the two Ethereum
+  // orders: $0.36 and $0.64 in total.
+  const usd = gasDeskUsd([1, 8453], 100_000_000n, 2727);
+  assert.ok(usd > 0.5 && usd < 0.6, String(usd));
+  assert.ok(gasDeskUsd([1], 10_000_000_000n, 2727) > 40, '10 gwei would make it about $44');
+  assert.equal(gasDeskUsd([1, 8453], undefined, 2727), null);
+  assert.equal(gasDeskUsd([42161, 8453], undefined, undefined), 0.2, 'Layer 2 only needs no Ethereum gas price');
+});

@@ -97,4 +97,8 @@ export interface StoredOrder {
    *  are ignored, so those orders show no all-in cost.) */
   marketUsdIn?: number;
   marketIaeroUsd?: number;
+  /** What the page told the user to expect: Rift's quote minus its estimated gas-desk charge (cost.ts),
+   *  and that charge in USD. Absent on the first orders, which compare against the quote instead. */
+  expectedOut?: string;
+  gasDeskUsd?: number;
 }

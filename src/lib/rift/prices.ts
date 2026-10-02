@@ -3,7 +3,8 @@
 // Market prices for the cost check, in USD.
 //   - iAERO: its price in its main Aerodrome pool on Base, read on-chain every 30 s, times AERO's USD price.
 //     DeFiLlama's iAERO price lags (it was 0.8-1.2% high on 2026-10-02), which made real costs look negative.
-//   - AERO and the token being paid with: DeFiLlama (keyless, allows browser requests), every minute.
+//   - AERO, ETH (for Rift's gas charge) and the token being paid with: DeFiLlama (keyless, allows browser
+//     requests), every minute.
 
 'use client';
 
@@ -16,6 +17,7 @@ import { clAeroPerIaero, llamaIdOf, parseLlamaPrices, v2AeroPerIaero } from './c
 
 const IAERO_ID = `base:${IAERO_ADDRESS.toLowerCase()}`;
 const AERO_ID = 'base:0x940181a94a35a4569e4529a3cdfb74e38fd98631';
+const ETH_ID = 'coingecko:ethereum';
 
 /** iAERO/AERO on Aerodrome, iAERO as token0: the Slipstream pool (0.05% fee) holds nearly all iAERO
  *  liquidity and is where buys fill; the classic volatile pool (the site's price card, client-prices.ts)
@@ -44,12 +46,12 @@ const V2_ABI = [
   },
 ] as const;
 
-export function useMarketPrices(asset: string | undefined): { iaeroUsd?: number; inputUsd?: number } {
+export function useMarketPrices(asset: string | undefined): { iaeroUsd?: number; inputUsd?: number; ethUsd?: number } {
   const inputId = asset ? llamaIdOf(asset) : null;
   const { data: llama } = useQuery({
     queryKey: ['rift-market-prices', inputId],
     queryFn: async ({ signal }) => {
-      const ids = [...new Set([AERO_ID, IAERO_ID, ...(inputId ? [inputId] : [])])];
+      const ids = [...new Set([AERO_ID, IAERO_ID, ETH_ID, ...(inputId ? [inputId] : [])])];
       const res = await fetch(`https://coins.llama.fi/prices/current/${ids.join(',')}?searchWidth=4h`, { signal });
       if (!res.ok) throw new Error(`DeFiLlama HTTP ${res.status}`);
       return parseLlamaPrices(await res.json(), Date.now());
@@ -90,5 +92,6 @@ export function useMarketPrices(asset: string | undefined): { iaeroUsd?: number;
   return {
     iaeroUsd: aeroPerIaero && aeroUsd ? aeroPerIaero * aeroUsd : llama?.[IAERO_ID],
     inputUsd: inputId ? llama?.[inputId] : undefined,
+    ethUsd: llama?.[ETH_ID],
   };
 }

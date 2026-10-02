@@ -64,7 +64,7 @@ export default function RecentOrders({ orders, activeId, onSelect, onClearFinish
             >
               <div className="min-w-0">
                 <div className="truncate text-sm text-white">
-                  {fmt(o.fromAmount)} {o.token.symbol} ({SOURCE_CHAINS[o.sourceChain].name}) → {o.status === 'delivered' ? fmt(o.amountOut) : `~${fmt(o.estimatedOut)}`} iAERO
+                  {fmt(o.fromAmount)} {o.token.symbol} ({SOURCE_CHAINS[o.sourceChain].name}) → {o.status === 'delivered' ? fmt(o.amountOut) : `~${fmt(o.expectedOut ?? o.estimatedOut)}`} iAERO
                 </div>
                 <div className="text-xs text-slate-500">{ago(o.createdAt)}</div>
               </div>

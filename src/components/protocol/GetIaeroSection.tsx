@@ -12,9 +12,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  useAccount, useBalance, usePublicClient, useReadContract, useSendTransaction, useSwitchChain, useWriteContract,
+  useAccount, useBalance, useGasPrice, usePublicClient, useReadContract, useSendTransaction, useSwitchChain, useWriteContract,
 } from 'wagmi';
-import { base } from 'wagmi/chains';
+import { base, mainnet } from 'wagmi/chains';
 import { erc20Abi, formatUnits, isAddress } from 'viem';
 import { AlertTriangle, ArrowLeftRight, Bell, Bitcoin, Info, Loader2, RefreshCw, Route as RouteIcon, ShieldCheck, Timer } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -35,7 +35,8 @@ import { rawToNumber, type Holding } from '@/lib/rift/holdings';
 import { useRiftSupport } from '@/lib/rift/support';
 import { useMarketPrices } from '@/lib/rift/prices';
 import {
-  DEFAULT_TOLERANCE_PCT, TOLERANCE_CHOICES, costLevel, costText, costVsMarketPct, formatPct, priceDropPct, type CostLevel,
+  DEFAULT_TOLERANCE_PCT, TOLERANCE_CHOICES, costLevel, costText, costVsMarketPct, formatPct, gasDeskChains, gasDeskUsd,
+  priceDropPct, type CostLevel,
 } from '@/lib/rift/cost';
 import { patchOrder, removeOrders, upsertOrder, useStoredOrders } from '@/lib/rift/storage';
 import type { RiftQuote, SourceToken, StoredOrder } from '@/lib/rift/types';
@@ -52,6 +53,9 @@ const COST_STYLE: Record<CostLevel, string> = {
   medium: 'border-amber-500/25 bg-amber-500/10 text-amber-100',
   high: 'border-red-500/30 bg-red-500/10 text-red-200',
 };
+
+const GAS_DESK_CHAIN_NAMES: Record<number, string> = { 1: 'Ethereum', 42161: 'Arbitrum', 8453: 'Base' };
+const chainList = (ids: number[]) => ids.map(id => GAS_DESK_CHAIN_NAMES[id] ?? `chain ${id}`).join(' and ');
 
 /** A quote that got worse than the tolerance between seeing it and clicking Buy. */
 interface PriceMove { seenOut: string; quote: RiftQuote; fetchedAt: number; dropPct: number; limit: number }
@@ -226,14 +230,27 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
   const quote = quoteQuery.data && quoteAmount && amountState.normalized === quoteAmount ? quoteQuery.data : undefined;
   const estimate = useMemo(() => (quote ? estimateRoute(chainKey, quote.route, KNOWN_SYMBOLS) : null), [quote, chainKey]);
 
-  // What the quote costs against market prices: bridge, swap and network costs together.
+  // Rift's gas desk charges each chain's gas once you have paid, and its quote leaves that out (cost.ts).
+  // The page expects the quote minus that charge, valued in iAERO at the pool price.
+  const { data: ethGasPrice } = useGasPrice({ chainId: mainnet.id, query: { refetchInterval: 60_000 } });
+  const expectedFor = (q: RiftQuote | undefined) => {
+    if (!q) return null;
+    const chains = gasDeskChains(q.route);
+    const usd = gasDeskUsd(chains, ethGasPrice, market.ethUsd);
+    if (usd === null || (usd > 0 && !iaeroUsd)) return null;
+    return { out: Math.max(0, Number(q.estimated_amount_out) - (usd > 0 ? usd / iaeroUsd : 0)), gasUsd: usd, chains };
+  };
+  const expected = expectedFor(quote);
+  const expectedOut = quote ? expected?.out ?? Number(quote.estimated_amount_out) : 0;
+
+  // What the order costs against market prices: bridge, swap, network and gas-desk costs together.
   const cost = useMemo(() => {
     if (!quote || !inputPriceUsd || !iaeroUsd) return null;
     const usdIn = Number(quote.from_amount) * inputPriceUsd;
-    const usdOut = Number(quote.estimated_amount_out) * iaeroUsd;
+    const usdOut = expectedOut * iaeroUsd;
     const pct = costVsMarketPct(usdIn, usdOut);
     return pct === null ? null : { pct, level: costLevel(pct), usdIn, usdOut };
-  }, [quote, inputPriceUsd, iaeroUsd]);
+  }, [quote, inputPriceUsd, iaeroUsd, expectedOut]);
   // A high cost needs a tick, for this token and amount, and again if it gets materially worse.
   const ackKey = `${token?.asset}|${quoteAmount}`;
   const acked = !!ack && !!cost && ack.key === ackKey && cost.pct <= ack.pct + 0.5;
@@ -333,7 +350,8 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
         return;
       }
       // A high cost needs the tick, also when it only became high with this refresh.
-      const freshCost = costVsMarketPct(Number(q.from_amount) * inputPriceUsd, Number(q.estimated_amount_out) * iaeroUsd);
+      const freshExpected = expectedFor(q);
+      const freshCost = costVsMarketPct(Number(q.from_amount) * inputPriceUsd, (freshExpected?.out ?? Number(q.estimated_amount_out)) * iaeroUsd);
       if (freshCost !== null && costLevel(freshCost) === 'high' && !(ack && ack.key === ackKey && freshCost <= ack.pct + 0.5)) {
         throw new Error(`The cost is now ${formatPct(freshCost)} against market price. Nothing was sent: tick the confirmation above to continue.`);
       }
@@ -360,6 +378,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
         depositAddress: order.deposit_address, depositDeadline: order.deposit_deadline, toAddress: address,
         refundAddress: refund, status: order.status, statusTimes: { [order.status]: Date.now() }, baseFromBlock, notify,
         marketUsdIn: inputPriceUsd ? Number(fromAmount) * inputPriceUsd : undefined, marketIaeroUsd: iaeroUsd || undefined,
+        expectedOut: freshExpected ? freshExpected.out.toFixed(6) : undefined, gasDeskUsd: freshExpected?.gasUsd,
       };
       upsertOrder(stored);
       setActiveId(order.id);
@@ -376,6 +395,9 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
       setBusy(null);
     }
   }
+
+  // The price-moved panel shows the same after-gas figures as the quote panel.
+  const movedDeduction = moved ? Number(moved.quote.estimated_amount_out) - (expectedFor(moved.quote)?.out ?? Number(moved.quote.estimated_amount_out)) : 0;
 
   const cta = (() => {
     if (!isConnected) return { text: 'Connect a wallet to receive iAERO on Base', disabled: true };
@@ -517,11 +539,23 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
                   <div className="flex items-end justify-between gap-3">
                     <div>
                       <div className="text-xs text-slate-400">You receive (estimated)</div>
-                      <div className="text-2xl font-semibold text-white">{fmt(quote.estimated_amount_out)} iAERO</div>
-                      {iaeroUsd > 0 && <div className="text-xs text-slate-500">≈ {fmtUsd(Number(quote.estimated_amount_out) * iaeroUsd)}</div>}
+                      <div className="text-2xl font-semibold text-white">{fmt(expectedOut)} iAERO</div>
+                      {iaeroUsd > 0 && <div className="text-xs text-slate-500">≈ {fmtUsd(expectedOut * iaeroUsd)}</div>}
                     </div>
                     {quoteQuery.isFetching && <Loader2 className="h-4 w-4 animate-spin text-slate-500" />}
                   </div>
+                  {expected && expected.gasUsd > 0 && (
+                    <div className="text-[11px] text-slate-500">
+                      After about {fmtUsd(expected.gasUsd)} that Rift deducts for network gas on {chainList(expected.chains)} once you pay.
+                      Rift’s own quote, {fmt(quote.estimated_amount_out)} iAERO, leaves that out.
+                    </div>
+                  )}
+                  {!expected && gasDeskChains(quote.route).length > 0 && (
+                    <div className="text-[11px] text-amber-300/90">
+                      Rift also deducts network gas once you pay, which its quote leaves out and which could not be estimated right
+                      now, so expect somewhat less than this.
+                    </div>
+                  )}
                   {cost ? (
                     <div className={`space-y-1 rounded-lg border p-3 text-sm ${COST_STYLE[cost.level]}`}>
                       <div className="flex items-center justify-between gap-2">
@@ -556,7 +590,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
                     </div>
                     <div className="rounded-lg bg-slate-800/60 p-3">
                       <div className="text-xs text-slate-400">Rate</div>
-                      <div className="font-medium text-white">1 {token?.symbol} ≈ {fmt(Number(quote.estimated_amount_out) / Number(quote.from_amount), 4)} iAERO</div>
+                      <div className="font-medium text-white">1 {token?.symbol} ≈ {fmt(expectedOut / Number(quote.from_amount), 4)} iAERO</div>
                       <div className="text-[11px] text-slate-500">network and venue costs included</div>
                     </div>
                   </div>
@@ -566,7 +600,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
                   </div>
                   <div className="space-y-1.5 border-t border-slate-700/40 pt-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="text-xs text-slate-400">Max price change before you pay</span>
+                      <span className="text-xs text-slate-400">Max price change when you click Buy</span>
                       <div className="flex gap-1">
                         {TOLERANCE_CHOICES.map(v => (
                           <button
@@ -581,11 +615,10 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
                       </div>
                     </div>
                     <div className="text-[11px] text-slate-500">
-                      The price refreshes every 30 seconds and is checked again when you click. If it has dropped by more than {tolerance}%,
-                      nothing is sent and you are asked first.{' '}
-                      {chain.kind === 'bitcoin'
-                        ? 'Rift swaps once your BTC is confirmed, usually within the hour, so the final amount follows the market until then.'
-                        : 'The final amount can still differ slightly, because Rift swaps once your payment arrives.'}
+                      The price refreshes every 30 seconds and is checked again when you click. If Rift’s price has dropped by more than{' '}
+                      {tolerance}%, nothing is sent and you are asked first. This is not a slippage limit: Rift has no way to cap the final
+                      amount, and fills at the market price when your payment arrives
+                      {chain.kind === 'bitcoin' ? ' (usually within the hour, after your BTC confirms)' : ''}.
                     </div>
                   </div>
                 </>
@@ -599,8 +632,8 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
               <div className="flex gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
                 <div>
-                  The price moved. You saw <span className="font-semibold text-white">{fmt(moved.seenOut)} iAERO</span>; it is now{' '}
-                  <span className="font-semibold text-white">{fmt(moved.quote.estimated_amount_out)} iAERO</span>, {formatPct(moved.dropPct)} less
+                  The price moved. You saw <span className="font-semibold text-white">{fmt(Number(moved.seenOut) - movedDeduction)} iAERO</span>; it is now{' '}
+                  <span className="font-semibold text-white">{fmt(Number(moved.quote.estimated_amount_out) - movedDeduction)} iAERO</span>, {formatPct(moved.dropPct)} less
                   and more than your {moved.limit}% limit. Nothing was sent.
                   {needsAck && <> The new price costs {formatPct(cost!.pct)} against market: tick the confirmation above first.</>}
                 </div>

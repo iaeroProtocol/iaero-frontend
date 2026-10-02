@@ -89,3 +89,31 @@ export function parseLlamaPrices(json: unknown, nowMs: number): Record<string, n
   }
   return out;
 }
+
+// --- Rift's gas desk ---
+// On each EVM chain where a route step runs as `evm_gas_desk`, Rift's gas desk fronts that chain's gas to
+// the order's vault and is repaid out of the order, in whatever token the vault holds there. Measured on
+// three orders on 2026-10-02: it fronted about 3.5x the gas the vault used and charged all of it (the rest
+// stays in the vault), once per chain, and Rift's quote included none of it. On a $14 order from Ethereum
+// that was 2.7%. These estimates keep the page's expectation honest; if Rift's quotes start to include the
+// charge, delivered-vs-expected comes out about this much high and they should go.
+
+/** Gas the desk fronts on Ethereum, in gas units (its charge over the gas price: 1.2M and 2.0M). */
+export const ETHEREUM_GAS_DESK_UNITS = 1_600_000;
+/** Typical charge per Layer 2 chain, in USD (Arbitrum $0.11; Base $0.03-$0.11, mostly L1 data fees). */
+export const L2_GAS_DESK_USD = 0.1;
+
+/** Chains whose steps run on the gas desk; it charges once per chain. */
+export const gasDeskChains = (route: { execution?: { mode: string; chain?: number } }[]): number[] =>
+  [...new Set(route.flatMap(s => (s.execution?.mode === 'evm_gas_desk' && s.execution.chain ? [s.execution.chain] : [])))];
+
+/** Expected gas-desk charge in USD, or null when Ethereum is involved and its gas price or ETH price is unknown. */
+export function gasDeskUsd(chains: number[], ethGasPriceWei: bigint | undefined, ethUsd: number | undefined): number | null {
+  let usd = 0;
+  for (const chain of chains) {
+    if (chain !== 1) { usd += L2_GAS_DESK_USD; continue; }
+    if (!ethGasPriceWei || !ethUsd) return null;
+    usd += (Number(ethGasPriceWei) * ETHEREUM_GAS_DESK_UNITS / 1e18) * ethUsd;
+  }
+  return usd;
+}
