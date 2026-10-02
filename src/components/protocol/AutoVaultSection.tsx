@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ethers } from 'ethers';
-import { usePublicClient, useWriteContract, useAccount } from 'wagmi';
+import { useAccount } from 'wagmi';
 import { formatUnits, parseAbi, type Address } from 'viem';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -28,6 +28,8 @@ import {
 } from '../lib/defi-utils';
 import { getContractAddress } from '../contracts/addresses';
 import { computeStakingApyPct } from '@/lib/staking-apy';
+import { useProtocolPublicClient, useProtocolWriteContract } from '@/lib/protocol-chain';
+import { SwitchToBaseCard } from '@/components/SwitchToBase';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Constants
@@ -93,12 +95,18 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
   const { connected, networkSupported, balances, chainId, loadBalances } = useProtocol();
   const { getPriceInUSD } = usePrices();
   const { address: account } = useAccount();
-  const publicClient = usePublicClient();
-  const { writeContractAsync } = useWriteContract();
+  // Reads, writes and receipts on Base (or Base Sepolia), wherever the wallet is: with the wallet on Ethereum a
+  // claim used to go to the vault address there (no contract, so it "succeeded"). See protocol-chain.ts.
+  const publicClient = useProtocolPublicClient();
+  const { writeContractAsync } = useProtocolWriteContract();
 
   // Default to Base mainnet when chainId is null (pre-connect render path).
   const resolvedChainId = chainId ?? 8453;
-  const VAULT_ADDR  = useMemo<Address>(() => getContractAddress('AutoUSDCVault', resolvedChainId) as Address, [resolvedChainId]);
+  // Base only: there is no vault on Base Sepolia, where the section asks to switch (the lookup used to throw while
+  // rendering and take the page down).
+  const VAULT_ADDR  = useMemo<Address | undefined>(() => {
+    try { return getContractAddress('AutoUSDCVault', resolvedChainId) as Address; } catch { return undefined; }
+  }, [resolvedChainId]);
   const IAERO_ADDR  = useMemo<Address>(() => getContractAddress('iAERO',         resolvedChainId) as Address, [resolvedChainId]);
   // The epoch staking distributor the vault stakes into — its staking APY is the
   // depositor's APY. Same resolution the Rewards panel uses.
@@ -460,6 +468,9 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
     );
   }
 
+  // Wallet on another chain (or Base Sepolia): no position figures or live buttons, just the way back to Base.
+  if (!networkSupported || !VAULT_ADDR) return <SwitchToBaseCard what="use the Auto-Vault" showToast={showToast} />;
+
   return (
     <div className="space-y-6">
       {/* ─── Brief intro (always shown) ─── */}
@@ -479,13 +490,13 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
           >
             <Card className="bg-gradient-to-r from-emerald-500/10 to-emerald-500/5 border-emerald-500/30">
               <CardContent className="p-6 flex items-center justify-between gap-4 flex-wrap">
-                <div className="flex items-center gap-4">
-                  <div className="rounded-full bg-emerald-500/20 p-3">
+                <div className="flex min-w-0 items-center gap-4">
+                  <div className="hidden sm:block rounded-full bg-emerald-500/20 p-3">
                     <Gift className="w-6 h-6 text-emerald-400" />
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <div className="text-sm text-emerald-200/80">Pending USDC ready to claim</div>
-                    <div className="text-3xl font-bold text-emerald-300 truncate">
+                    <div className="text-[3rem] sm:text-[4rem] leading-tight font-bold text-emerald-300 truncate">
                       ${formatBigNumber(pendingUSDC, 6, 1)}
                     </div>
                     <div className="text-xs text-emerald-200/60 mt-1">
@@ -519,7 +530,7 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
       {/* ─── Position card ─── */}
       <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50">
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle className="flex items-center gap-2 text-white">
               <Vault className="w-5 h-5 text-indigo-400" />
               Your Auto-Vault Position
@@ -633,27 +644,27 @@ export default function AutoVaultSection({ showToast }: AutoVaultSectionProps) {
       {/* ─── Deposit / Withdraw ─── */}
       <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50">
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle className="text-white">
               {mode === 'deposit' ? 'Deposit iAERO' : 'Withdraw iAERO'}
             </CardTitle>
             <div className="flex bg-slate-900/60 rounded-lg p-1">
               <button
                 onClick={() => setMode('deposit')}
-                className={`px-3 py-1 rounded text-xs font-medium transition ${
+                className={`px-2 sm:px-3 py-1 rounded text-xs font-medium transition ${
                   mode === 'deposit' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:text-white'
                 }`}
               >
-                <ArrowDownToLine className="w-3 h-3 inline mr-1" />
+                <ArrowDownToLine className="w-3 h-3 hidden sm:inline mr-1" />
                 Deposit
               </button>
               <button
                 onClick={() => setMode('withdraw')}
-                className={`px-3 py-1 rounded text-xs font-medium transition ${
+                className={`px-2 sm:px-3 py-1 rounded text-xs font-medium transition ${
                   mode === 'withdraw' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:text-white'
                 }`}
               >
-                <ArrowUpFromLine className="w-3 h-3 inline mr-1" />
+                <ArrowUpFromLine className="w-3 h-3 hidden sm:inline mr-1" />
                 Withdraw
               </button>
             </div>

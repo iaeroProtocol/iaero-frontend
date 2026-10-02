@@ -11,13 +11,12 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Coins, TrendingUp, Zap, Loader2, CheckCircle, History, Info, RefreshCw } from "lucide-react";
-import { usePublicClient } from 'wagmi';
 import { useProtocol } from "@/components/contexts/ProtocolContext";
 import { useStaking } from "../contracts/hooks/useStaking";
 import { parseInputToBigNumber, formatBigNumber, sanitizeDecimalInput, useDebounce, validateTokenAmount, calculateYield } from "../lib/defi-utils";
-import { useSwitchChain } from 'wagmi';
-import { base } from 'wagmi/chains';
 import { usePrices } from "@/components/contexts/PriceContext";
+import { useProtocolPublicClient } from '@/lib/protocol-chain';
+import { SwitchToBaseCard } from '@/components/SwitchToBase';
 
 
 
@@ -29,9 +28,6 @@ interface StakeSectionProps {
 interface TxHistory { type: "stake" | "unstake"; amount: string; timestamp: number; txHash?: string; }
 const MIN_STAKE_AMOUNT = ethers.parseUnits("0.01", 18);
 
-const DEFAULT_STAKING_APR =
-  Number(process.env.NEXT_PUBLIC_DEFAULT_STAKING_APR ?? '30');
-  
 const msgFromError = (e: any, fallback = "Transaction failed") => {
   if (e?.code === 4001) return "Transaction rejected by user";
   const m = String(e?.message || "").toLowerCase();
@@ -61,11 +57,10 @@ export default function StakeSection({ showToast, formatNumber }: StakeSectionPr
   const { connected, networkSupported, balances, loading, chainId, loadBalances } = useProtocol();
   const { stakeIAero, unstakeIAero, calculateStakingAPR, getStakingStats, checkIAeroApproval, approveIAero, loading: stakingLoading } = useStaking() as any;
   const { getPriceInUSD } = usePrices();
-  const { switchChain } = useSwitchChain();
-  const publicClient = usePublicClient();
-  // State declarations - moved up before they're used
-  const [stakingAPR, setStakingAPR] = useState<{ aero: number; total: number }>({ aero: 0, total: 0 });
-  const [stakingStats, setStakingStats] = useState<{ totalStaked: string; rewardTokensCount: number }>({ totalStaked: '0', rewardTokensCount: 0 });
+  const publicClient = useProtocolPublicClient();
+  // State declarations - moved up before they're used. null until read (or when a read fails): shown as "—".
+  const [stakingAPR, setStakingAPR] = useState<{ aero: number; total: number } | null>(null);
+  const [stakingStats, setStakingStats] = useState<{ totalStaked: string; rewardTokensCount: number } | null>(null);
   const [stakeAmount, setStakeAmount] = useState("");
   const [unstakeAmount, setUnstakeAmount] = useState("");
   const [needsApproval, setNeedsApproval] = useState(false);
@@ -103,6 +98,7 @@ export default function StakeSection({ showToast, formatNumber }: StakeSectionPr
 
   const addToHistory = (type: TxHistory["type"], amount: string, txHash?: string) => setTxHistory(prev => [{ type, amount, timestamp: Date.now(), txHash }, ...prev.slice(0,4)]);
 
+  // Protocol-wide figures, read on Base: shown while disconnected too, not while the wallet is on another chain.
   useEffect(() => {
     const run = async () => {
       try {
@@ -111,8 +107,8 @@ export default function StakeSection({ showToast, formatNumber }: StakeSectionPr
         setStakingStats(stats);
       } catch (e) { console.error('Failed to load staking data', e); }
     };
-    if (connected && networkSupported) run();
-  }, [connected, networkSupported, calculateStakingAPR, getStakingStats]);
+    if (networkSupported) run();
+  }, [networkSupported, calculateStakingAPR, getStakingStats]);
 
   useEffect(() => {
     if (mode !== 'stake') { setNeedsApproval(false); return; }
@@ -261,6 +257,9 @@ export default function StakeSection({ showToast, formatNumber }: StakeSectionPr
 
   const txBaseUrl = useMemo(() => (chainId === 84532 ? 'https://sepolia.basescan.org/tx/' : chainId === 8453 ? 'https://basescan.org/tx/' : 'https://etherscan.io/tx/'), [chainId]);
 
+  // Wallet on another chain: no balances or live buttons, just the way back to Base.
+  if (connected && !networkSupported) return <SwitchToBaseCard what="stake iAERO" showToast={showToast} />;
+
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="space-y-6">
       <div className="flex items-center justify-between">
@@ -320,16 +319,14 @@ export default function StakeSection({ showToast, formatNumber }: StakeSectionPr
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="bg-slate-900/50 rounded-xl p-4 border border-slate-700/30">
-              <div className="flex justify-between items-center mb-2"><span className="text-slate-400">Current APR</span><span className="text-emerald-400 font-semibold text-xl">{stakingAPR?.aero?.toFixed ? stakingAPR.aero.toFixed(1) : '0.0'}%</span></div>
+              <div className="flex justify-between items-center mb-2"><span className="text-slate-400">Current APR</span><span className="text-emerald-400 font-semibold text-xl">{stakingAPR ? `${stakingAPR.aero.toFixed(1)}%` : '—'}</span></div>
               {showAPRBreakdown && (
-                <div className="mt-3 pt-3 border-t border-slate-700/50 text-xs space-y-1">
-                  <div className="flex justify-between"><span className="text-slate-500">Base APR:</span><span className="text-slate-400">30.0%</span></div>
-                  <div className="flex justify-between"><span className="text-slate-500">Boost:</span><span className="text-emerald-400">+{((stakingAPR?.aero ?? 0) - 30).toFixed(1)}%</span></div>
-                  <div className="text-slate-500 mt-2 italic">Stake more to increase rewards</div>
+                <div className="mt-3 pt-3 border-t border-slate-700/50 text-xs text-slate-500">
+                  Stakers' share of this week's protocol rewards, times 52, divided by the value of all staked iAERO.
                 </div>
               )}
-              <div className="flex justify-between items-center mb-2"><span className="text-slate-400">Total Staked</span><span className="text-white">{formatNumber(stakingStats.totalStaked)} iAERO</span></div>
-              <div className="flex justify-between items-center"><span className="text-slate-400">Reward Tokens</span><span className="text-white">{stakingStats.rewardTokensCount}</span></div>
+              <div className="flex justify-between items-center mb-2"><span className="text-slate-400">Total Staked</span><span className="text-white">{stakingStats ? `${formatNumber(stakingStats.totalStaked)} iAERO` : '—'}</span></div>
+              <div className="flex justify-between items-center"><span className="text-slate-400">Reward Tokens</span><span className="text-white">{stakingStats ? stakingStats.rewardTokensCount : '—'}</span></div>
             </div>
             {connected && stakedIAeroBN > 0n && (
               <div className="bg-slate-900/50 rounded-xl p-4 border border-slate-700/30">
@@ -355,10 +352,6 @@ export default function StakeSection({ showToast, formatNumber }: StakeSectionPr
       )}
 
       <AnimatePresence>{showSuccess && (<motion.div initial={{ scale: .8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: .8, opacity: 0 }} className="flex items-center justify-center py-4"><div className="bg-emerald-500/20 rounded-full p-4"><CheckCircle className="w-12 h-12 text-emerald-400" /></div></motion.div>)}</AnimatePresence>
-
-      {connected && !networkSupported && (
-        <Card className="bg-amber-500/10 border border-amber-500/20"><CardContent className="p-4"><div className="flex items-center justify-between"><div><p className="text-amber-400 font-medium">Wrong Network</p><p className="text-sm text-slate-300 mt-1">Please switch to Base to continue</p></div><Button onClick={async () => { try { switchChain({ chainId: base.id }); } catch (e) { showToast('Network switch failed', 'error'); } }} className="bg-amber-600 hover:bg-amber-700">Switch to Base</Button></div></CardContent></Card>
-      )}
 
       {txHistory.length > 0 && (
         <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50"><CardHeader><CardTitle className="text-white flex items-center space-x-2 text-lg"><History className="w-5 h-5" /><span>Recent Transactions</span></CardTitle></CardHeader><CardContent><div className="space-y-3">{txHistory.map((tx, i) => (<div key={i} className="flex justify-between items-center text-sm p-2 bg-slate-900/30 rounded"><div className="flex items-center space-x-3"><div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" /><div><span className="text-slate-300">{tx.type === 'stake' ? 'Staked' : 'Unstaked'}</span><span className="text-slate-500 text-xs ml-2">{formatTimeAgo(tx.timestamp)}</span></div></div><div className="flex items-center space-x-3"><span className="text-white font-medium">{tx.amount} iAERO</span>{tx.txHash && (<a href={`${txBaseUrl}${tx.txHash}`} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">↗</a>)}</div></div>))}</div></CardContent></Card>

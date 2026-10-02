@@ -24,7 +24,7 @@ export default function NetworkSwitcher() {
       <DropdownMenu.Trigger asChild>
         <Button size="sm" className={`h-10 rounded-xl ${wrong ? 'bg-amber-600/80 hover:bg-amber-600' : 'bg-slate-800/70'}`}>
           {wrong && <AlertTriangle className="h-4 w-4 mr-1.5" />}
-          {wrong ? chainName(chainId) : (currentChain ?? base).name}
+          {wrong ? chainName(chainId) ?? 'Unsupported network' : (currentChain ?? base).name}
           <ChevronDown className="h-4 w-4 ml-2" />
         </Button>
       </DropdownMenu.Trigger>

@@ -9,8 +9,8 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Coins, TrendingUp, Clock, Gift, AlertCircle, Loader2 } from "lucide-react";
 import { useProtocol } from "@/components/contexts/ProtocolContext";
-import { useAccount, useWriteContract, usePublicClient } from 'wagmi';
-import { useProtocolChainId } from '@/lib/protocol-chain';
+import { useAccount } from 'wagmi';
+import { useProtocolChainId, useProtocolPublicClient, useProtocolWriteContract } from '@/lib/protocol-chain';
 import { getContractAddress } from '@/components/contracts/addresses';
 import { ABIS } from '@/components/contracts/abis';
 import { parseTokenAmount } from "@/components/lib/ethereum";
@@ -88,8 +88,9 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   const { connected, networkSupported, loadBalances, setTransactionLoading } = useProtocol();
   const { address } = useAccount();
   const chainId = useProtocolChainId();
-  const publicClient = usePublicClient();
-  const { writeContractAsync } = useWriteContract();
+  // Reads, writes and receipts on Base (or Base Sepolia), wherever the wallet is: see protocol-chain.ts.
+  const publicClient = useProtocolPublicClient();
+  const { writeContractAsync } = useProtocolWriteContract();
   // pricesLastUpdate flips from null → timestamp once real prices arrive; we
   // re-trigger loadStakingStats on that transition so the APR display refreshes
   // immediately instead of waiting for the next 30s interval (or a wallet
@@ -828,7 +829,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   };
   
   
-  if (connected && !networkSupported) return <SwitchToBaseCard what="stake LIQ" />;
+  if (connected && !networkSupported) return <SwitchToBaseCard what="stake LIQ" showToast={showToast} />;
   if (!connected || !networkSupported) {
     return (
       <div className="text-center py-12">

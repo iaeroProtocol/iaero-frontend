@@ -1,7 +1,7 @@
 // src/contracts/hooks/useStaking.ts
 import { useState, useCallback } from 'react';
-import { useAccount, useWriteContract, usePublicClient } from 'wagmi';
-import { useProtocolChainId } from '@/lib/protocol-chain';
+import { useAccount } from 'wagmi';
+import { useProtocolChainId, useProtocolPublicClient, useProtocolWriteContract } from '@/lib/protocol-chain';
 import type { Hash } from 'viem';
 import { parseAbi } from 'viem';
 import { getContractAddress } from '../addresses';
@@ -9,8 +9,6 @@ import { ABIS } from '../abis';
 import { useProtocol } from '../../contexts/ProtocolContext';
 import { usePrices } from '../../contexts/PriceContext';
 
-
-const DEFAULT_STAKING_APR = Number(process.env.NEXT_PUBLIC_DEFAULT_STAKING_APR ?? '30');
 
 // On-chain reward-token registry — source of truth for the reward-token list
 // (mirrors RewardsSection.tsx). Used to count reward tokens for the Stake page.
@@ -56,7 +54,8 @@ const parseEther = (value: string): bigint => {
 export const useStaking = () => {
   const { address } = useAccount();
   const chainId = useProtocolChainId();
-  const publicClient = usePublicClient();
+  // Reads and writes on Base (or Base Sepolia), wherever the wallet is: see protocol-chain.ts.
+  const publicClient = useProtocolPublicClient();
   const { loadBalances, loadAllowances, loadPendingRewards, setTransactionLoading } = useProtocol();
   // `lastUpdate` is null until PriceContext has fetched real prices once. Until
   // then, `prices` holds MOCKS (LIQ=$0.15 etc.) — using them silently produces
@@ -65,8 +64,8 @@ export const useStaking = () => {
 
   const [loading, setLoading] = useState(false);
   
-  // Wagmi write hook
-  const { writeContractAsync } = useWriteContract();
+  // Wagmi write hook (every write carries the protocol chain id)
+  const { writeContractAsync } = useProtocolWriteContract();
 
   // Helper to get contract address safely
   const getAddr = useCallback((name: any) => {
@@ -390,13 +389,15 @@ export const useStaking = () => {
   
 
 
-  // Calculate staking APR (real-time)
-  const calculateStakingAPR = useCallback(async (): Promise<StakingAPR> => {
+  // Calculate staking APR (real-time). null when it can't be worked out (prices not loaded yet, a failed read):
+  // the UI then shows "—", never a made-up figure.
+  const calculateStakingAPR = useCallback(async (): Promise<StakingAPR | null> => {
     try {
       const stakingAddr = getAddr('StakingDistributor') as `0x${string}` | undefined;
-      if (!stakingAddr || !publicClient) {
-        return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
-      }
+      if (!stakingAddr || !publicClient) return null;
+
+      // Until PriceContext's first fetch, `prices` holds mocks (iAERO = $1): an APR from them looks real but isn't.
+      if (pricesLastUpdate == null) return null;
 
       // (1) weekly stakers USD (1e18)
       const weeklyUSD_1e18 = await fetchStakersWeeklyUSD();
@@ -417,10 +418,7 @@ export const useStaking = () => {
       if (!Number.isFinite(iaeroUsd) || iaeroUsd <= 0) {
         iaeroUsd = Number(prices?.AERO?.usd ?? 0);
       }
-      if (!Number.isFinite(iaeroUsd) || iaeroUsd <= 0) {
-        // cannot price → UI baseline only
-        return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
-      }
+      if (!Number.isFinite(iaeroUsd) || iaeroUsd <= 0) return null; // cannot price
 
       // (4) APR = (weekly * 52) / (totalStaked * price) * 100
       const iaeroUsd_1e18 = toE18(iaeroUsd);
@@ -438,9 +436,9 @@ export const useStaking = () => {
       return { aero: apyPct, total: apyPct };
     } catch (e) {
       console.error('calculateStakingAPR failed:', e);
-      return { aero: DEFAULT_STAKING_APR, total: DEFAULT_STAKING_APR };
+      return null;
     }
-  }, [publicClient, getAddr, prices]);
+  }, [publicClient, getAddr, prices, pricesLastUpdate]);
 
   const calculateLiqStakingAPR = useCallback(async (): Promise<number | null> => {
     try {
@@ -483,7 +481,7 @@ export const useStaking = () => {
 
     } catch (e) {
       console.error('calculateLiqStakingAPR failed:', e);
-      // Return null (not DEFAULT_STAKING_APR) so the UI can render a "—" instead
+      // Return null (not a default APR) so the UI can render a "—" instead
       // of fabricating a number that looks legitimate.
       return null;
     }
@@ -491,13 +489,11 @@ export const useStaking = () => {
 
 
 
-  // Get staking stats
-  const getStakingStats = useCallback(async (): Promise<StakingStats> => {
+  // Get staking stats (null when the read fails: shown as "—", not 0)
+  const getStakingStats = useCallback(async (): Promise<StakingStats | null> => {
     try {
       const stakingAddr = getAddr('StakingDistributor') as `0x${string}` | undefined;
-      if (!stakingAddr || !publicClient) {
-        return { totalStaked: '0', rewardTokensCount: 0 };
-      }
+      if (!stakingAddr || !publicClient) return null;
 
       const totalStakedRaw = await publicClient.readContract({
         address: stakingAddr,
@@ -525,7 +521,7 @@ export const useStaking = () => {
       };
     } catch (e) {
       console.error('getStakingStats failed:', e);
-      return { totalStaked: '0', rewardTokensCount: 0 };
+      return null;
     }
   }, [publicClient, getAddr]);
 

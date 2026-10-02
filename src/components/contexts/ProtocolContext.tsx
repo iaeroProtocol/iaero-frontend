@@ -1,10 +1,11 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useCallback, useMemo } from 'react';
-import { useAccount, useChainId, usePublicClient } from 'wagmi';
-import { getContractAddress, isSupportedNetwork, type ContractName } from '../contracts/addresses';
+import { useAccount } from 'wagmi';
+import { getContractAddress, type ContractName } from '../contracts/addresses';
 import { ABIS } from '../contracts/abis';
 import { fetchPricesWithCache } from '@/lib/client-prices';
+import { useProtocolChainId, useProtocolPublicClient, useWalletOnProtocolChain } from '@/lib/protocol-chain';
 
 /* ========================= Types ========================= */
 
@@ -95,19 +96,15 @@ const VAULT_META_ABI = [
 export function ProtocolProvider({ children }: { children: React.ReactNode }) {
   // Wagmi
   const { address, isConnected } = useAccount();
-  // The wallet can sit on Ethereum or Arbitrum (Get iAERO pays from there, so the wallet config lists them).
-  // Protocol addresses are then still looked up on Base, and the sections ask the user to switch back.
-  const walletChainId = useChainId();
-  const networkSupported = useMemo(() => isSupportedNetwork(walletChainId), [walletChainId]);
-  const chainId = networkSupported ? walletChainId : 8453;
-  const publicClient = usePublicClient({ chainId });
+  // The wallet can sit on Ethereum or Arbitrum (Get iAERO pays from there, so the wallet config lists them) or on a
+  // chain the config doesn't list. Protocol addresses and reads then stay on Base, and the sections ask the user
+  // to switch back. Derived on every render (not synced through state) so no render sees a stale value.
+  const networkSupported = useWalletOnProtocolChain();
+  const chainId = useProtocolChainId();
+  const publicClient = useProtocolPublicClient();
 
   // Local state
-  const [state, setState] = React.useState<ProtocolState>({
-    connected: false,
-    account: null,
-    chainId: null,
-    networkSupported: false,
+  const [state, setState] = React.useState<Omit<ProtocolState, 'connected' | 'account' | 'chainId' | 'networkSupported'>>({
     balances: {
       aero: '0',
       iAero: '0',
@@ -141,17 +138,6 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
     },
     error: null,
   });
-
-  // React to wallet/chain changes
-  useEffect(() => {
-    setState(prev => ({
-      ...prev,
-      connected: isConnected,
-      account: address || null,
-      chainId: chainId || null,
-      networkSupported,
-    }));
-  }, [isConnected, address, chainId, networkSupported]);
 
   /* ========================= Balances ========================= */
 
@@ -366,12 +352,16 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
 
   const value: ProtocolContextValue = useMemo(() => ({
     ...state,
+    connected: isConnected,
+    account: address || null,
+    chainId,
+    networkSupported,
     loadBalances,
     loadAllowances,
     loadPendingRewards,
     loadStats,
     setTransactionLoading,
-  }), [state, loadBalances, loadAllowances, loadPendingRewards, loadStats, setTransactionLoading]);
+  }), [state, isConnected, address, chainId, networkSupported, loadBalances, loadAllowances, loadPendingRewards, loadStats, setTransactionLoading]);
 
   return (
     <ProtocolContext.Provider value={value}>
