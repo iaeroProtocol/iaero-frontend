@@ -42,6 +42,7 @@ import {
   formatBigNumber,
 } from "../lib/defi-utils";
 import { usePrices } from "@/components/contexts/PriceContext";
+import { knownTxError } from '@/components/lib/tx-errors';
 
 // --------------------------------------------------------------------------
 // 1. CONFIGURATION & ABIS
@@ -380,7 +381,8 @@ interface JsonRewardItem {
 // 3. HELPERS
 // --------------------------------------------------------------------------
 const msgFromError = (e: any, fallback = "Transaction failed") => {
-  if (e?.code === 4001) return "Transaction rejected by user";
+  const known = knownTxError(e);
+  if (known) return known;
   const m = String(e?.message || "").toLowerCase();
   if (m.includes("insufficient funds")) return "Insufficient ETH for gas fees";
   if (m.includes("no pending rewards")) return "No rewards available to claim";

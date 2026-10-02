@@ -17,7 +17,7 @@ import { parseInputToBigNumber, formatBigNumber, sanitizeDecimalInput, useDeboun
 import { usePrices } from "@/components/contexts/PriceContext";
 import { useProtocolPublicClient } from '@/lib/protocol-chain';
 import { SwitchToBaseCard } from '@/components/SwitchToBase';
-import { isUserRejection } from '@/components/lib/tx-errors';
+import { knownTxError } from '@/components/lib/tx-errors';
 
 
 
@@ -30,7 +30,8 @@ interface TxHistory { type: "stake" | "unstake"; amount: string; timestamp: numb
 const MIN_STAKE_AMOUNT = ethers.parseUnits("0.01", 18);
 
 const msgFromError = (e: any, fallback = "Transaction failed") => {
-  if (isUserRejection(e)) return "Cancelled in your wallet. Nothing was sent.";
+  const known = knownTxError(e);
+  if (known) return known;
   const m = String(e?.message || "").toLowerCase();
   if (m.includes("insufficient funds")) return "Insufficient ETH for gas fees";
   if (m.includes("insufficient balance")) return "Insufficient balance";

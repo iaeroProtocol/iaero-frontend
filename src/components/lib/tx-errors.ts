@@ -13,10 +13,20 @@ export function isUserRejection(e: unknown): boolean {
   return false;
 }
 
+/** The message for the failures that need no guessing: declined in the wallet, or refused because the wallet is
+ *  on another chain (protocol-chain.ts); null otherwise. */
+export function knownTxError(e: unknown): string | null {
+  if (isUserRejection(e)) return 'Cancelled in your wallet. Nothing was sent.';
+  const x = e as { name?: unknown; message?: unknown } | null | undefined;
+  if (x?.name === 'WalletOffProtocolChainError') return String(x.message);
+  return null;
+}
+
 /** The message to show for a failed transaction: a declined request says nothing was sent; anything else gives
  *  viem's one-line reason, or `fallback`. */
 export function txErrorMessage(e: unknown, fallback = 'Transaction failed'): string {
-  if (isUserRejection(e)) return 'Cancelled in your wallet. Nothing was sent.';
+  const known = knownTxError(e);
+  if (known) return known;
   const x = e as { shortMessage?: unknown; message?: unknown } | null | undefined;
   const text = String(x?.shortMessage || x?.message || '').split('\n')[0].trim();
   if (/insufficient funds/i.test(text)) return 'Not enough ETH for the network fee.';
