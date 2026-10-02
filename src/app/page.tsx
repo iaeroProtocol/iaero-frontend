@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
  Lock, Zap, Gift, Shield, Sparkles, TrendingUp, Coins, Banknote, Vault,
- MessageCircle, Twitter, BookOpen
+ MessageCircle, Twitter, BookOpen, ArrowLeftRight
 } from 'lucide-react';
 
 // Import your real components
@@ -16,6 +16,7 @@ import StakeSection from '@/components/protocol/StakeSection';
 import LiqStaking from '@/components/protocol/LiqStaking';
 import RewardsSection from '@/components/protocol/RewardsSection';
 import AutoVaultSection from '@/components/protocol/AutoVaultSection';
+import GetIaeroSection from '@/components/protocol/GetIaeroSection';
 import ToastNotification from '@/components/protocol/ToastNotification';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -50,6 +51,7 @@ const formatNumber = (num: string | number) => {
 export default function IaeroProtocolApp() {
  const [toasts, setToasts] = useState<Array<{ id: number; message: string; type: 'success' | 'error' | 'info' | 'warning' }>>([]);
  const { stats, loading } = useProtocol() as any;
+ const [tab, setTab] = useState('lock');
 
  let toastCounter = 0;
 
@@ -257,8 +259,14 @@ export default function IaeroProtocolApp() {
        {/* Main Protocol Interface */}
        <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50 w-full max-w-7xl mx-auto">
          <CardContent className="p-8">
-           <Tabs defaultValue="lock" className="w-full">
+           <Tabs value={tab} onValueChange={setTab} className="w-full">
            <TabsList className="flex flex-wrap w-full mb-8 gap-1">
+            <TabsTrigger value="get-iaero" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
+              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
+                <ArrowLeftRight className="w-4 h-4 mb-0.5 md:mb-0" />
+                <span>Get iAERO</span>
+              </div>
+            </TabsTrigger>
             <TabsTrigger value="lock" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
               <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
                 <Lock className="w-4 h-4 mb-0.5 md:mb-0" />
@@ -290,6 +298,11 @@ export default function IaeroProtocolApp() {
               </div>
             </TabsTrigger>
           </TabsList>
+
+             {/* Kept mounted (hidden when inactive) so order tracking and its notifications carry on in other tabs. */}
+             <TabsContent value="get-iaero" forceMount className="data-[state=inactive]:hidden">
+               <GetIaeroSection showToast={showToast} formatNumber={formatNumber} onGoToStake={() => setTab('stake')} />
+             </TabsContent>
 
              <TabsContent value="lock">
                <LockSection showToast={showToast} formatNumber={formatNumber} />
