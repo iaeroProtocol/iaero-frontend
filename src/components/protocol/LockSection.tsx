@@ -23,6 +23,7 @@ import { getContractAddress } from '@/components/contracts/addresses';
 import { ABIS } from '@/components/contracts/abis';
 import { useProtocolPublicClient } from '@/lib/protocol-chain';
 import { SwitchToBaseCard } from '@/components/SwitchToBase';
+import { isUserRejection } from '@/components/lib/tx-errors';
 
 interface LockSectionProps {
   showToast: (message: string, type: "success" | "error" | "info" | "warning") => void;
@@ -43,7 +44,7 @@ const MAX_DUST = BigInt(1000000000000000);
 
 // Helpers
 const msgFromError = (e: any, fallback = "Transaction failed") => {
-  if (e?.code === 4001) return "Transaction rejected by user";
+  if (isUserRejection(e)) return "Cancelled in your wallet. Nothing was sent.";
   const m = String(e?.message || "").toLowerCase();
   if (m.includes("insufficient funds")) return "Insufficient ETH for gas fees";
   return fallback;

@@ -17,6 +17,7 @@ import { parseTokenAmount } from "@/components/lib/ethereum";
 import { usePrices } from "@/components/contexts/PriceContext";
 import { formatUnits } from 'viem';
 import { useStaking } from "../contracts/hooks/useStaking";
+import { isUserRejection, txErrorMessage } from '@/components/lib/tx-errors';
 
 
 const ZERO = "0x0000000000000000000000000000000000000000";
@@ -472,8 +473,9 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   const totalRewardsUSD = useMemo(() => rows.reduce((s, r) => s + r.usd, 0), [rows]);
 
   // Actions
-  const handleApprove = async () => {
-    if (!connected || !address) return;
+  /** Approve LIQ for staking; false when it was declined or failed (the caller must stop). */
+  const handleApprove = async (): Promise<boolean> => {
+    if (!connected || !address) return false;
     const txId = "approveLiq";
     setTransactionLoading(txId, true);
     setLoading(true);
@@ -496,9 +498,11 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       if (receipt && receipt.status !== "success") throw new Error(`Approval reverted: ${hash}`);
       showToast("LIQ approved!", "success");
       await loadLiqBalance();
+      return true;
     } catch (e: any) {
       console.error("Approval error:", e);
-      showToast(e.message || "Approval failed", "error");
+      showToast(txErrorMessage(e, "Approval failed"), isUserRejection(e) ? "info" : "error");
+      return false;
     } finally {
       setLoading(false);
       setTransactionLoading(txId, false);
@@ -516,7 +520,8 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       if (!liqStakingAddr) throw new Error("LIQ Staking contract not initialized");
       if (!publicClient) throw new Error("RPC client not available");
 
-      if (needsApproval) await handleApprove();
+      // No staking without the approval: a declined or failed one ends here (it has already said why).
+      if (needsApproval && !(await handleApprove())) return;
 
       const amount = parseTokenAmount(stakeAmount);
 
@@ -570,7 +575,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       await Promise.all([loadStakingStats(), loadLiqBalance(), loadBalances()]);
     } catch (e: any) {
       console.error("Staking error:", e);
-      showToast(e.message || "Staking failed", "error");
+      showToast(txErrorMessage(e, "Staking failed"), isUserRejection(e) ? "info" : "error");
     } finally {
       setLoading(false);
       setTransactionLoading(txId, false);
@@ -637,7 +642,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       await Promise.all([loadStakingStats(), loadLiqBalance(), loadBalances()]);
     } catch (e: any) {
       console.error("Unstaking error:", e);
-      showToast(e.message || "Unstaking failed", "error");
+      showToast(txErrorMessage(e, "Unstaking failed"), isUserRejection(e) ? "info" : "error");
     } finally {
       setLoading(false);
       setTransactionLoading(txId, false);
@@ -764,7 +769,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       setRewardsRefreshKey((k) => k + 1);
     } catch (e: any) {
       console.error("Claim error:", e);
-      showToast(e?.shortMessage || e?.message || "Claim failed", "error");
+      showToast(txErrorMessage(e, "Claim failed"), isUserRejection(e) ? "info" : "error");
     } finally {
       setLoading(false);
       setTransactionLoading(txId, false);
@@ -821,7 +826,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       setRewardsRefreshKey((k) => k + 1);
     } catch (e: any) {
       console.error("Single-token claim error:", e);
-      showToast(e?.shortMessage || e?.message || "Claim failed", "error");
+      showToast(txErrorMessage(e, "Claim failed"), isUserRejection(e) ? "info" : "error");
     } finally {
       setClaimingAddr(null);
       setTransactionLoading(txId, false);
