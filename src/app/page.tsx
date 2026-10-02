@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
@@ -60,11 +60,14 @@ export default function IaeroProtocolApp() {
  const [toasts, setToasts] = useState<Array<{ id: number; message: string; type: 'success' | 'error' | 'info' | 'warning' }>>([]);
  const { stats, loading } = useProtocol() as any;
  const [tab, setTab] = useState('lock');
+ // The Get iAERO tab trigger, focused by the hero's "Buy iAERO" (by ref: an id of our own would replace Radix's,
+ // which the tab panel's aria-labelledby points at).
+ const getIaeroTabRef = useRef<HTMLButtonElement>(null);
  const goToGetIaero = () => {
    setTab('get-iaero');
    requestAnimationFrame(() => {
      document.getElementById('protocol-tabs')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-     document.getElementById('tab-get-iaero')?.focus({ preventScroll: true });
+     getIaeroTabRef.current?.focus({ preventScroll: true });
    });
  };
 
@@ -290,41 +293,43 @@ export default function IaeroProtocolApp() {
        <Card id="protocol-tabs" className="scroll-mt-4 bg-slate-800/50 backdrop-blur-xl border-slate-700/50 w-full max-w-7xl mx-auto">
          <CardContent className="p-8">
            <Tabs value={tab} onValueChange={setTab} className="w-full">
-           <TabsList className="flex flex-wrap w-full mb-8 gap-1">
-            <TabsTrigger id="tab-get-iaero" value="get-iaero" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
-                <ArrowLeftRight className="w-4 h-4 mb-0.5 md:mb-0" />
-                <span>Get iAERO</span>
+           {/* Below md a 3 x 2 grid that grows with its rows (a fixed-height wrapping list overlapped the panel);
+               below lg each tab stacks its icon over a smaller label so the longer ones still fit. */}
+           <TabsList className="grid grid-cols-3 md:flex md:flex-wrap h-auto w-full mb-8 gap-1">
+            <TabsTrigger ref={getIaeroTabRef} value="get-iaero" className="flex-1 min-w-[70px] text-xs px-1 sm:px-2 py-1.5">
+              <div className="flex flex-col lg:flex-row items-center justify-center lg:gap-1">
+                <ArrowLeftRight className="w-4 h-4 mb-0.5 lg:mb-0" />
+                <span className="max-lg:text-[0.75em]">Get iAERO</span>
               </div>
             </TabsTrigger>
-            <TabsTrigger value="lock" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
-                <Lock className="w-4 h-4 mb-0.5 md:mb-0" />
-                <span>Lock</span>
+            <TabsTrigger value="lock" className="flex-1 min-w-[70px] text-xs px-1 sm:px-2 py-1.5">
+              <div className="flex flex-col lg:flex-row items-center justify-center lg:gap-1">
+                <Lock className="w-4 h-4 mb-0.5 lg:mb-0" />
+                <span className="max-lg:text-[0.75em]">Lock</span>
               </div>
             </TabsTrigger>
-            <TabsTrigger value="stake" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
-                <Zap className="w-4 h-4 mb-0.5 md:mb-0" />
-                <span>Stake</span>
+            <TabsTrigger value="stake" className="flex-1 min-w-[70px] text-xs px-1 sm:px-2 py-1.5">
+              <div className="flex flex-col lg:flex-row items-center justify-center lg:gap-1">
+                <Zap className="w-4 h-4 mb-0.5 lg:mb-0" />
+                <span className="max-lg:text-[0.75em]">Stake</span>
               </div>
             </TabsTrigger>
-            <TabsTrigger value="rewards" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
-                <Gift className="w-4 h-4 mb-0.5 md:mb-0" />
-                <span>Rewards</span>
+            <TabsTrigger value="rewards" className="flex-1 min-w-[70px] text-xs px-1 sm:px-2 py-1.5">
+              <div className="flex flex-col lg:flex-row items-center justify-center lg:gap-1">
+                <Gift className="w-4 h-4 mb-0.5 lg:mb-0" />
+                <span className="max-lg:text-[0.75em]">Rewards</span>
               </div>
             </TabsTrigger>
-            <TabsTrigger value="stake-liq" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
-                <Coins className="w-4 h-4 mb-0.5 md:mb-0" />
-                <span>LIQ</span>
+            <TabsTrigger value="stake-liq" className="flex-1 min-w-[70px] text-xs px-1 sm:px-2 py-1.5">
+              <div className="flex flex-col lg:flex-row items-center justify-center lg:gap-1">
+                <Coins className="w-4 h-4 mb-0.5 lg:mb-0" />
+                <span className="max-lg:text-[0.75em]">LIQ</span>
               </div>
             </TabsTrigger>
-            <TabsTrigger value="auto-vault" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
-                <Vault className="w-4 h-4 mb-0.5 md:mb-0" />
-                <span>Auto-Vault</span>
+            <TabsTrigger value="auto-vault" className="flex-1 min-w-[70px] text-xs px-1 sm:px-2 py-1.5">
+              <div className="flex flex-col lg:flex-row items-center justify-center lg:gap-1">
+                <Vault className="w-4 h-4 mb-0.5 lg:mb-0" />
+                <span className="max-lg:text-[0.75em]">Auto-Vault</span>
               </div>
             </TabsTrigger>
           </TabsList>
