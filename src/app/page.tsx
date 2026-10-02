@@ -52,6 +52,10 @@ export default function IaeroProtocolApp() {
  const [toasts, setToasts] = useState<Array<{ id: number; message: string; type: 'success' | 'error' | 'info' | 'warning' }>>([]);
  const { stats, loading } = useProtocol() as any;
  const [tab, setTab] = useState('lock');
+ const goToGetIaero = () => {
+   setTab('get-iaero');
+   requestAnimationFrame(() => document.getElementById('protocol-tabs')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+ };
 
  let toastCounter = 0;
 
@@ -226,17 +230,16 @@ export default function IaeroProtocolApp() {
          {/* Empty spacer for first card column */}
          <div className="hidden lg:block" />
          
-         {/* Buy iAERO - under veAERO Owned card */}
+         {/* Buy iAERO - under veAERO Owned card: opens the Get iAERO tab (any token, any supported chain) */}
          <div className="flex justify-center">
-           <a
-             href="https://aero.drome.eth.limo/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x81034fb34009115f215f5d5f564aac9ffa46a1dc&chain0=8453&chain1=8453"
-             target="_blank"
-             rel="noopener noreferrer"
+           <button
+             type="button"
+             onClick={goToGetIaero}
              className="inline-flex items-center justify-center gap-2 px-10 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-sm font-semibold rounded-lg shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 transition-all duration-300 hover:scale-105 w-full max-w-[220px]"
            >
              <Coins className="w-4 h-4" />
              Buy iAERO
-           </a>
+           </button>
          </div>
          
          {/* Buy LIQ - under iAERO Price card */}
@@ -257,7 +260,7 @@ export default function IaeroProtocolApp() {
        </motion.div>
 
        {/* Main Protocol Interface */}
-       <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50 w-full max-w-7xl mx-auto">
+       <Card id="protocol-tabs" className="scroll-mt-4 bg-slate-800/50 backdrop-blur-xl border-slate-700/50 w-full max-w-7xl mx-auto">
          <CardContent className="p-8">
            <Tabs value={tab} onValueChange={setTab} className="w-full">
            <TabsList className="flex flex-wrap w-full mb-8 gap-1">
