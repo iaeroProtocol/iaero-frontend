@@ -20,7 +20,7 @@ import {
   validateTokenAmount,
 } from "../lib/defi-utils";
 import { useSwitchChain } from 'wagmi';
-import { baseSepolia } from 'wagmi/chains';
+import { base } from 'wagmi/chains';
 import { usePublicClient } from 'wagmi';
 import { getContractAddress } from '@/components/contracts/addresses';
 import { ABIS } from '@/components/contracts/abis';
@@ -678,12 +678,12 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-amber-400 font-medium">Wrong Network</p>
-                <p className="text-sm text-slate-300 mt-1">Please switch to Base Sepolia to continue</p>
+                <p className="text-sm text-slate-300 mt-1">Please switch to Base to continue</p>
               </div>
               <Button
                 onClick={async () => { 
                   try { 
-                    switchChain({ chainId: baseSepolia.id });
+                    switchChain({ chainId: base.id });
                   } catch (e) { 
                     console.error(e); 
                     showToast("Network switch failed", "error"); 
@@ -691,7 +691,7 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
                 }}
                 className="bg-amber-600 hover:bg-amber-700"
               >
-                Switch to Base Sepolia
+                Switch to Base
               </Button>
             </div>
           </CardContent>

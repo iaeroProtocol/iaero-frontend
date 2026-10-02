@@ -95,9 +95,12 @@ const VAULT_META_ABI = [
 export function ProtocolProvider({ children }: { children: React.ReactNode }) {
   // Wagmi
   const { address, isConnected } = useAccount();
-  const chainId = useChainId();
-  const publicClient = usePublicClient();
-  const networkSupported = useMemo(() => isSupportedNetwork(chainId), [chainId]);
+  // The wallet can sit on Ethereum or Arbitrum (Get iAERO pays from there, so the wallet config lists them).
+  // Protocol addresses are then still looked up on Base, and the sections ask the user to switch back.
+  const walletChainId = useChainId();
+  const networkSupported = useMemo(() => isSupportedNetwork(walletChainId), [walletChainId]);
+  const chainId = networkSupported ? walletChainId : 8453;
+  const publicClient = usePublicClient({ chainId });
 
   // Local state
   const [state, setState] = React.useState<ProtocolState>({

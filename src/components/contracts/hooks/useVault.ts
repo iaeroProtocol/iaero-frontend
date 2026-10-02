@@ -1,6 +1,7 @@
 // src/contracts/hooks/useVault.ts
 import { useState, useCallback } from "react";
-import { useAccount, useChainId, useWriteContract, usePublicClient } from 'wagmi';
+import { useAccount, useWriteContract, usePublicClient } from 'wagmi';
+import { useProtocolChainId } from '@/lib/protocol-chain';
 import { getContractAddress } from "../addresses";
 import { ABIS } from "../abis";
 import { useProtocol } from "../../contexts/ProtocolContext";
@@ -50,7 +51,7 @@ const parseEther = (value: string): bigint => {
 
 export const useVault = () => {
   const { address } = useAccount();
-  const chainId = useChainId();
+  const chainId = useProtocolChainId();
   const publicClient = usePublicClient();
   const { loadBalances, loadAllowances, setTransactionLoading } = useProtocol();
   

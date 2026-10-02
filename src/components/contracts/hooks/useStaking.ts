@@ -1,6 +1,7 @@
 // src/contracts/hooks/useStaking.ts
 import { useState, useCallback } from 'react';
-import { useAccount, useChainId, useWriteContract, usePublicClient } from 'wagmi';
+import { useAccount, useWriteContract, usePublicClient } from 'wagmi';
+import { useProtocolChainId } from '@/lib/protocol-chain';
 import type { Hash } from 'viem';
 import { parseAbi } from 'viem';
 import { getContractAddress } from '../addresses';
@@ -54,7 +55,7 @@ const parseEther = (value: string): bigint => {
 
 export const useStaking = () => {
   const { address } = useAccount();
-  const chainId = useChainId();
+  const chainId = useProtocolChainId();
   const publicClient = usePublicClient();
   const { loadBalances, loadAllowances, loadPendingRewards, setTransactionLoading } = useProtocol();
   // `lastUpdate` is null until PriceContext has fetched real prices once. Until

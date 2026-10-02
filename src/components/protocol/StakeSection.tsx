@@ -16,7 +16,7 @@ import { useProtocol } from "@/components/contexts/ProtocolContext";
 import { useStaking } from "../contracts/hooks/useStaking";
 import { parseInputToBigNumber, formatBigNumber, sanitizeDecimalInput, useDebounce, validateTokenAmount, calculateYield } from "../lib/defi-utils";
 import { useSwitchChain } from 'wagmi';
-import { baseSepolia } from 'wagmi/chains';
+import { base } from 'wagmi/chains';
 import { usePrices } from "@/components/contexts/PriceContext";
 
 
@@ -357,7 +357,7 @@ export default function StakeSection({ showToast, formatNumber }: StakeSectionPr
       <AnimatePresence>{showSuccess && (<motion.div initial={{ scale: .8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: .8, opacity: 0 }} className="flex items-center justify-center py-4"><div className="bg-emerald-500/20 rounded-full p-4"><CheckCircle className="w-12 h-12 text-emerald-400" /></div></motion.div>)}</AnimatePresence>
 
       {connected && !networkSupported && (
-        <Card className="bg-amber-500/10 border border-amber-500/20"><CardContent className="p-4"><div className="flex items-center justify-between"><div><p className="text-amber-400 font-medium">Wrong Network</p><p className="text-sm text-slate-300 mt-1">Please switch to Base Sepolia to continue</p></div><Button onClick={async () => { try { switchChain({ chainId: baseSepolia.id }); } catch (e) { showToast('Network switch failed', 'error'); } }} className="bg-amber-600 hover:bg-amber-700">Switch to Base Sepolia</Button></div></CardContent></Card>
+        <Card className="bg-amber-500/10 border border-amber-500/20"><CardContent className="p-4"><div className="flex items-center justify-between"><div><p className="text-amber-400 font-medium">Wrong Network</p><p className="text-sm text-slate-300 mt-1">Please switch to Base to continue</p></div><Button onClick={async () => { try { switchChain({ chainId: base.id }); } catch (e) { showToast('Network switch failed', 'error'); } }} className="bg-amber-600 hover:bg-amber-700">Switch to Base</Button></div></CardContent></Card>
       )}
 
       {txHistory.length > 0 && (

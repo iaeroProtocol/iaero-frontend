@@ -5,7 +5,9 @@ import { ConnectButton } from '@rainbow-me/rainbowkit';
 export default function WalletConnection() {
   return (
     <ConnectButton 
-      chainStatus="icon"
+      // The header's NetworkSwitcher handles networks; RainbowKit's own chain menu would also list Ethereum
+      // and Arbitrum, which the wallet config carries only so Get iAERO can pay from them.
+      chainStatus="none"
       showBalance={false}
     />
   );

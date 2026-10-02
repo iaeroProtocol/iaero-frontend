@@ -1,6 +1,7 @@
 // =============================
 // src/components/protocol/LiqStaking.tsx
 // =============================
+import { SwitchToBaseCard } from '@/components/SwitchToBase';
 import React, { useState, useEffect, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,7 +9,8 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Coins, TrendingUp, Clock, Gift, AlertCircle, Loader2 } from "lucide-react";
 import { useProtocol } from "@/components/contexts/ProtocolContext";
-import { useAccount, useChainId, useWriteContract, usePublicClient } from 'wagmi';
+import { useAccount, useWriteContract, usePublicClient } from 'wagmi';
+import { useProtocolChainId } from '@/lib/protocol-chain';
 import { getContractAddress } from '@/components/contracts/addresses';
 import { ABIS } from '@/components/contracts/abis';
 import { parseTokenAmount } from "@/components/lib/ethereum";
@@ -85,7 +87,7 @@ type RowWithUsd = BaseRow & { usd: number };
 export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps) {
   const { connected, networkSupported, loadBalances, setTransactionLoading } = useProtocol();
   const { address } = useAccount();
-  const chainId = useChainId();
+  const chainId = useProtocolChainId();
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
   // pricesLastUpdate flips from null → timestamp once real prices arrive; we
@@ -826,6 +828,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   };
   
   
+  if (connected && !networkSupported) return <SwitchToBaseCard what="stake LIQ" />;
   if (!connected || !networkSupported) {
     return (
       <div className="text-center py-12">

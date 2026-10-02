@@ -3,6 +3,7 @@
 // IMPROVED VERSION - Ported swap logic from Token Sweeper page.tsx
 // WITH POST-TRADE RESULTS MODAL
 // ==============================================
+import { SwitchToBaseCard } from '@/components/SwitchToBase';
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
@@ -3548,6 +3549,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
   // RENDER
   // ============================================================================
 
+  if (connected && !networkSupported) return <SwitchToBaseCard what="see and claim your rewards" />;
   if (!connected || !networkSupported) {
     return (
       <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="space-y-6">
