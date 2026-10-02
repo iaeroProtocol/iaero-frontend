@@ -109,9 +109,12 @@ export function probeAmount(h: Pick<Holding, 'balanceRaw' | 'decimals' | 'priceU
   const balance = BigInt(h.balanceRaw);
   let raw = balance;
   if (h.priceUsd > 0) {
-    // $100 worth, in base units, computed with 8 decimals of price precision.
-    const capped = (BigInt(PROBE_USD) * 10n ** BigInt(h.decimals) * 10n ** 8n) / BigInt(Math.max(1, Math.round(h.priceUsd * 1e8)));
-    if (capped > 0n && capped < raw) raw = capped;
+    // $100 worth, in base units, with 18 decimals of price precision (a $1e-11 token must not round to $1e-8).
+    const scaled = BigInt(Math.round(h.priceUsd * 1e18));
+    if (scaled > 0n) {
+      const capped = (BigInt(PROBE_USD) * 10n ** BigInt(h.decimals) * 10n ** 18n) / scaled;
+      if (capped > 0n && capped < raw) raw = capped;
+    }
   }
   const s = raw.toString().padStart(h.decimals + 1, '0');
   const int = s.slice(0, s.length - h.decimals) || '0';
@@ -142,6 +145,8 @@ export const MAX_UNPRICED_CANDIDATES = 60;
  * long tail of airdropped spam, most of which nothing prices), largest first, capped.
  */
 export function blockscoutCandidates(json: unknown, exclude: string[] = []): TokenCandidate[] {
+  // `/addresses/{a}/tokens` pages ({ items }, sorted by USD value); the older `/token-balances` is an array.
+  if (json && !Array.isArray(json) && Array.isArray((json as { items?: unknown }).items)) json = (json as { items: unknown[] }).items;
   if (!Array.isArray(json)) return [];
   const priced: TokenCandidate[] = [];
   const unpriced: { c: TokenCandidate; held: number }[] = [];

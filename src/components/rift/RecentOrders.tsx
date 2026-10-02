@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { PHASE_STYLE } from './status';
 import { phaseOf } from '@/lib/rift/timing';
 import { SOURCE_CHAINS } from '@/lib/rift/config';
-import { isTerminal } from '@/lib/rift/validate';
+import { isTerminalStatus, needsAttention, phaseInput } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
 const ago = (ts: number) => {
@@ -32,7 +32,8 @@ interface Props {
 
 export default function RecentOrders({ orders, activeId, onSelect, onClearFinished }: Props) {
   if (!orders.length) return null;
-  const finished = orders.filter(o => isTerminal(o.status)).length;
+  // Frozen and underpaid orders stay: their ID is what Rift support needs.
+  const finished = orders.filter(o => isTerminalStatus(o.status) && !needsAttention(o.status)).length;
   return (
     <Card className="border-slate-700/50 bg-slate-800/50 backdrop-blur-xl">
       <CardHeader className="pb-2">
@@ -47,16 +48,17 @@ export default function RecentOrders({ orders, activeId, onSelect, onClearFinish
       </CardHeader>
       <CardContent className="space-y-2">
         {orders.map(o => {
-          const phase = phaseOf({
-            status: o.status, sourceKind: SOURCE_CHAINS[o.sourceChain].kind,
-            depositSentAt: o.depositTxHash && !o.depositFailed ? o.depositSentAt : undefined,
-            depositConfirmedAt: o.depositConfirmedAt, btcSeenAt: o.btc?.firstSeenAt,
-          });
+          const phase = phaseOf(phaseInput(o, SOURCE_CHAINS[o.sourceChain].kind));
           const style = PHASE_STYLE[phase];
+          const outcome = o.status === 'delivered' ? `${fmt(o.amountOut)} iAERO`
+            : o.status === 'refunded' ? `refunded ${o.amountOut ? `${fmt(o.amountOut)} ` : ''}${o.token.symbol}`
+            : isTerminalStatus(o.status) ? '—'
+            : `~${fmt(o.expectedOut ?? o.estimatedOut)} iAERO`;
           return (
             <button
               key={o.id}
               type="button"
+              aria-pressed={o.id === activeId}
               onClick={() => onSelect(o.id)}
               className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition-colors ${
                 o.id === activeId ? 'border-indigo-500/50 bg-indigo-500/10' : 'border-slate-700/40 bg-slate-900/40 hover:border-slate-500/60'
@@ -64,7 +66,7 @@ export default function RecentOrders({ orders, activeId, onSelect, onClearFinish
             >
               <div className="min-w-0">
                 <div className="truncate text-sm text-white">
-                  {fmt(o.fromAmount)} {o.token.symbol} ({SOURCE_CHAINS[o.sourceChain].name}) → {o.status === 'delivered' ? fmt(o.amountOut) : `~${fmt(o.expectedOut ?? o.estimatedOut)}`} iAERO
+                  {fmt(o.fromAmount)} {o.token.symbol} ({SOURCE_CHAINS[o.sourceChain].name}) → {outcome}
                 </div>
                 <div className="text-xs text-slate-500">{ago(o.createdAt)}</div>
               </div>

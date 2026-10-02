@@ -1,10 +1,11 @@
 // src/lib/rift/prices.ts
 //
-// Market prices for the cost check, in USD.
-//   - iAERO: its price in its main Aerodrome pool on Base, read on-chain every 30 s, times AERO's USD price.
-//     DeFiLlama's iAERO price lags (it was 0.8-1.2% high on 2026-10-02), which made real costs look negative.
-//   - AERO, ETH (for Rift's gas charge) and the token being paid with: DeFiLlama (keyless, allows browser
-//     requests), every minute.
+// Market prices for the cost check, in USD, fetched only while the Get iAERO tab is open.
+// - iAERO: its price in its main Aerodrome pool on Base (read on-chain every 30 s) times AERO's USD price.
+//   DeFiLlama's own iAERO price lags (0.8–1.2% high on 2026-10-02) and is only a last resort.
+// - AERO and ETH (for Rift's gas charge): DeFiLlama, every minute, in one request that does not change when
+//   the user picks another token.
+// - The token being paid with: DeFiLlama, every minute.
 
 'use client';
 
@@ -18,6 +19,7 @@ import { clAeroPerIaero, llamaIdOf, parseLlamaPrices, v2AeroPerIaero } from './c
 const IAERO_ID = `base:${IAERO_ADDRESS.toLowerCase()}`;
 const AERO_ID = 'base:0x940181a94a35a4569e4529a3cdfb74e38fd98631';
 const ETH_ID = 'coingecko:ethereum';
+const BASE_IDS = [AERO_ID, IAERO_ID, ETH_ID];
 
 /** iAERO/AERO on Aerodrome, iAERO as token0: the Slipstream pool (0.05% fee) holds nearly all iAERO
  *  liquidity and is where buys fill; the classic volatile pool (the site's price card, client-prices.ts)
@@ -46,19 +48,24 @@ const V2_ABI = [
   },
 ] as const;
 
-export function useMarketPrices(asset: string | undefined): { iaeroUsd?: number; inputUsd?: number; ethUsd?: number } {
+async function llama(ids: string[], signal?: AbortSignal) {
+  const res = await fetch(`https://coins.llama.fi/prices/current/${ids.join(',')}?searchWidth=4h`, { signal });
+  if (!res.ok) throw new Error(`DeFiLlama HTTP ${res.status}`);
+  return parseLlamaPrices(await res.json(), Date.now());
+}
+
+export function useMarketPrices(asset: string | undefined, enabled = true): { iaeroUsd?: number; inputUsd?: number; ethUsd?: number } {
   const inputId = asset ? llamaIdOf(asset) : null;
-  const { data: llama } = useQuery({
-    queryKey: ['rift-market-prices', inputId],
-    queryFn: async ({ signal }) => {
-      const ids = [...new Set([AERO_ID, IAERO_ID, ETH_ID, ...(inputId ? [inputId] : [])])];
-      const res = await fetch(`https://coins.llama.fi/prices/current/${ids.join(',')}?searchWidth=4h`, { signal });
-      if (!res.ok) throw new Error(`DeFiLlama HTTP ${res.status}`);
-      return parseLlamaPrices(await res.json(), Date.now());
-    },
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-    retry: 1,
+  const { data: core } = useQuery({
+    queryKey: ['rift-market-prices'],
+    queryFn: ({ signal }) => llama(BASE_IDS, signal),
+    enabled, refetchInterval: 60_000, staleTime: 30_000, retry: 1,
+  });
+  const { data: tokenPrices } = useQuery({
+    queryKey: ['rift-token-price', inputId],
+    queryFn: ({ signal }) => llama([inputId!], signal),
+    enabled: enabled && !!inputId && !BASE_IDS.includes(inputId),
+    refetchInterval: 60_000, staleTime: 30_000, retry: 1,
   });
 
   const { data: pools } = useReadContracts({
@@ -69,7 +76,7 @@ export function useMarketPrices(asset: string | undefined): { iaeroUsd?: number;
       { address: IAERO_V2_POOL, abi: V2_ABI, functionName: 'token0', chainId: base.id },
       { address: IAERO_V2_POOL, abi: V2_ABI, functionName: 'getReserves', chainId: base.id },
     ],
-    query: { refetchInterval: 30_000 },
+    query: { enabled, refetchInterval: 30_000 },
   });
 
   const aeroPerIaero = useMemo(() => {
@@ -88,10 +95,10 @@ export function useMarketPrices(asset: string | undefined): { iaeroUsd?: number;
     return undefined;
   }, [pools]);
 
-  const aeroUsd = llama?.[AERO_ID];
+  const aeroUsd = core?.[AERO_ID];
   return {
-    iaeroUsd: aeroPerIaero && aeroUsd ? aeroPerIaero * aeroUsd : llama?.[IAERO_ID],
-    inputUsd: inputId ? llama?.[inputId] : undefined,
-    ethUsd: llama?.[ETH_ID],
+    iaeroUsd: aeroPerIaero && aeroUsd ? aeroPerIaero * aeroUsd : core?.[IAERO_ID],
+    inputUsd: inputId ? (BASE_IDS.includes(inputId) ? core?.[inputId] : tokenPrices?.[inputId]) : undefined,
+    ethUsd: core?.[ETH_ID],
   };
 }

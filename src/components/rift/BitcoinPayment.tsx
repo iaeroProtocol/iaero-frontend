@@ -27,9 +27,9 @@ function CopyButton({ value, label }: { value: string; label: string }) {
   );
 }
 
-interface Props { address: string; amountBtc: string; deadline: string }
+interface Props { address: string; amountBtc: string; /** Send by this time (ms): the order's price is out of date after it. */ sendBy: number }
 
-export default function BitcoinPayment({ address, amountBtc, deadline }: Props) {
+export default function BitcoinPayment({ address, amountBtc, sendBy }: Props) {
   const uri = bip21(address, amountBtc);
   return (
     <div className="space-y-4 rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
@@ -61,7 +61,7 @@ export default function BitcoinPayment({ address, amountBtc, deadline }: Props) 
       <ul className="list-disc space-y-1 pl-5 text-xs text-slate-400">
         <li>Pay from a wallet you control, not an exchange: a refund would go to the refund address you gave.</li>
         <li>This page picks up your payment by itself; you can close it and come back.</li>
-        <li>The address accepts payment until {new Date(deadline).toLocaleString()}.</li>
+        <li>Send by {new Date(sendBy).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}: after that this order’s price is out of date, so start a new one instead.</li>
       </ul>
     </div>
   );

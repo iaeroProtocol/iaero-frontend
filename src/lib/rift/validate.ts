@@ -12,8 +12,18 @@ export const ORDER_STATUSES: readonly RiftOrderStatus[] = [
 export const TERMINAL_STATUSES: readonly RiftOrderStatus[] = ['delivered', 'refunded', 'expired', 'frozen'];
 export const isTerminal = (s: RiftOrderStatus) => TERMINAL_STATUSES.includes(s);
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID_RE.test(v);
+
+/** Source assets this version pays with: native coins, HyperCore spot tokens, ERC-20 contract addresses. */
+export const SOURCE_ASSET_RE = /^(ethereum\.eth|arbitrum\.eth|base\.eth|bitcoin\.btc|hyperliquid\.(hype|usdc|btc|eth)|(ethereum|arbitrum|base)\.0x[0-9a-fA-F]{40})$/;
+export const AMOUNT_RE = /^(?=.*[1-9])\d{1,24}(\.\d{1,18})?$/;
+export const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
+/** Rift writes known tokens by symbol in its "formatted" responses; iAERO is written by address today, and
+ *  would become `base.iaero` if Rift adds it to its list. Both mean iAERO on Base. */
+export const isIaeroOnBase = (asset: string, destination: string) =>
+  asset.toLowerCase() === destination.toLowerCase() || asset.toLowerCase() === 'base.iaero';
 
 const obj = (v: unknown, what: string): Record<string, unknown> => {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(`Rift returned an invalid ${what}`);
@@ -72,7 +82,7 @@ export function parseQuote(json: unknown, expect: QuoteExpectation): RiftQuote {
     delivery: o.delivery && typeof o.delivery === 'object' ? (o.delivery as RiftQuote['delivery']) : undefined,
   };
   if (!isUuid(q.id)) throw new Error('Rift quote id is not a UUID');
-  if (q.to.toLowerCase() !== expect.destination.toLowerCase()) throw new Error('Rift quote does not deliver iAERO');
+  if (!isIaeroOnBase(q.to, expect.destination)) throw new Error('Rift quote does not deliver iAERO');
   if (chainOf(q.from) !== expect.fromChain) throw new Error('Rift quote is for a different source chain');
   if (!sameAmount(q.from_amount, expect.fromAmount)) throw new Error('Rift quote is for a different amount');
   if (!(Number(q.estimated_amount_out) > 0)) throw new Error('Rift quote has no output');
@@ -89,7 +99,11 @@ function parseStatus(o: Record<string, unknown>): RiftOrderStatus {
 export interface OrderExpectation {
   destination: string; quoteId: string; toAddress: string; fromChain: string; fromAmount: string;
   refundAddress?: string;
+  /** A new order: Rift returns an existing order when a quote is presented twice, which must never be paid again. */
+  fresh?: boolean;
 }
+
+const sameAddress = (a: string, b: string) => (/^(0x|bc1)/i.test(a) ? a.toLowerCase() === b.toLowerCase() : a === b);
 
 /** Validates a freshly created order. Funds are only sent after this passes. */
 export function parseOrder(json: unknown, expect: OrderExpectation): RiftOrder {
@@ -105,24 +119,33 @@ export function parseOrder(json: unknown, expect: OrderExpectation): RiftOrder {
   };
   if (!isUuid(order.id)) throw new Error('Rift order id is not a UUID');
   if (order.quote_id !== expect.quoteId) throw new Error('Rift order is for a different quote');
-  if (order.to.toLowerCase() !== expect.destination.toLowerCase()) throw new Error('Rift order does not deliver iAERO');
+  if (!isIaeroOnBase(order.to, expect.destination)) throw new Error('Rift order does not deliver iAERO');
   if (order.to_address.toLowerCase() !== expect.toAddress.toLowerCase()) throw new Error('Rift order delivers to a different wallet');
   if (chainOf(order.from) !== expect.fromChain) throw new Error('Rift order is for a different source chain');
   if (!sameAmount(order.from_amount, expect.fromAmount)) throw new Error('Rift order is for a different amount');
-  if (expect.refundAddress && order.refund_address && order.refund_address.toLowerCase() !== expect.refundAddress.toLowerCase()) {
-    throw new Error('Rift order refunds to a different address');
+  if (expect.refundAddress && (!order.refund_address || !sameAddress(order.refund_address, expect.refundAddress))) {
+    throw new Error('Rift order does not refund to the address you gave');
+  }
+  if (expect.fresh && order.status !== 'awaiting_deposit') {
+    throw new Error('Rift returned an order that is already under way (this quote was used before); nothing was sent');
   }
   if (Number.isNaN(Date.parse(order.deposit_deadline))) throw new Error('Rift order has no valid deposit deadline');
   return order;
 }
 
-export interface OrderUpdate { status: RiftOrderStatus; amountOut: string | null }
+/** `status` is null when Rift reports a status this version does not know (`rawStatus` says which). */
+export interface OrderUpdate { status: RiftOrderStatus | null; rawStatus: string; amountOut: string | null }
 
 /** Validates a status poll for an order we already hold. */
 export function parseOrderUpdate(json: unknown, orderId: string): OrderUpdate {
   const o = obj(json, 'order');
   if (str(o, 'id', 'order') !== orderId) throw new Error('Rift returned a different order');
-  return { status: parseStatus(o), amountOut: typeof o.amount_out === 'string' ? o.amount_out : null };
+  const raw = str(o, 'status', 'order');
+  return {
+    status: ORDER_STATUSES.includes(raw as RiftOrderStatus) ? (raw as RiftOrderStatus) : null,
+    rawStatus: raw,
+    amountOut: typeof o.amount_out === 'string' ? o.amount_out : null,
+  };
 }
 
 /** Whether an address's code makes it a contract wallet. An EIP-7702 delegation (0xef0100 + the delegate's

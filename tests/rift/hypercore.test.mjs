@@ -48,3 +48,21 @@ test("the signed transfer matches Rift's documented example", () => {
   assert.deepEqual(spotSendResult({ status: 'err', response: 'Insufficient balance for token transfer' }),
     { ok: false, error: 'Insufficient balance for token transfer' });
 });
+
+test('portfolio margin: borrowed USDC is not a holding; Hyperliquid caps what can leave', async () => {
+  const { parseSpotBalances, usdcForFee } = await import('../../src/lib/rift/hypercore.ts');
+  // 0x010B…9831 on 2026-10-02 (portfolio margin, USDC borrowed against HYPE and UBTC).
+  const json = {
+    portfolioMarginEnabled: true,
+    balances: [
+      { coin: 'USDC', token: 0, total: '-19.82441338', hold: '-33048.21587637' },
+      { coin: 'HYPE', token: 150, total: '326.26045663', hold: '0.0' },
+      { coin: 'UBTC', token: 197, total: '0.3208182284', hold: '0.0' },
+    ],
+    tokenToAvailableAfterMaintenance: [[0, '45123.29019999'], [150, '300.5'], [197, '0.3208182284']],
+  };
+  const rows = parseSpotBalances(json);
+  assert.deepEqual(rows.map(r => [r.token.symbol, r.availableRaw]), [['HYPE', 30050000000n], ['UBTC', 3208182284n]], 'HYPE capped at what can leave');
+  assert.equal(usdcForFee(json), 45123.29019999, 'the fee can come from margin');
+  assert.equal(usdcForFee({ balances: [{ coin: 'USDC', token: 0, total: '0.5', hold: '0' }] }), 0.5);
+});

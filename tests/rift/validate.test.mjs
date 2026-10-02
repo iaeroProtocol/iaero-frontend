@@ -52,6 +52,8 @@ test('a real quote passes; a quote for another destination, chain or amount is r
   assert.throws(() => parseQuote({ ...quote(), id: 'nope' }, { destination: DEST, fromChain: 'ethereum', fromAmount: '0.1' }), /UUID/);
   // Rift may echo a token by ticker even when it was requested by address: only the chain is compared.
   assert.ok(parseQuote({ ...quote(), from: 'ethereum.usdc' }, { destination: DEST, fromChain: 'ethereum', fromAmount: '0.10' }));
+  // ...and would write iAERO as base.iaero once it is on Rift's token list.
+  assert.ok(parseQuote({ ...quote(), to: 'base.iAERO' }, { destination: DEST, fromChain: 'ethereum', fromAmount: '0.1' }));
 });
 
 test('an order is accepted only if it delivers iAERO to this wallet, for this quote and amount', () => {
@@ -65,16 +67,24 @@ test('an order is accepted only if it delivers iAERO to this wallet, for this qu
     [{ quote_id: '01a0fb0a-3f25-76e1-bc30-000000000000' }, /different quote/],
     [{ from_amount: '1' }, /different amount/],
     [{ from: 'arbitrum.eth' }, /different source chain/],
-    [{ refund_address: '0x3333333333333333333333333333333333333333' }, /refunds to a different address/],
+    [{ refund_address: '0x3333333333333333333333333333333333333333' }, /does not refund to the address you gave/],
+    [{ refund_address: null }, /does not refund to the address you gave/, 'a refund address that was sent must come back'],
     [{ status: 'teleported' }, /unknown Rift order status/],
     [{ deposit_deadline: 'soon' }, /deposit deadline/],
     [{ id: 'x' }, /UUID/],
   ];
   for (const [patch, re] of refused) assert.throws(() => parseOrder(order(patch), expectOrder), re, JSON.stringify(patch));
+  // A quote presented twice returns the first order: a new order must still be waiting for its deposit.
+  assert.throws(() => parseOrder(order({ status: 'funded' }), { ...expectOrder, fresh: true }), /already under way/);
+  assert.ok(parseOrder(order(), { ...expectOrder, fresh: true }));
+  // Bitcoin refund addresses: bech32 compares case-insensitively.
+  const btc = 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq';
+  assert.ok(parseOrder(order({ refund_address: `bitcoin.${btc}` }), { ...expectOrder, refundAddress: btc.toUpperCase() }));
 });
 
-test('status polls must be for the same order and a known status', () => {
-  assert.deepEqual(parseOrderUpdate(order({ status: 'delivered', amount_out: '461.1' }), ORDER_ID), { status: 'delivered', amountOut: '461.1' });
+test('status polls must be for the same order; an unknown status is reported, not fatal', () => {
+  assert.deepEqual(parseOrderUpdate(order({ status: 'delivered', amount_out: '461.1' }), ORDER_ID), { status: 'delivered', rawStatus: 'delivered', amountOut: '461.1' });
+  assert.deepEqual(parseOrderUpdate(order({ status: 'settling' }), ORDER_ID), { status: null, rawStatus: 'settling', amountOut: null });
   assert.throws(() => parseOrderUpdate(order(), '01a0e938-96a9-7d92-a5cb-000000000000'), /different order/);
   assert.equal(stripChainPrefix('bitcoin.bc1qxyz'), 'bc1qxyz');
   assert.equal(stripChainPrefix('0xabc'), '0xabc');

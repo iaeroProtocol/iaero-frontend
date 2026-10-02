@@ -50,20 +50,51 @@ function decimalToUnits(value: string, decimals: number): bigint | null {
 
 const unitsToNumber = (units: bigint, decimals: number) => Number(units) / 10 ** decimals;
 
-/** Spendable spot balances (total minus what open orders hold) of the tokens Rift routes, in base units. */
+/** What Hyperliquid says can leave the account per token index (portfolio-margin accounts), if it says. */
+function availableAfterMaintenance(json: unknown): Map<number, string> | null {
+  const list = (json as { tokenToAvailableAfterMaintenance?: unknown } | null)?.tokenToAvailableAfterMaintenance;
+  if (!Array.isArray(list)) return null;
+  const m = new Map<number, string>();
+  for (const e of list) if (Array.isArray(e) && typeof e[0] === 'number' && typeof e[1] === 'string') m.set(e[0], e[1]);
+  return m;
+}
+
+/**
+ * Spendable spot balances of the tokens Rift routes, in base units: what the account owns (total minus
+ * what open orders hold), and, for portfolio-margin accounts, no more than Hyperliquid says can leave it
+ * after maintenance margin. A borrowed (negative) balance is not a holding.
+ */
 export function parseSpotBalances(json: unknown): { token: HyperCoreToken; availableRaw: bigint }[] {
   const balances = (json as { balances?: unknown } | null)?.balances;
   if (!Array.isArray(balances)) return [];
+  const limits = availableAfterMaintenance(json);
   const out: { token: HyperCoreToken; availableRaw: bigint }[] = [];
   for (const b of balances as { coin?: unknown; token?: unknown; total?: unknown; hold?: unknown }[]) {
     const token = HYPERCORE_TOKENS.find(t => t.index === b?.token && t.symbol === b?.coin);
     if (!token) continue;
     const total = decimalToUnits(String(b.total ?? ''), token.decimals);
-    const hold = decimalToUnits(String(b.hold ?? '0'), token.decimals) ?? 0n;
+    const hold = decimalToUnits(String(b.hold ?? '0'), token.decimals) ?? 0n; // negative under portfolio margin: no match, 0
     if (total === null || total <= hold) continue;
-    out.push({ token, availableRaw: total - hold });
+    let available = total - hold;
+    const limit = limits?.get(token.index);
+    if (limit !== undefined) {
+      const cap = decimalToUnits(limit, token.decimals);
+      if (cap !== null && cap < available) available = cap;
+    }
+    if (available > 0n) out.push({ token, availableRaw: available });
   }
   return out;
+}
+
+/**
+ * USDC available for Hyperliquid's 1 USDC new-address fee: under portfolio margin, what Hyperliquid says
+ * can leave the account (it may be borrowed against collateral); otherwise the spendable spot USDC.
+ */
+export function usdcForFee(json: unknown): number {
+  const limit = availableAfterMaintenance(json)?.get(0);
+  if (limit !== undefined && Number(limit) > 0) return Number(limit);
+  const usdc = parseSpotBalances(json).find(b => b.token.symbol === 'USDC');
+  return usdc ? Number(usdc.availableRaw) / 10 ** usdc.token.decimals : 0;
 }
 
 /** HyperCore balances as picker holdings, priced from a DeFiLlama /prices/current response. */

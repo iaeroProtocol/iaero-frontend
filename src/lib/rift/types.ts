@@ -79,21 +79,46 @@ export interface StoredOrder {
   depositDeadline: string;
   toAddress: string;
   refundAddress?: string | null;
-  /** EVM payment from this app (a HyperCore transfer has no hash: depositSentAt alone marks it). */
+
+  // --- Paying (EVM and HyperCore, from this app) ---
+  /** Set just before the wallet (or Hyperliquid) is asked: if no result follows, the outcome is unknown. */
+  payRequestedAt?: number;
+  /** The last attempt may or may not have sent money (lost response, page closed mid-prompt). */
+  payUnknown?: boolean;
+  /** EVM payment hash (a HyperCore transfer has none: depositSentAt alone marks it). */
   depositTxHash?: string;
   depositSentAt?: number;
   depositConfirmedAt?: number;
+  /** The payment reverted, or was cancelled or replaced in the wallet: nothing was sent. */
   depositFailed?: boolean;
-  /** Bitcoin payment, observed on mempool.space. */
-  btc?: { txid?: string; confirmations?: number; firstSeenAt?: number };
+  depositFailReason?: 'reverted' | 'cancelled' | 'replaced';
+  /** Base units that actually reached the deposit address, when less than ordered (fee-on-transfer tokens). */
+  depositReceivedRaw?: string;
+  /** Bitcoin payments to the deposit address, observed on mempool.space. */
+  btc?: { txid?: string; confirmations?: number; firstSeenAt?: number; totalSats?: string; payments?: number };
+
+  // --- Rift's status ---
   status: RiftOrderStatus;
   /** First time this browser saw each status. */
   statusTimes: Partial<Record<RiftOrderStatus, number>>;
+  /** Statuses first seen after a gap of minutes: their time is when the page noticed, not when it happened. */
+  statusLate?: Partial<Record<RiftOrderStatus, boolean>>;
+  lastPolledAt?: number;
+  /** A status this app does not know yet, as Rift wrote it. */
+  rawStatus?: string;
+  /** The order's terminal status this browser has already notified about. */
+  notifiedStatus?: RiftOrderStatus;
+  /** Delivered: iAERO amount; refunded: the refunded amount of the paid token. */
   amountOut?: string | null;
   deliveryTxHash?: string;
-  /** Base block at order creation: where the delivery scan starts. */
+  /** Block time of the delivery (ms), for an accurate duration. */
+  deliveredAtChain?: number;
+  /** Base block at order creation: where the delivery scan starts; and how far it has scanned. */
   baseFromBlock?: string;
+  deliveryScannedTo?: string;
   notify?: boolean;
+
+  // --- Prices when ordered ---
   /** USD value of the payment and iAERO's pool price when the order was made, for the all-in cost once
    *  delivered. (The first orders stored DeFiLlama's lagging iAERO price as usdIn/iaeroUsd; those fields
    *  are ignored, so those orders show no all-in cost.) */

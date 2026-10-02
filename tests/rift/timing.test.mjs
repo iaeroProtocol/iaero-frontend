@@ -84,3 +84,25 @@ test('bitcoin orders wait for the payment to be seen, then confirm', () => {
   assert.equal(phaseOf({ status: 'funded', sourceKind: 'bitcoin', btcSeenAt: 1 }), 'executing');
   assert.equal(phaseOf({ status: 'underfunded', sourceKind: 'evm' }), 'underfunded');
 });
+
+test('a long step says "usually done by now, up to N more", and nothing goes negative', async () => {
+  const { computeProgress, estimateRoute } = await import('../../src/lib/rift/timing.ts');
+  const DEST = 'base.0x81034fb34009115f215f5d5f564aac9ffa46a1dc';
+  // Arbitrum token -> USDC -> Across -> iAERO, as on 2026-10-02.
+  const est = estimateRoute('arbitrum', [
+    { venue: 'nordstern', from: 'arbitrum.0xb688', to: 'arbitrum.usdc' },
+    { venue: 'across', from: 'arbitrum.usdc', to: 'base.usdc' },
+    { venue: 'nordstern', from: 'base.usdc', to: DEST },
+  ], {});
+  const t0 = 1_790_930_000_000;
+  const base = { status: 'executing', sourceKind: 'evm', createdAt: t0, depositSentAt: t0, depositConfirmedAt: t0 + 5000, fundedAt: t0 + 10_000, estimate: est };
+  const early = computeProgress({ ...base, now: t0 + 15_000 });
+  assert.equal(early.overrun, false);
+  assert.equal(early.slow, false);
+  const late = computeProgress({ ...base, now: t0 + 10_000 + 200_000 });
+  assert.equal(late.overrun, true, 'past the usual time of every hop');
+  assert.ok(late.upToSec > 0 && late.upToSec < est.slowSec, String(late.upToSec));
+  assert.equal(late.slow, true, 'the last hop is past its own slow threshold before the whole route is');
+  const skewed = computeProgress({ ...base, depositSentAt: t0 + 60_000, now: t0, status: 'awaiting_deposit', depositConfirmedAt: undefined, fundedAt: undefined });
+  assert.ok(skewed.elapsedSec >= 0 && skewed.fraction >= 0, 'a clock behind the saved times');
+});

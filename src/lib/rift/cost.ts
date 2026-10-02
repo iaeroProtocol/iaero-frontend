@@ -23,6 +23,30 @@ export function costVsMarketPct(inputUsd: number, outputUsd: number): number | n
 
 export const costLevel = (pct: number): CostLevel => (pct >= COST_HIGH_PCT ? 'high' : pct >= COST_MEDIUM_PCT ? 'medium' : 'low');
 
+/** Below this the "cost" says the market prices disagree with Rift's quote, not that the route is better. */
+export const COST_DISAGREE_PCT = -2;
+
+export type CostCheck =
+  | { kind: 'ok'; pct: number; level: CostLevel }
+  | { kind: 'unknown' }        // no market price to compare with
+  | { kind: 'disagree'; pct: number }; // market prices and the quote are too far apart to trust either
+
+/**
+ * The cost to show, and whether it needs the user's confirmation. An expected output of zero or less (the
+ * gas charge exceeds the order) is a 100% cost; an unknown cost or prices that disagree also need a tick,
+ * since then there is nothing to warn with.
+ */
+export function assessCost(usdIn: number | null, usdOut: number | null): CostCheck {
+  if (usdIn === null || !(usdIn > 0) || usdOut === null || !Number.isFinite(usdOut)) return { kind: 'unknown' };
+  if (usdOut <= 0) return { kind: 'ok', pct: 100, level: 'high' };
+  const pct = (1 - usdOut / usdIn) * 100;
+  if (pct < COST_DISAGREE_PCT) return { kind: 'disagree', pct };
+  return { kind: 'ok', pct, level: costLevel(pct) };
+}
+
+/** Whether Buy needs the confirmation tick for this cost. */
+export const costNeedsTick = (c: CostCheck) => c.kind !== 'ok' || c.level === 'high';
+
 /** How much worse (in %) a fresh quote is than the one shown; negative when it improved. */
 export function priceDropPct(shownOut: string, freshOut: string): number {
   const shown = Number(shownOut), fresh = Number(freshOut);

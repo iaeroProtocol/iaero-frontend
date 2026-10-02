@@ -173,6 +173,10 @@ export interface Progress {
   expectedDoneAt?: number;
   /** True once the current phase has run past its "slow" threshold. */
   slow: boolean;
+  /** The step in progress has run past its usual time: "usually done by now". */
+  overrun?: boolean;
+  /** Worst case still to go (seconds), from each remaining step's "slow" threshold. */
+  upToSec?: number;
 }
 
 export function phaseOf(p: Pick<ProgressInput, 'status' | 'sourceKind' | 'depositSentAt' | 'depositConfirmedAt' | 'btcSeenAt'>): Phase {
@@ -192,8 +196,12 @@ export function computeProgress(p: ProgressInput): Progress {
   const phase = phaseOf(p);
   const steps = est.steps, last = steps.length - 1;
   const started = p.depositSentAt ?? p.btcSeenAt ?? p.fundedAt;
-  const elapsedSec = started ? ((p.finishedAt ?? now) - started) / 1000 : 0;
+  // Clocks can be adjusted and saved times can come from another tab: never negative.
+  const elapsedSec = started ? Math.max(0, ((p.finishedAt ?? now) - started) / 1000) : 0;
   const total = Math.max(1, est.typicalSec);
+  const clamp = (f: number) => Math.min(Math.max(f, 0), 0.97);
+  const slowAfter = (from: number) => steps.slice(from).reduce((n, s) => n + s.slowSec, 0);
+  const typicalAfter = (from: number) => steps.slice(from).reduce((n, s) => n + s.typicalSec, 0);
 
   if (phase === 'delivered') return { phase, activeIndex: steps.length, fraction: 1, elapsedSec, remainingSec: 0, slow: false };
   if (phase === 'refunded' || phase === 'expired' || phase === 'frozen' || phase === 'underfunded') {
@@ -202,17 +210,19 @@ export function computeProgress(p: ProgressInput): Progress {
   if (phase === 'pay') return { phase, activeIndex: 0, fraction: 0, elapsedSec: 0, remainingSec: est.typicalSec, slow: false };
 
   if (phase === 'confirming' || phase === 'detecting') {
-    const inStep = started ? (now - started) / 1000 : 0;
+    const inStep = started ? Math.max(0, (now - started) / 1000) : 0;
     const dep = steps[0];
-    const remainingSec = Math.max(0, dep.typicalSec - inStep) + est.typicalSec - dep.typicalSec;
+    const remainingSec = Math.max(0, dep.typicalSec - inStep) + typicalAfter(1);
     return {
       phase, activeIndex: 0, elapsedSec,
-      fraction: (Math.min(inStep / dep.typicalSec, 0.9) * dep.typicalSec) / total,
+      fraction: clamp((Math.min(inStep / dep.typicalSec, 0.9) * dep.typicalSec) / total),
       remainingSec, expectedDoneAt: now + remainingSec * 1000, slow: inStep > dep.slowSec,
+      overrun: inStep > dep.typicalSec, upToSec: Math.max(0, dep.slowSec - inStep) + slowAfter(1),
     };
   }
 
-  // executing: Rift does not say which hop is running, so the active step follows the clock.
+  // executing: Rift does not say which hop is running, so the active step follows the clock; time past
+  // every hop's usual duration is put on the last hop.
   const fundedAt = p.fundedAt ?? now;
   const t = Math.max(0, (now - fundedAt) / 1000);
   let acc = 0, activeIndex = last - 1 >= 1 ? last - 1 : last, inStep = 0;
@@ -224,11 +234,14 @@ export function computeProgress(p: ProgressInput): Progress {
   const doneBefore = steps.slice(0, activeIndex).reduce((n, s) => n + s.typicalSec, 0);
   const active = steps[activeIndex];
   const within = Math.min(inStep / Math.max(1, active.typicalSec), 0.95);
-  const remainingSec = Math.max(0, active.typicalSec - inStep) + steps.slice(activeIndex + 1).reduce((n, s) => n + s.typicalSec, 0);
-  const routeSlow = steps.slice(1).reduce((n, s) => n + s.slowSec, 0);
+  const remainingSec = Math.max(0, active.typicalSec - inStep) + typicalAfter(activeIndex + 1);
   return {
     phase, activeIndex, elapsedSec,
-    fraction: Math.min((doneBefore + within * active.typicalSec) / total, 0.97),
-    remainingSec, expectedDoneAt: now + remainingSec * 1000, slow: t > routeSlow,
+    fraction: clamp((doneBefore + within * active.typicalSec) / total),
+    remainingSec, expectedDoneAt: now + remainingSec * 1000,
+    // Slow once the step in progress, or the route as a whole, is past its slow threshold.
+    slow: inStep > active.slowSec || t > slowAfter(1),
+    overrun: inStep > active.typicalSec,
+    upToSec: Math.max(0, active.slowSec - inStep) + slowAfter(activeIndex + 1),
   };
 }

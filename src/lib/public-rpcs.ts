@@ -12,7 +12,8 @@ export const ALCHEMY_SUBDOMAIN = { 1: 'eth-mainnet', 42161: 'arb-mainnet', 8453:
 export const PUBLIC_RPCS = {
   1: ['https://ethereum-rpc.publicnode.com', 'https://eth.drpc.org'],
   42161: ['https://arb1.arbitrum.io/rpc', 'https://arbitrum-one-rpc.publicnode.com'],
-  8453: ['https://mainnet.base.org', 'https://base-rpc.publicnode.com', 'https://base.drpc.org'],
+  // mainnet.base.org last: it rate-limits a busy page first.
+  8453: ['https://base-rpc.publicnode.com', 'https://base.drpc.org', 'https://mainnet.base.org'],
 } as const;
 
 export type RpcChainId = keyof typeof PUBLIC_RPCS;

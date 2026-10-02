@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import dynamic from 'next/dynamic';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
  Lock, Zap, Gift, Shield, Sparkles, TrendingUp, Coins, Banknote, Vault,
@@ -16,7 +17,9 @@ import StakeSection from '@/components/protocol/StakeSection';
 import LiqStaking from '@/components/protocol/LiqStaking';
 import RewardsSection from '@/components/protocol/RewardsSection';
 import AutoVaultSection from '@/components/protocol/AutoVaultSection';
-import GetIaeroSection from '@/components/protocol/GetIaeroSection';
+import RiftErrorBoundary from '@/components/rift/RiftErrorBoundary';
+import { WrongNetworkBanner } from '@/components/SwitchToBase';
+import { useWalletOnProtocolChain } from '@/lib/protocol-chain';
 import ToastNotification from '@/components/protocol/ToastNotification';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -37,6 +40,13 @@ const XIcon = ({ className }: { className?: string }) => (
   </svg>
 );
 
+// Get iAERO renders in the browser only: it reads the wallet and saved orders, and its code (including the
+// Bitcoin QR library) stays out of the first page load.
+const GetIaeroSection = dynamic(() => import('@/components/protocol/GetIaeroSection'), {
+  ssr: false,
+  loading: () => <div className="h-40 animate-pulse rounded-xl bg-slate-800/40" />,
+});
+
 // Utility function
 const formatNumber = (num: string | number) => {
  const n = typeof num === 'string' ? parseFloat(num) : num;
@@ -52,9 +62,13 @@ export default function IaeroProtocolApp() {
  const [toasts, setToasts] = useState<Array<{ id: number; message: string; type: 'success' | 'error' | 'info' | 'warning' }>>([]);
  const { stats, loading } = useProtocol() as any;
  const [tab, setTab] = useState('lock');
+ const onProtocolChain = useWalletOnProtocolChain();
  const goToGetIaero = () => {
    setTab('get-iaero');
-   requestAnimationFrame(() => document.getElementById('protocol-tabs')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+   requestAnimationFrame(() => {
+     document.getElementById('protocol-tabs')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+     document.getElementById('tab-get-iaero')?.focus({ preventScroll: true });
+   });
  };
 
  let toastCounter = 0;
@@ -79,8 +93,9 @@ export default function IaeroProtocolApp() {
      {/* Header */}
      <header className="relative z-10 border-b border-slate-800/50 backdrop-blur-xl bg-slate-900/50">
        <div className="w-full px-4 sm:px-6 lg:px-8 xl:px-12 2xl:px-16 py-4">
-         <div className="flex items-center justify-between">
-           <div className="flex items-center space-x-8">
+         {/* Wraps on narrow phones: a connected wallet's name button does not fit beside the logo at 360 px. */}
+         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+           <div className="flex min-w-0 items-center space-x-8">
             <div className="flex items-center space-x-3">
               <div className="w-12 h-12 flex-shrink-0">
                 <Image 
@@ -231,7 +246,7 @@ export default function IaeroProtocolApp() {
          <div className="hidden lg:block" />
          
          {/* Buy iAERO - under veAERO Owned card: opens the Get iAERO tab (any token, any supported chain) */}
-         <div className="flex justify-center">
+         <div className="flex flex-col items-center gap-1">
            <button
              type="button"
              onClick={goToGetIaero}
@@ -240,6 +255,12 @@ export default function IaeroProtocolApp() {
              <Coins className="w-4 h-4" />
              Buy iAERO
            </button>
+           <a
+             href="https://aero.drome.eth.limo/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x81034fb34009115f215f5d5f564aac9ffa46a1dc&chain0=8453&chain1=8453"
+             target="_blank" rel="noopener noreferrer" className="text-xs text-slate-400 hover:text-white"
+           >
+             or swap on Aerodrome
+           </a>
          </div>
          
          {/* Buy LIQ - under iAERO Price card */}
@@ -259,12 +280,15 @@ export default function IaeroProtocolApp() {
          <div className="hidden lg:block" />
        </motion.div>
 
+       {/* While a connected wallet is off Base (e.g. after paying for a Get iAERO order from Arbitrum) */}
+       {!onProtocolChain && tab !== 'get-iaero' && <WrongNetworkBanner />}
+
        {/* Main Protocol Interface */}
        <Card id="protocol-tabs" className="scroll-mt-4 bg-slate-800/50 backdrop-blur-xl border-slate-700/50 w-full max-w-7xl mx-auto">
          <CardContent className="p-8">
            <Tabs value={tab} onValueChange={setTab} className="w-full">
            <TabsList className="flex flex-wrap w-full mb-8 gap-1">
-            <TabsTrigger value="get-iaero" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
+            <TabsTrigger id="tab-get-iaero" value="get-iaero" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
               <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
                 <ArrowLeftRight className="w-4 h-4 mb-0.5 md:mb-0" />
                 <span>Get iAERO</span>
@@ -304,7 +328,9 @@ export default function IaeroProtocolApp() {
 
              {/* Kept mounted (hidden when inactive) so order tracking and its notifications carry on in other tabs. */}
              <TabsContent value="get-iaero" forceMount className="data-[state=inactive]:hidden">
-               <GetIaeroSection showToast={showToast} formatNumber={formatNumber} onGoToStake={() => setTab('stake')} />
+               <RiftErrorBoundary>
+                 <GetIaeroSection active={tab === 'get-iaero'} showToast={showToast} onGoToStake={() => setTab('stake')} />
+               </RiftErrorBoundary>
              </TabsContent>
 
              <TabsContent value="lock">

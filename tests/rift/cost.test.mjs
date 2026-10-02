@@ -93,3 +93,18 @@ test('HyperCore assets price by CoinGecko id', async () => {
   assert.equal(llamaIdOf('hyperliquid.usdc'), 'coingecko:usd-coin');
   assert.equal(llamaIdOf('hyperliquid.purr'), null);
 });
+
+test('cost check: zero output, unknown and disagreeing prices all need a tick', async () => {
+  const { assessCost, costNeedsTick } = await import('../../src/lib/rift/cost.ts');
+  assert.deepEqual(assessCost(100, 99.5), { kind: 'ok', pct: 0.5000000000000004, level: 'low' });
+  assert.equal(costNeedsTick(assessCost(100, 99.5)), false);
+  assert.equal(costNeedsTick(assessCost(100, 96)), true, 'high');
+  assert.deepEqual(assessCost(40, 0), { kind: 'ok', pct: 100, level: 'high' }, 'the gas charge ate the whole order');
+  assert.deepEqual(assessCost(40, -3), { kind: 'ok', pct: 100, level: 'high' });
+  assert.equal(assessCost(null, 10).kind, 'unknown');
+  assert.equal(assessCost(10, null).kind, 'unknown');
+  assert.equal(costNeedsTick(assessCost(null, 10)), true, 'no price to warn with');
+  assert.equal(assessCost(100, 125).kind, 'disagree', 'a 25% "gain" means a price is wrong');
+  assert.equal(costNeedsTick(assessCost(100, 125)), true);
+  assert.equal(assessCost(100, 101).kind, 'ok', 'within noise');
+});

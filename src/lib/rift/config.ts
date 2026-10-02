@@ -15,6 +15,8 @@ export const RIFT_DESTINATION = `base.${IAERO_ADDRESS.toLowerCase()}`;
 export const RIFT_INTEGRATOR_ID = 'iaero';
 export const RIFT_DOCS_URL = 'https://www.rift.trade/docs';
 export const RIFT_SECURITY_URL = 'https://www.rift.trade/docs/security-model';
+/** Where to go about a frozen or underpaid order (Rift publishes no support address; its site and FAQ). */
+export const RIFT_SUPPORT_URL = 'https://www.rift.trade/docs/faq';
 
 export interface SourceChainConfig {
   key: SourceChainKey;

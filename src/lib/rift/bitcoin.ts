@@ -1,13 +1,83 @@
 // src/lib/rift/bitcoin.ts
 //
-// Bitcoin payments: address checks, a BIP21 payment link, and progress from mempool.space (which allows
-// browser requests), so the user sees their payment and its confirmations before Rift reports it.
+// Bitcoin payments: address checks with real checksums (a typo in a refund address must not pass), a BIP21
+// payment link, and payments to an address from mempool.space (which allows browser requests), so the user
+// sees their payment, its confirmations and whether the amount matches before Rift reports it.
 
-const BTC_ADDRESS_RE = /^(bc1[02-9ac-hj-np-z]{8,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/;
-export const isBtcAddress = (a: string) => BTC_ADDRESS_RE.test(a.trim());
+import { sha256 } from 'viem';
+
+// --- Addresses: bech32 / bech32m (BIP-173, BIP-350) and base58check (P2PKH "1…", P2SH "3…") ---
+
+const BECH32 = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+
+function polymod(values: number[]): number {
+  let chk = 1;
+  for (const v of values) {
+    const top = chk >>> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ v;
+    for (let i = 0; i < 5; i++) if ((top >>> i) & 1) chk ^= GEN[i];
+  }
+  return chk >>> 0;
+}
+
+function convertBits(data: number[], from: number, to: number): number[] | null {
+  let acc = 0, bits = 0;
+  const out: number[] = [], max = (1 << to) - 1;
+  for (const v of data) {
+    acc = (acc << from) | v;
+    bits += from;
+    while (bits >= to) { bits -= to; out.push((acc >>> bits) & max); }
+  }
+  if (bits >= from || ((acc << (to - bits)) & max)) return null;
+  return out;
+}
+
+function isSegwitAddress(address: string): boolean {
+  if (address !== address.toLowerCase() && address !== address.toUpperCase()) return false;
+  const s = address.toLowerCase();
+  const sep = s.lastIndexOf('1');
+  if (sep < 1 || sep + 7 > s.length || s.length > 90 || s.slice(0, sep) !== 'bc') return false;
+  const data: number[] = [];
+  for (const c of s.slice(sep + 1)) { const d = BECH32.indexOf(c); if (d < 0) return false; data.push(d); }
+  const hrp = [...'bc'].map(c => c.charCodeAt(0));
+  const chk = polymod([...hrp.map(c => c >> 5), 0, ...hrp.map(c => c & 31), ...data]);
+  const payload = data.slice(0, -6);
+  if (!payload.length) return false;
+  const version = payload[0];
+  if (version > 16 || chk !== (version === 0 ? 1 : 0x2bc830a3)) return false;
+  const program = convertBits(payload.slice(1), 5, 8);
+  if (!program || program.length < 2 || program.length > 40) return false;
+  return version !== 0 || program.length === 20 || program.length === 32;
+}
+
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+function isBase58Address(address: string): boolean {
+  let n = 0n;
+  for (const c of address) { const i = BASE58.indexOf(c); if (i < 0) return false; n = n * 58n + BigInt(i); }
+  const bytes: number[] = [];
+  while (n > 0n) { bytes.unshift(Number(n % 256n)); n /= 256n; }
+  for (const c of address) { if (c !== '1') break; bytes.unshift(0); }
+  if (bytes.length !== 25 || (bytes[0] !== 0x00 && bytes[0] !== 0x05)) return false;
+  const check = sha256(sha256(Uint8Array.from(bytes.slice(0, 21)), 'bytes'), 'bytes');
+  return check.slice(0, 4).every((b, i) => b === bytes[21 + i]);
+}
+
+/** A valid mainnet Bitcoin address, checksum included. */
+export function isBtcAddress(address: string): boolean {
+  const a = address.trim();
+  if (/^[13]/.test(a)) return a.length >= 26 && a.length <= 35 && isBase58Address(a);
+  return /^bc1/i.test(a) && isSegwitAddress(a);
+}
+
+/** The form to send on: bech32 addresses lowercased (uppercase is valid but some services reject it). */
+export const normalizeBtcAddress = (address: string) => (/^bc1/i.test(address.trim()) ? address.trim().toLowerCase() : address.trim());
 
 /** `bitcoin:<address>?amount=<btc>`: most wallets pre-fill both from a QR code or a tap. */
 export const bip21 = (address: string, amountBtc: string) => `bitcoin:${address}?amount=${amountBtc}`;
+
+// --- Payments to an address, from mempool.space ---
 
 const MEMPOOL = 'https://mempool.space/api';
 
@@ -17,22 +87,32 @@ interface MempoolTx {
   vout: { scriptpubkey_address?: string; value: number }[];
 }
 
-export interface BtcDeposit { txid: string; confirmations: number; sats: bigint }
+export interface BtcPayment { txid: string; sats: bigint; confirmations: number }
+export interface BtcDeposits { payments: BtcPayment[]; totalSats: bigint }
 
-/** The first transaction paying `address`, with its confirmation count, or null if none yet. */
-export async function findBtcDeposit(address: string, signal?: AbortSignal): Promise<BtcDeposit | null> {
-  const res = await fetch(`${MEMPOOL}/address/${address}/txs`, { signal, cache: 'no-store' });
+/** Every transaction paying `address` (oldest first) with its confirmations, and their total. */
+export async function findBtcDeposits(address: string, signal?: AbortSignal): Promise<BtcDeposits> {
+  const res = await fetch(`${MEMPOOL}/address/${address}/txs`, { signal });
   if (!res.ok) throw new Error(`mempool.space ${res.status}`);
   const txs = (await res.json()) as MempoolTx[];
   const paying = txs
     .map(tx => ({ tx, sats: tx.vout.filter(o => o.scriptpubkey_address === address).reduce((n, o) => n + BigInt(o.value), 0n) }))
-    .filter(x => x.sats > 0n);
-  if (!paying.length) return null;
-  const { tx, sats } = paying[paying.length - 1];
-  let confirmations = 0;
-  if (tx.status.confirmed && tx.status.block_height) {
-    const tip = await fetch(`${MEMPOOL}/blocks/tip/height`, { signal, cache: 'no-store' });
-    if (tip.ok) confirmations = Math.max(1, Number(await tip.text()) - tx.status.block_height + 1);
+    .filter(x => x.sats > 0n)
+    .reverse();
+  let tip = 0;
+  if (paying.some(p => p.tx.status.confirmed)) {
+    const r = await fetch(`${MEMPOOL}/blocks/tip/height`, { signal });
+    if (r.ok) tip = Number(await r.text()) || 0;
   }
-  return { txid: tx.txid, confirmations, sats };
+  const payments = paying.map(({ tx, sats }) => ({
+    txid: tx.txid, sats,
+    confirmations: tx.status.confirmed && tx.status.block_height && tip ? Math.max(1, tip - tx.status.block_height + 1) : 0,
+  }));
+  return { payments, totalSats: payments.reduce((n, p) => n + p.sats, 0n) };
+}
+
+/** "0.00012345" BTC -> satoshis. */
+export function btcToSats(btc: string): bigint {
+  const [int, frac = ''] = btc.trim().split('.');
+  return BigInt(int || '0') * 100_000_000n + BigInt((frac + '00000000').slice(0, 8) || '0');
 }
