@@ -73,7 +73,7 @@ const DECIMALS = [{ type: 'function', name: 'decimals', stateMutability: 'view',
 async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: TokenCandidate[]) {
   const client = createPublicClient({
     chain: VIEM_CHAINS[chainId],
-    transport: fallback(rpcUrls(chainId).map(url => http(url, { timeout: RPC_TIMEOUT_MS, retryCount: 0 })), { retryCount: 0 }),
+    transport: fallback(rpcUrls(chainId, { server: true }).map(url => http(url, { timeout: RPC_TIMEOUT_MS, retryCount: 0 })), { retryCount: 0 }),
   });
   const unlisted = tokens.filter(t => !MAJOR.has(`${chainKey(chainId)}.${t.address}`));
   const contracts = [

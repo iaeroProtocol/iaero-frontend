@@ -18,8 +18,13 @@ export const PUBLIC_RPCS = {
 
 export type RpcChainId = keyof typeof PUBLIC_RPCS;
 
-/** Alchemy (when configured) then the public endpoints, in order. */
-export const rpcUrls = (chainId: RpcChainId): string[] => [
-  ...(ALCHEMY_KEY ? [`https://${ALCHEMY_SUBDOMAIN[chainId]}.g.alchemy.com/v2/${ALCHEMY_KEY}`] : []),
-  ...PUBLIC_RPCS[chainId],
-];
+/**
+ * Alchemy (when configured) then the public endpoints, in order. The browser key only answers requests from
+ * the site's own origin (the Alchemy app has a domain allowlist), so server code passes `server: true` and
+ * uses ALCHEMY_SERVER_KEY (a separate key without the allowlist, never sent to browsers) when it is set,
+ * else the public endpoints alone.
+ */
+export const rpcUrls = (chainId: RpcChainId, opts: { server?: boolean } = {}): string[] => {
+  const key = opts.server ? process.env.ALCHEMY_SERVER_KEY || '' : ALCHEMY_KEY;
+  return [...(key ? [`https://${ALCHEMY_SUBDOMAIN[chainId]}.g.alchemy.com/v2/${key}`] : []), ...PUBLIC_RPCS[chainId]];
+};
