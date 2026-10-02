@@ -18,7 +18,7 @@ import LiqStaking from '@/components/protocol/LiqStaking';
 import RewardsSection from '@/components/protocol/RewardsSection';
 import AutoVaultSection from '@/components/protocol/AutoVaultSection';
 import RiftErrorBoundary from '@/components/rift/RiftErrorBoundary';
-import OrderWatcher from '@/components/rift/OrderWatcher';
+import { ORDERS_KEY } from '@/lib/rift/keys';
 import { WrongNetworkBanner } from '@/components/SwitchToBase';
 import { useWalletOnProtocolChain } from '@/lib/protocol-chain';
 import ToastNotification from '@/components/protocol/ToastNotification';
@@ -48,6 +48,8 @@ const GetIaeroSection = dynamic(() => import('@/components/protocol/GetIaeroSect
   ssr: false,
   loading: () => <div className="h-40 animate-pulse rounded-xl bg-slate-800/40" />,
 });
+// Loaded only in a browser that has orders, or once Get iAERO is opened.
+const OrderWatcher = dynamic(() => import('@/components/rift/OrderWatcher'), { ssr: false });
 
 // Utility function
 const formatNumber = (num: string | number) => {
@@ -85,13 +87,17 @@ export default function IaeroProtocolApp() {
  // Get iAERO is loaded when first opened, then kept mounted (hidden) so a purchase in progress survives tab switches.
  const [getIaeroOpened, setGetIaeroOpened] = useState(false);
  React.useEffect(() => { if (tab === 'get-iaero') setGetIaeroOpened(true); }, [tab]);
+ const [hasSavedOrders, setHasSavedOrders] = useState(false);
+ React.useEffect(() => { try { setHasSavedOrders(!!localStorage.getItem(ORDERS_KEY)); } catch { /* storage blocked */ } }, []);
 
  return (
    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950">
      {/* Background tracking of Get iAERO orders, on every tab; an error in it renders nothing. */}
-     <RiftErrorBoundary fallback={() => null}>
-       <OrderWatcher showToast={showToast} />
-     </RiftErrorBoundary>
+     {(hasSavedOrders || getIaeroOpened) && (
+       <RiftErrorBoundary fallback={() => null}>
+         <OrderWatcher showToast={showToast} />
+       </RiftErrorBoundary>
+     )}
      {/* Animated Background */}
      <div className="fixed inset-0 overflow-hidden pointer-events-none">
        <div className="absolute -top-40 -right-40 w-80 h-80 bg-purple-500 rounded-full mix-blend-multiply filter blur-3xl opacity-10 animate-blob" />

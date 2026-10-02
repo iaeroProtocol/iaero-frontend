@@ -14,10 +14,11 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { canMoveTo, capOrders, sanitizeOrder } from './order-state';
+import { ORDERS_KEY } from './keys';
 import type { OrderUpdate } from './validate';
 import type { StoredOrder } from './types';
 
-const KEY = 'iaero.rift.orders.v1';
+const KEY = ORDERS_KEY;
 const LOCK = 'iaero-rift-orders';
 const EVENT = 'iaero-rift-orders';
 const MAX_ORDERS = 25;
