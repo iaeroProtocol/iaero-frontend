@@ -18,8 +18,6 @@ import LiqStaking from '@/components/protocol/LiqStaking';
 import RewardsSection from '@/components/protocol/RewardsSection';
 import AutoVaultSection from '@/components/protocol/AutoVaultSection';
 import RiftErrorBoundary from '@/components/rift/RiftErrorBoundary';
-import { WrongNetworkBanner } from '@/components/SwitchToBase';
-import { useWalletOnProtocolChain } from '@/lib/protocol-chain';
 import ToastNotification from '@/components/protocol/ToastNotification';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -62,7 +60,6 @@ export default function IaeroProtocolApp() {
  const [toasts, setToasts] = useState<Array<{ id: number; message: string; type: 'success' | 'error' | 'info' | 'warning' }>>([]);
  const { stats, loading } = useProtocol() as any;
  const [tab, setTab] = useState('lock');
- const onProtocolChain = useWalletOnProtocolChain();
  const goToGetIaero = () => {
    setTab('get-iaero');
    requestAnimationFrame(() => {
@@ -93,9 +90,10 @@ export default function IaeroProtocolApp() {
      {/* Header */}
      <header className="relative z-10 border-b border-slate-800/50 backdrop-blur-xl bg-slate-900/50">
        <div className="w-full px-4 sm:px-6 lg:px-8 xl:px-12 2xl:px-16 py-4">
-         {/* Wraps on narrow phones: a connected wallet's name button does not fit beside the logo at 360 px. */}
-         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
-           <div className="flex min-w-0 items-center space-x-8">
+         {/* One row from md up: below lg the nav shows icons only, so the wallet button still fits beside it. On
+             phones the wallet button wraps under the logo. */}
+         <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+           <div className="flex min-w-0 items-center gap-6 xl:gap-8">
             <div className="flex items-center space-x-3">
               <div className="w-12 h-12 flex-shrink-0">
                 <Image 
@@ -107,32 +105,36 @@ export default function IaeroProtocolApp() {
                 />
               </div>
       
-               <div>
+               <div className="whitespace-nowrap">
                  <h1 className="text-xl md:text-2xl font-bold text-white">iAero Protocol</h1>
                  <p className="text-xs text-slate-400">Liquid Staking on Base</p>
                </div>
              </div>
              
-             <nav className="hidden md:flex items-center space-x-6">
+             <nav className="hidden md:flex items-center gap-4 xl:gap-6 whitespace-nowrap">
               {/* Token Sweeper - Prominent Link */}
               <a 
                 href="https://sweeper.iaero.finance" 
                 target="_blank" 
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-sm font-semibold rounded-lg shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 transition-all duration-300 hover:scale-105"
+                aria-label="Token Sweeper"
+                title="Token Sweeper"
+                className="inline-flex items-center gap-2 px-2.5 lg:px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-sm font-semibold rounded-lg shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 transition-all duration-300 hover:scale-105"
               >
                 <Sparkles className="w-4 h-4" />
-                <span>Token Sweeper</span>
+                <span className="hidden lg:inline">Token Sweeper</span>
               </a>
               
               <a 
                 href="https://docs.iaero.finance" 
                 target="_blank" 
                 rel="noopener noreferrer"
+                aria-label="Docs"
+                title="Docs"
                 className="text-slate-300 hover:text-white transition-colors text-sm lg:text-base flex items-center gap-2"
               >
                 <BookOpen className="w-4 h-4" />
-                <span>Docs</span>
+                <span className="hidden lg:inline">Docs</span>
               </a>
               <a 
                 href={OFFICIAL_DISCORD_URL}
@@ -154,15 +156,19 @@ export default function IaeroProtocolApp() {
               </a>
               <a 
                 href="/status"
+                aria-label="Points"
+                title="Points"
                 className="text-slate-300 hover:text-white transition-colors text-sm lg:text-base flex items-center gap-2"
               >
                 <TrendingUp className="w-4 h-4" />
-                <span>Points</span>
+                <span className="hidden lg:inline">Points</span>
               </a>
             </nav>
            </div>
            
-           <WalletConnection />
+           <div className="md:ml-auto">
+             <WalletConnection showToast={showToast} />
+           </div>
          </div>
        </div>
      </header>
@@ -279,9 +285,6 @@ export default function IaeroProtocolApp() {
          {/* Empty spacer for fourth card column */}
          <div className="hidden lg:block" />
        </motion.div>
-
-       {/* While a connected wallet is off Base (e.g. after paying for a Get iAERO order from Arbitrum) */}
-       {!onProtocolChain && tab !== 'get-iaero' && <WrongNetworkBanner />}
 
        {/* Main Protocol Interface */}
        <Card id="protocol-tabs" className="scroll-mt-4 bg-slate-800/50 backdrop-blur-xl border-slate-700/50 w-full max-w-7xl mx-auto">

@@ -1,7 +1,7 @@
 // src/components/SwitchToBase.tsx
 //
-// The one "your wallet is on the wrong network" prompt: protocol sections and the page banner use it when a
-// connected wallet sits on Ethereum, Arbitrum (where "Get iAERO" payments leave it) or any other chain.
+// The one "your wallet is on the wrong network" prompt: each protocol section shows it instead of its content while
+// a connected wallet sits on Ethereum, Arbitrum (where "Get iAERO" payments leave it) or any other chain.
 
 'use client';
 
@@ -53,17 +53,6 @@ export function SwitchToBaseCard({ what, showToast }: { what: string; showToast?
         </p>
       </div>
       <SwitchToBaseButton showToast={showToast} />
-    </div>
-  );
-}
-
-/** A slim page-wide banner while a connected wallet is off Base. */
-export function WrongNetworkBanner() {
-  const { chainId } = useAccount();
-  return (
-    <div role="status" className="mx-auto mb-6 flex w-full max-w-7xl flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-      <span className="flex items-center gap-2"><AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" /> Your wallet is on {chainName(chainId) ?? 'an unsupported network'}. iAERO runs on Base.</span>
-      <SwitchToBaseButton className="h-8 px-3 text-sm" />
     </div>
   );
 }
