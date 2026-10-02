@@ -173,9 +173,10 @@ export interface Progress {
   expectedDoneAt?: number;
   /** True once the current phase has run past its "slow" threshold. */
   slow: boolean;
-  /** The step in progress has run past its usual time: "usually done by now". */
+  /** Past the usual time: "usually done by now". */
   overrun?: boolean;
-  /** Worst case still to go (seconds), from each remaining step's "slow" threshold. */
+  /** Worst case still to go (seconds), from the remaining "slow" thresholds; undefined once past all of them
+   *  (there is then no honest figure to give). */
   upToSec?: number;
 }
 
@@ -217,12 +218,13 @@ export function computeProgress(p: ProgressInput): Progress {
       phase, activeIndex: 0, elapsedSec,
       fraction: clamp((Math.min(inStep / dep.typicalSec, 0.9) * dep.typicalSec) / total),
       remainingSec, expectedDoneAt: now + remainingSec * 1000, slow: inStep > dep.slowSec,
-      overrun: inStep > dep.typicalSec, upToSec: Math.max(0, dep.slowSec - inStep) + slowAfter(1),
+      overrun: inStep > dep.typicalSec, upToSec: inStep > dep.slowSec ? undefined : dep.slowSec - inStep + slowAfter(1),
     };
   }
 
-  // executing: Rift does not say which hop is running, so the active step follows the clock; time past
-  // every hop's usual duration is put on the last hop.
+  // executing: Rift does not say which hop is running, so the step shown follows the clock (time past every
+  // hop's usual duration stays on the last hop). Slowness is judged on the route as a whole, since which hop is
+  // late is a guess: slow once past the usual total plus the largest single hop's allowance for running long.
   const fundedAt = p.fundedAt ?? now;
   const t = Math.max(0, (now - fundedAt) / 1000);
   let acc = 0, activeIndex = last - 1 >= 1 ? last - 1 : last, inStep = 0;
@@ -234,14 +236,15 @@ export function computeProgress(p: ProgressInput): Progress {
   const doneBefore = steps.slice(0, activeIndex).reduce((n, s) => n + s.typicalSec, 0);
   const active = steps[activeIndex];
   const within = Math.min(inStep / Math.max(1, active.typicalSec), 0.95);
-  const remainingSec = Math.max(0, active.typicalSec - inStep) + typicalAfter(activeIndex + 1);
+  const routeTypical = typicalAfter(1), routeWorst = slowAfter(1);
+  const slowAt = routeTypical + Math.max(0, ...steps.slice(1).map(s => s.slowSec - s.typicalSec));
+  const remainingSec = Math.max(0, routeTypical - t);
   return {
     phase, activeIndex, elapsedSec,
     fraction: clamp((doneBefore + within * active.typicalSec) / total),
     remainingSec, expectedDoneAt: now + remainingSec * 1000,
-    // Slow once the step in progress, or the route as a whole, is past its slow threshold.
-    slow: inStep > active.slowSec || t > slowAfter(1),
-    overrun: inStep > active.typicalSec,
-    upToSec: Math.max(0, active.slowSec - inStep) + slowAfter(activeIndex + 1),
+    slow: t > slowAt,
+    overrun: t > routeTypical,
+    upToSec: t < routeWorst ? routeWorst - t : undefined,
   };
 }

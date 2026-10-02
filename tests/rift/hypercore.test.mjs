@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  HYPERCORE_TOKENS, hyperCoreHoldings, hyperCoreToken, parseSpotBalances, spotSendRequest, spotSendResult, spotSendToken,
+  HYPERCORE_TOKENS, exchangeOutcome, hyperCoreHoldings, hyperCoreToken, parseSpotBalances, spotSendRequest, spotSendToken,
   spotSendTypedData,
 } from '../../src/lib/rift/hypercore.ts';
 
@@ -18,13 +18,14 @@ test('HyperCore spot balances: only the tokens Rift routes, minus what orders ho
   const rows = parseSpotBalances(json);
   assert.deepEqual(rows.map(r => [r.token.symbol, r.availableRaw]), [['USDC', 3520802921500n], ['HYPE', 1250000000n]]);
   assert.deepEqual(parseSpotBalances({}), []);
-  const llama = { coins: { 'coingecko:usd-coin': { price: 0.9999 }, 'coingecko:hyperliquid': { price: 40 } } };
-  const [usdc, hype] = hyperCoreHoldings(rows, llama);
+  const [usdc, hype] = hyperCoreHoldings(rows, { 'coingecko:usd-coin': 0.9999, 'coingecko:hyperliquid': 40 });
   assert.equal(hype.asset, 'hyperliquid.hype');
   assert.equal(hype.chain, 'hyperliquid');
   assert.equal(hype.valueUsd, 500);
   assert.ok(Math.abs(usdc.valueUsd - 35204.5) < 0.1);
   assert.equal(hyperCoreToken('HYPERLIQUID.BTC')?.symbol, 'UBTC');
+  const [unpriced] = hyperCoreHoldings(rows.slice(1), {});
+  assert.deepEqual([unpriced.symbol, unpriced.valueUsd, unpriced.priceMissing], ['HYPE', 0, true], 'DeFiLlama down: listed, not dropped');
 });
 
 test("the signed transfer matches Rift's documented example", () => {
@@ -44,9 +45,16 @@ test("the signed transfer matches Rift's documented example", () => {
   assert.equal(body.action.destination, typed.message.destination, 'the request repeats exactly what was signed');
   assert.equal(body.action.time, 1790927000000);
   assert.equal(body.nonce, 1790927000000);
-  assert.deepEqual(spotSendResult({ status: 'ok', response: { type: 'default' } }), { ok: true });
-  assert.deepEqual(spotSendResult({ status: 'err', response: 'Insufficient balance for token transfer' }),
-    { ok: false, error: 'Insufficient balance for token transfer' });
+});
+
+test("only Hyperliquid's own refusal counts as nothing sent", () => {
+  assert.deepEqual(exchangeOutcome(true, { status: 'ok', response: { type: 'default' } }), { kind: 'ok' });
+  assert.deepEqual(exchangeOutcome(true, { status: 'err', response: 'Insufficient balance for token transfer' }),
+    { kind: 'refused', error: 'Insufficient balance for token transfer' });
+  assert.deepEqual(exchangeOutcome(false, { status: 'err', response: 'upstream' }), { kind: 'unknown' }, 'a 5xx/429 with JSON may have gone through');
+  assert.deepEqual(exchangeOutcome(false, null), { kind: 'unknown' });
+  assert.deepEqual(exchangeOutcome(true, 'ok'), { kind: 'unknown' }, 'a bare JSON string');
+  assert.deepEqual(exchangeOutcome(true, { error: 'x' }), { kind: 'unknown' });
 });
 
 test('portfolio margin: borrowed USDC is not a holding; Hyperliquid caps what can leave', async () => {

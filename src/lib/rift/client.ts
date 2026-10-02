@@ -5,9 +5,14 @@
 // throttles per address, and Cloudflare Workers reach other Cloudflare-hosted sites from shared addresses).
 // Every request pins the destination to iAERO on Base and carries our integrator id; every response is
 // validated (validate.ts) before the app acts on it.
+//
+// Rift allows a browser about 10 calls a minute (measured, not documented). Every call is logged, across tabs,
+// so background calls give way: status polls go only while fewer than 8 calls were made in the last minute,
+// route checks while fewer than 5 and at most one per 15 s, and after a 429 both stop for a minute. Calls the
+// user is waiting on (quotes, orders, "Check payment") always go.
 
 import { RIFT_DESTINATION, RIFT_INTEGRATOR_ID } from './config';
-import { RiftApiError } from './errors';
+import { RiftApiError, classifyRiftError } from './errors';
 import { AMOUNT_RE, EVM_ADDRESS_RE, SOURCE_ASSET_RE, UUID_RE } from './validate';
 import { isBtcAddress } from './bitcoin';
 
@@ -16,11 +21,57 @@ export { RiftApiError, classifyRiftError, explainRiftError } from './errors';
 const RIFT_API = 'https://api.rift.trade';
 const TIMEOUT_MS = 25_000;
 
-async function call(path: string, init: { method?: 'GET' | 'POST'; body?: unknown; signal?: AbortSignal } = {}): Promise<unknown> {
+// --- The shared call budget ---
+
+/** Who is calling: the user (always goes), a status poll, or a route check (lowest). */
+export type RiftCallKind = 'user' | 'poll' | 'probe';
+const BUDGET_KEY = 'iaero.rift.calls.v1';
+const WINDOW_MS = 60_000;
+const LIMIT: Record<Exclude<RiftCallKind, 'user'>, number> = { poll: 8, probe: 5 };
+const PROBE_SPACING_MS = 15_000;
+const PAUSE_AFTER_429_MS = 60_000;
+
+interface CallLog { t: number[]; pausedUntil: number; lastProbe: number }
+let memLog: CallLog = { t: [], pausedUntil: 0, lastProbe: 0 };
+
+function readLog(now: number): CallLog {
+  let log = memLog;
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(BUDGET_KEY) ?? 'null');
+    if (raw && Array.isArray(raw.t)) log = { t: raw.t.filter((x: unknown) => typeof x === 'number'), pausedUntil: Number(raw.pausedUntil) || 0, lastProbe: Number(raw.lastProbe) || 0 };
+  } catch { /* storage blocked: this tab's own log */ }
+  return { ...log, t: log.t.filter(x => now - x < WINDOW_MS && x <= now + 1000) };
+}
+function writeLog(log: CallLog) {
+  memLog = log;
+  try { window.localStorage.setItem(BUDGET_KEY, JSON.stringify(log)); } catch { /* memory only */ }
+}
+
+/** Whether a background call of this kind may go now. */
+export function riftBudget(kind: Exclude<RiftCallKind, 'user'>, now = Date.now()): boolean {
+  if (typeof window === 'undefined') return true;
+  const log = readLog(now);
+  if (now < log.pausedUntil) return false;
+  if (kind === 'probe' && now - log.lastProbe < PROBE_SPACING_MS) return false;
+  return log.t.length < LIMIT[kind];
+}
+
+function logCall(kind: RiftCallKind, now: number) {
+  if (typeof window === 'undefined') return;
+  const log = readLog(now);
+  writeLog({ ...log, t: [...log.t, now], lastProbe: kind === 'probe' ? now : log.lastProbe });
+}
+function logRateLimited(now: number) {
+  if (typeof window === 'undefined') return;
+  writeLog({ ...readLog(now), pausedUntil: now + PAUSE_AFTER_429_MS });
+}
+
+async function call(path: string, init: { method?: 'GET' | 'POST'; body?: unknown; signal?: AbortSignal; kind?: RiftCallKind } = {}): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   const onAbort = () => controller.abort();
   init.signal?.addEventListener('abort', onAbort);
+  logCall(init.kind ?? 'user', Date.now());
   let res: Response;
   try {
     res = await fetch(`${RIFT_API}${path}`, {
@@ -40,6 +91,7 @@ async function call(path: string, init: { method?: 'GET' | 'POST'; body?: unknow
   let data: unknown = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* plain text, e.g. Cloudflare's "error code: 1015" */ }
   if (!res.ok) {
+    if (res.status === 429) logRateLimited(Date.now());
     const msg = data && typeof data === 'object' && 'error' in data ? String((data as { error: unknown }).error) : text.slice(0, 200) || `HTTP ${res.status}`;
     throw new RiftApiError(res.status, msg);
   }
@@ -47,12 +99,14 @@ async function call(path: string, init: { method?: 'GET' | 'POST'; body?: unknow
 }
 
 /** A quote for `from_amount` of `from`, always into iAERO on Base. */
-export async function fetchQuote(body: { from: string; from_amount: string; quote_mode?: 'fast' | 'optimal' }, signal?: AbortSignal) {
+export async function fetchQuote(
+  body: { from: string; from_amount: string; quote_mode?: 'fast' | 'optimal' }, signal?: AbortSignal, kind: RiftCallKind = 'user',
+) {
   const from = body.from.trim();
   if (!SOURCE_ASSET_RE.test(from) || from.toLowerCase() === RIFT_DESTINATION) throw new RiftApiError(400, 'unsupported source asset');
   if (!AMOUNT_RE.test(body.from_amount)) throw new RiftApiError(400, 'invalid amount');
   return call('/quote', {
-    method: 'POST', signal,
+    method: 'POST', signal, kind,
     body: {
       from, to: RIFT_DESTINATION, from_amount: body.from_amount, return_full_route: true,
       quote_mode: body.quote_mode ?? 'optimal', format: 'formatted', integrator_id: RIFT_INTEGRATOR_ID,
@@ -69,7 +123,34 @@ export async function createOrder(body: { quote_id: string; to_address: string; 
   return call('/order', { method: 'POST', body: { quote_id: body.quote_id, to_address: body.to_address, ...(refund ? { refund_address: refund } : {}) } });
 }
 
-export async function getOrder(id: string, signal?: AbortSignal) {
+export async function getOrder(id: string, signal?: AbortSignal, kind: RiftCallKind = 'user') {
   if (!UUID_RE.test(id)) throw new RiftApiError(400, 'invalid order id');
-  return call(`/order/${id}`, { signal });
+  return call(`/order/${id}`, { signal, kind });
+}
+
+// --- Is Rift pricing anything at all? ---
+
+/** A route Rift always has (USDC on Base). */
+const CONTROL = { from: 'base.0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', from_amount: '20' };
+const CONTROL_TTL_MS = 2 * 60_000;
+let control: { at: number; up: boolean } | null = null;
+
+/**
+ * Rift's "execution costs could not be priced, so no route was evaluated in full" means an outage, or that
+ * this token has no route: a control quote tells them apart. true: Rift prices other routes (so this token
+ * has none); false: Rift is down; null: can't tell now (rate limit, network, or no budget for a background check).
+ */
+export async function riftPricing(kind: 'user' | 'probe' = 'probe'): Promise<boolean | null> {
+  const now = Date.now();
+  if (control && now - control.at < CONTROL_TTL_MS) return control.up;
+  if (kind === 'probe' && !riftBudget('probe', now)) return null;
+  try {
+    await fetchQuote({ ...CONTROL, quote_mode: 'fast' }, undefined, kind);
+    control = { at: Date.now(), up: true };
+  } catch (e) {
+    const kind = classifyRiftError(e);
+    if (kind !== 'unavailable' && kind !== 'no_route') return null;
+    control = { at: Date.now(), up: false };
+  }
+  return control.up;
 }

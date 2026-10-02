@@ -32,7 +32,7 @@ export default function RouteSteps({ estimate, progress, links = {}, extras = {}
         const link = links[step.key];
         return (
           <li key={step.key} className="flex items-start gap-3">
-            <div className="mt-0.5 shrink-0">
+            <div className="mt-0.5 shrink-0" aria-hidden={!!progress}>
               {!progress ? (
                 <span className="flex h-5 w-5 items-center justify-center rounded-full border border-slate-600 text-[11px] text-slate-400">{i + 1}</span>
               ) : warn ? (
@@ -48,12 +48,13 @@ export default function RouteSteps({ estimate, progress, links = {}, extras = {}
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-baseline justify-between gap-x-3">
                 <span className={`text-sm ${done ? 'text-slate-300' : active ? 'font-medium text-white' : 'text-slate-400'}`}>
+                  {progress && <span className="sr-only">{warn ? 'Problem: ' : done ? 'Done: ' : active ? (progress.slow ? 'In progress, slow: ' : 'In progress: ') : 'Waiting: '}</span>}
                   {step.label}
                   {estimated && <span className="ml-2 rounded bg-slate-700/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-400">estimated</span>}
                 </span>
-                <span className="text-xs text-slate-500">usually {formatRange(step.typicalSec, step.slowSec)}</span>
+                <span className="text-xs text-slate-400">usually {formatRange(step.typicalSec, step.slowSec)}</span>
               </div>
-              {step.detail && <div className="text-xs text-slate-500">{step.detail}</div>}
+              {step.detail && <div className="text-xs text-slate-400">{step.detail}</div>}
               {extras[step.key] && <div className="mt-1 text-xs text-slate-300">{extras[step.key]}</div>}
               {link && (
                 <a href={link.href} target="_blank" rel="noopener noreferrer" className="mt-1 inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300" aria-label={`${link.text} (opens in a new tab)`}>

@@ -103,10 +103,13 @@ export function llamaIdOf(asset: string): string | null {
  *  (DeFiLlama refreshes liquid tokens every couple of minutes and thin ones every 10-15.) */
 export const PRICE_MAX_AGE_SEC = 1800;
 
-/** USD prices by DeFiLlama id from a /prices/current response. */
-export function parseLlamaPrices(json: unknown, nowMs: number): Record<string, number> {
+/** A price and when DeFiLlama last updated it (seconds). */
+export interface LlamaQuote { price: number; ts: number }
+
+/** USD prices with their timestamps by DeFiLlama id from a /prices/current response. */
+export function parseLlamaQuotes(json: unknown, nowMs: number): Record<string, LlamaQuote> {
   const coins = (json as { coins?: Record<string, { price?: unknown; timestamp?: unknown; confidence?: unknown }> } | null)?.coins;
-  const out: Record<string, number> = {};
+  const out: Record<string, LlamaQuote> = {};
   if (!coins || typeof coins !== 'object') return out;
   for (const [id, c] of Object.entries(coins)) {
     const price = Number(c?.price);
@@ -114,10 +117,20 @@ export function parseLlamaPrices(json: unknown, nowMs: number): Record<string, n
     if (!(price > 0) || !Number.isFinite(price)) continue;
     if (!(ts > 0) || nowMs / 1000 - ts > PRICE_MAX_AGE_SEC) continue;
     if (c?.confidence !== undefined && !(Number(c.confidence) >= 0.9)) continue;
-    out[id] = price;
+    out[id] = { price, ts };
   }
   return out;
 }
+
+/** USD prices by DeFiLlama id from a /prices/current response. */
+export function parseLlamaPrices(json: unknown, nowMs: number): Record<string, number> {
+  return Object.fromEntries(Object.entries(parseLlamaQuotes(json, nowMs)).map(([id, q]) => [id, q.price]));
+}
+
+/** A quote's price if it is still young enough to use at `nowMs` (prices are checked when used, not only
+ *  when fetched: a failed refresh keeps the last answer on screen). */
+export const freshPrice = (q: LlamaQuote | undefined, nowMs: number): number | undefined =>
+  q && nowMs / 1000 - q.ts <= PRICE_MAX_AGE_SEC ? q.price : undefined;
 
 // --- Rift's gas desk ---
 // On each EVM chain where a route step runs as `evm_gas_desk`, Rift's gas desk fronts that chain's gas to
@@ -129,6 +142,9 @@ export function parseLlamaPrices(json: unknown, nowMs: number): Record<string, n
 
 /** Gas the desk fronts on Ethereum, in gas units (its charge over the gas price: 1.2M and 2.0M). */
 export const ETHEREUM_GAS_DESK_UNITS = 1_600_000;
+/** When Ethereum's gas price can't be read, the "too small" check still assumes at least this (0.5 gwei), so
+ *  an order the gas charge would certainly swallow is refused rather than ticked through. */
+export const ETHEREUM_GAS_FLOOR_WEI = 500_000_000n;
 /** Typical charge per Layer 2 chain, in USD (Arbitrum $0.11; Base $0.03-$0.11, mostly L1 data fees). */
 export const L2_GAS_DESK_USD = 0.1;
 

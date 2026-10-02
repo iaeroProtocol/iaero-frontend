@@ -82,6 +82,28 @@ test('an order is accepted only if it delivers iAERO to this wallet, for this qu
   assert.ok(parseOrder(order({ refund_address: `bitcoin.${btc}` }), { ...expectOrder, refundAddress: btc.toUpperCase() }));
 });
 
+test("Rift's token in a quote or order is the one asked for, by name or by address", async () => {
+  const { sameSourceAsset } = await import('../../src/lib/rift/validate.ts');
+  const { RIFT_TOKEN_NAMES } = await import('../../src/lib/rift/rift-tokens.ts');
+  const USDT0 = 'arbitrum.0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9';
+  // A live quote for USDT0 asked by address came back as "arbitrum.usdt0" (2026-10-02).
+  assert.equal(sameSourceAsset('arbitrum.usdt0', USDT0, RIFT_TOKEN_NAMES), true);
+  assert.equal(sameSourceAsset('arbitrum.USDC', USDT0, RIFT_TOKEN_NAMES), false, 'another listed token');
+  assert.equal(sameSourceAsset(USDT0.toUpperCase().replace('ARBITRUM', 'arbitrum'), USDT0, RIFT_TOKEN_NAMES), true);
+  assert.equal(sameSourceAsset('arbitrum.0x0000000000000000000000000000000000000001', USDT0, RIFT_TOKEN_NAMES), false);
+  assert.equal(sameSourceAsset('base.usdt0', USDT0, RIFT_TOKEN_NAMES), false, 'another chain');
+  assert.equal(sameSourceAsset('arbitrum.eth', USDT0, RIFT_TOKEN_NAMES), false, 'the native coin');
+  assert.equal(sameSourceAsset('arbitrum.weth', 'arbitrum.eth', RIFT_TOKEN_NAMES), false, 'WETH is not ETH');
+  assert.equal(sameSourceAsset('hyperliquid.HYPE', 'hyperliquid.hype', RIFT_TOKEN_NAMES), true);
+  assert.equal(sameSourceAsset('arbitrum.newtoken', USDT0, RIFT_TOKEN_NAMES), true, 'listed after our copy: only its chain can be checked');
+  const expect = { destination: DEST, fromChain: 'arbitrum', fromAmount: '25', source: { fromAsset: USDT0, names: RIFT_TOKEN_NAMES } };
+  const q = { ...quote(), from: 'arbitrum.usdt0', from_amount: '25' };
+  assert.ok(parseQuote(q, expect));
+  assert.throws(() => parseQuote({ ...q, from: 'arbitrum.usdc' }, expect), /different token/);
+  const o = order({ from: 'arbitrum.usdc', from_amount: '25' });
+  assert.throws(() => parseOrder(o, { ...expectOrder, fromChain: 'arbitrum', fromAmount: '25', source: expect.source }), /different token/);
+});
+
 test('status polls must be for the same order; an unknown status is reported, not fatal', () => {
   assert.deepEqual(parseOrderUpdate(order({ status: 'delivered', amount_out: '461.1' }), ORDER_ID), { status: 'delivered', rawStatus: 'delivered', amountOut: '461.1' });
   assert.deepEqual(parseOrderUpdate(order({ status: 'settling' }), ORDER_ID), { status: null, rawStatus: 'settling', amountOut: null });

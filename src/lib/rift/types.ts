@@ -81,21 +81,39 @@ export interface StoredOrder {
   refundAddress?: string | null;
 
   // --- Paying (EVM and HyperCore, from this app) ---
-  /** Set just before the wallet (or Hyperliquid) is asked: if no result follows, the outcome is unknown. */
+  /** Set just before the wallet (or Hyperliquid) is asked, and refreshed every 15 s by the tab waiting on the
+   *  wallet: if it goes stale with no result, the outcome is unknown. */
   payRequestedAt?: number;
+  /** When the latest payment attempt started (kept after it ends). */
+  payAttemptAt?: number;
+  /** The paying account's pending nonce just before the latest EVM prompt: a higher one later means something
+   *  was sent from the account since. */
+  payNonce?: number;
   /** The last attempt may or may not have sent money (lost response, page closed mid-prompt). */
   payUnknown?: boolean;
   /** EVM payment hash (a HyperCore transfer has none: depositSentAt alone marks it). */
   depositTxHash?: string;
+  /** Earlier attempts' hashes (failed, cancelled or replaced), newest last. */
+  pastTxHashes?: string[];
+  /** The payment transaction's nonce once seen on-chain: if the account's nonce passes it without this hash
+   *  being mined, the payment was replaced (a speed-up or a cancel), even after a reload. */
+  depositNonce?: number;
   depositSentAt?: number;
   depositConfirmedAt?: number;
-  /** The payment reverted, or was cancelled or replaced in the wallet: nothing was sent. */
+  /** depositSentAt is an estimate (the payment was found by a check, or seen late), not when it was sent. */
+  startEstimated?: boolean;
+  /** The payment reverted, was cancelled or replaced in the wallet, or never reached the network (checked):
+   *  nothing was sent. */
   depositFailed?: boolean;
-  depositFailReason?: 'reverted' | 'cancelled' | 'replaced';
+  depositFailReason?: 'reverted' | 'cancelled' | 'replaced' | 'lost';
   /** Base units that actually reached the deposit address, when less than ordered (fee-on-transfer tokens). */
   depositReceivedRaw?: string;
-  /** Bitcoin payments to the deposit address, observed on mempool.space. */
-  btc?: { txid?: string; confirmations?: number; firstSeenAt?: number; totalSats?: string; payments?: number };
+  /** HyperCore: the signed transfer of the latest attempt. A retry re-posts this same transfer, which
+   *  Hyperliquid accepts at most once (its nonce), instead of signing a second one. */
+  hlAction?: { destination: string; token: string; amount: string; time: number; r: string; s: string; v: number };
+  /** Bitcoin payments to the deposit address, observed on mempool.space. `missing`: seen before, no longer
+   *  found (dropped or replaced); `seenLate`: first seen already confirmed, so firstSeenAt is not the send time. */
+  btc?: { txid?: string; confirmations?: number; firstSeenAt?: number; totalSats?: string; payments?: number; missing?: boolean; seenLate?: boolean };
 
   // --- Rift's status ---
   status: RiftOrderStatus;

@@ -58,6 +58,26 @@ export function decimalToRaw(amount: string, decimals: number): bigint {
 
 const sameAmount = (a: string, b: string) => normalizeDecimal(a) === normalizeDecimal(b);
 
+/**
+ * Whether Rift's `from` is the asset asked for. Rift writes a token on its list by its name (`arbitrum.usdt0`)
+ * even when asked by address, and others as `<chain>.<address>`; `names` maps its names to addresses
+ * (rift-tokens.ts). A name missing from that copy of the list (a token Rift listed later) can only be checked
+ * for its chain.
+ */
+export function sameSourceAsset(riftFrom: string, asked: string, names: Readonly<Record<string, string>>): boolean {
+  const from = riftFrom.toLowerCase(), want = asked.toLowerCase();
+  if (from === want) return true;
+  if (chainOf(from) !== chainOf(want)) return false;
+  const id = from.slice(from.indexOf('.') + 1), wantId = want.slice(want.indexOf('.') + 1);
+  // Another address, a native coin for a token, or anything for a native coin or a HyperCore token.
+  if (/^0x[0-9a-f]{40}$/.test(id) || id === 'eth' || !/^0x[0-9a-f]{40}$/.test(wantId)) return false;
+  const named = names[from];
+  return named === undefined || named === wantId;
+}
+
+/** The asset asked for, when the response's `from` should be checked against it. */
+export interface SourceCheck { fromAsset: string; names: Readonly<Record<string, string>> }
+
 function parseRoute(v: unknown): RiftRouteStep[] {
   if (!Array.isArray(v) || v.length === 0) throw new Error('Rift quote has no route');
   return v.map((s, i) => {
@@ -71,7 +91,7 @@ function parseRoute(v: unknown): RiftRouteStep[] {
   });
 }
 
-export interface QuoteExpectation { destination: string; fromChain: string; fromAmount: string }
+export interface QuoteExpectation { destination: string; fromChain: string; fromAmount: string; source?: SourceCheck }
 
 export function parseQuote(json: unknown, expect: QuoteExpectation): RiftQuote {
   const o = obj(json, 'quote');
@@ -84,6 +104,7 @@ export function parseQuote(json: unknown, expect: QuoteExpectation): RiftQuote {
   if (!isUuid(q.id)) throw new Error('Rift quote id is not a UUID');
   if (!isIaeroOnBase(q.to, expect.destination)) throw new Error('Rift quote does not deliver iAERO');
   if (chainOf(q.from) !== expect.fromChain) throw new Error('Rift quote is for a different source chain');
+  if (expect.source && !sameSourceAsset(q.from, expect.source.fromAsset, expect.source.names)) throw new Error('Rift quote is for a different token');
   if (!sameAmount(q.from_amount, expect.fromAmount)) throw new Error('Rift quote is for a different amount');
   if (!(Number(q.estimated_amount_out) > 0)) throw new Error('Rift quote has no output');
   if (Number.isNaN(Date.parse(q.expires_at))) throw new Error('Rift quote has no valid expiry');
@@ -99,6 +120,7 @@ function parseStatus(o: Record<string, unknown>): RiftOrderStatus {
 export interface OrderExpectation {
   destination: string; quoteId: string; toAddress: string; fromChain: string; fromAmount: string;
   refundAddress?: string;
+  source?: SourceCheck;
   /** A new order: Rift returns an existing order when a quote is presented twice, which must never be paid again. */
   fresh?: boolean;
 }
@@ -122,6 +144,7 @@ export function parseOrder(json: unknown, expect: OrderExpectation): RiftOrder {
   if (!isIaeroOnBase(order.to, expect.destination)) throw new Error('Rift order does not deliver iAERO');
   if (order.to_address.toLowerCase() !== expect.toAddress.toLowerCase()) throw new Error('Rift order delivers to a different wallet');
   if (chainOf(order.from) !== expect.fromChain) throw new Error('Rift order is for a different source chain');
+  if (expect.source && !sameSourceAsset(order.from, expect.source.fromAsset, expect.source.names)) throw new Error('Rift order is for a different token');
   if (!sameAmount(order.from_amount, expect.fromAmount)) throw new Error('Rift order is for a different amount');
   if (expect.refundAddress && (!order.refund_address || !sameAddress(order.refund_address, expect.refundAddress))) {
     throw new Error('Rift order does not refund to the address you gave');

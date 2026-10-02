@@ -21,6 +21,8 @@ export interface Holding {
   balanceRaw: string;
   priceUsd: number;
   valueUsd: number;
+  /** No price could be had (a price source was down): listed without a value rather than hidden. */
+  priceMissing?: boolean;
   icon?: string;
 }
 
@@ -87,19 +89,21 @@ export function parseNative(chain: HoldingChain, json: unknown): Holding | null 
   };
 }
 
-/** Fill in prices from a DeFiLlama /prices/current response keyed `<llamaChain>:<address>`. */
-export function applyLlamaPrices(holdings: Holding[], json: unknown, llamaChainOf: (c: HoldingChain) => string): Holding[] {
-  const coins = (json as { coins?: Record<string, { price?: number }> } | null)?.coins ?? {};
+/** Fill in prices from DeFiLlama prices (cost.ts parseLlamaPrices: recent and confident only), keyed
+ *  `<llamaChain>:<address>`. */
+export function applyLlamaPrices(holdings: Holding[], prices: Record<string, number>, llamaChainOf: (c: HoldingChain) => string): Holding[] {
   return holdings.map(h => {
     if (h.priceUsd > 0 || !h.address) return h;
-    const price = coins[`${llamaChainOf(h.chain)}:${h.address}`]?.price;
+    const price = prices[`${llamaChainOf(h.chain)}:${h.address}`];
     return typeof price === 'number' && price > 0 ? { ...h, priceUsd: price, valueUsd: price * rawToNumber(h.balanceRaw, h.decimals) } : h;
   });
 }
 
-/** Holdings worth listing, largest USD value first. */
-export const rankHoldings = (holdings: Holding[]) =>
-  holdings.filter(h => h.valueUsd >= MIN_VALUE_USD).sort((a, b) => b.valueUsd - a.valueUsd);
+/** Holdings worth listing, largest USD value first; those whose price is missing come after, unvalued. */
+export const rankHoldings = (holdings: Holding[]) => [
+  ...holdings.filter(h => !h.priceMissing && h.valueUsd >= MIN_VALUE_USD).sort((a, b) => b.valueUsd - a.valueUsd),
+  ...holdings.filter(h => h.priceMissing && h.balanceRaw !== '0').sort((a, b) => a.symbol.localeCompare(b.symbol)),
+];
 
 /** Route checks use at most this much of a holding, so a big balance does not fail on liquidity alone. */
 export const PROBE_USD = 100;

@@ -97,15 +97,16 @@ export function usdcForFee(json: unknown): number {
   return usdc ? Number(usdc.availableRaw) / 10 ** usdc.token.decimals : 0;
 }
 
-/** HyperCore balances as picker holdings, priced from a DeFiLlama /prices/current response. */
-export function hyperCoreHoldings(balances: { token: HyperCoreToken; availableRaw: bigint }[], llamaJson: unknown): Holding[] {
-  const coins = (llamaJson as { coins?: Record<string, { price?: number }> } | null)?.coins ?? {};
+/** HyperCore balances as picker holdings, priced from DeFiLlama prices by id (cost.ts parseLlamaPrices). A
+ *  balance whose price is missing is still listed, unvalued. */
+export function hyperCoreHoldings(balances: { token: HyperCoreToken; availableRaw: bigint }[], prices: Record<string, number>): Holding[] {
   return balances.map(({ token, availableRaw }) => {
-    const price = coins[token.llamaId]?.price;
+    const price = prices[token.llamaId];
     const priceUsd = typeof price === 'number' && price > 0 ? price : 0;
     return {
       chain: 'hyperliquid' as const, asset: token.asset, symbol: token.symbol, name: token.name, decimals: token.decimals,
       balanceRaw: availableRaw.toString(), priceUsd, valueUsd: priceUsd * unitsToNumber(availableRaw, token.decimals),
+      ...(priceUsd ? {} : { priceMissing: true }),
     };
   });
 }
@@ -145,10 +146,14 @@ export function spotSendRequest(t: SpotSend, sig: { r: string; s: string; v: num
   };
 }
 
-/** Hyperliquid's answer to /exchange: "ok", or the reason it refused. */
-export function spotSendResult(json: unknown): { ok: true } | { ok: false; error: string } {
+export type ExchangeOutcome = { kind: 'ok' } | { kind: 'refused'; error: string } | { kind: 'unknown' };
+
+/** Hyperliquid's answer to /exchange. It refuses with HTTP 200 and status "err"; any other answer that is not
+ *  "ok" (a gateway's 5xx or 429, with or without JSON) says nothing about whether the transfer went through. */
+export function exchangeOutcome(httpOk: boolean, json: unknown): ExchangeOutcome {
   const r = json as { status?: unknown; response?: unknown } | null;
-  if (r?.status === 'ok') return { ok: true };
-  const detail = typeof r?.response === 'string' ? r.response : JSON.stringify(r ?? null);
-  return { ok: false, error: detail.slice(0, 200) };
+  if (!httpOk || !r || typeof r !== 'object') return { kind: 'unknown' };
+  if (r.status === 'ok') return { kind: 'ok' };
+  if (r.status === 'err') return { kind: 'refused', error: (typeof r.response === 'string' ? r.response : JSON.stringify(r.response ?? null)).slice(0, 200) };
+  return { kind: 'unknown' };
 }

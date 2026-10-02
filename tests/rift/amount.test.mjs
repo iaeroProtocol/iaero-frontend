@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAmountInput } from '../../src/lib/rift/amount.ts';
+import { localeDecimalSep, parseAmountInput } from '../../src/lib/rift/amount.ts';
 
 test('amounts are read the way they were meant', () => {
   const v = (t, d = 18) => parseAmountInput(t, d).value;
@@ -10,13 +10,33 @@ test('amounts are read the way they were meant', () => {
   assert.equal(v('1.234,50'), '1234.5', 'dot groups, comma decimal');
   assert.equal(v('1 234,5'), '1234.5');
   assert.equal(v('0,5'), '0.5', 'a single comma is a decimal comma');
-  assert.equal(v('1,000'), '1000', 'thousands');
   assert.equal(v('1.000.000'), '1000000');
+  assert.equal(v('1,000,000'), '1000000');
   assert.equal(v('.5'), '0.5');
   assert.equal(v('12.'), '12', 'still typing');
   assert.equal(v('007.10'), '7.1');
   assert.deepEqual(parseAmountInput('', 18), {});
   assert.deepEqual(parseAmountInput('0.000', 18), {}, 'zero is no amount yet');
+});
+
+test('a leading "0," is always a decimal comma (it was read 1000x too large)', () => {
+  const v = (t, d = 18) => parseAmountInput(t, d).value;
+  assert.equal(v('0,500'), '0.5');
+  assert.equal(v('0,025'), '0.025');
+  assert.equal(v('0,100', 6), '0.1');
+  assert.equal(v('0.500'), '0.5');
+  assert.equal(parseAmountInput('0,500', 18).ambiguous, undefined, 'not ambiguous: no number starts with a 0 group');
+  assert.ok(parseAmountInput('0,500,000', 18).error, 'a 0 thousands group is not a number');
+});
+
+test('"1,500" follows the browser: thousands with a dot decimal, a decimal with a comma decimal', () => {
+  assert.deepEqual(parseAmountInput('1,500', 18, '.'), { value: '1500', ambiguous: true });
+  assert.deepEqual(parseAmountInput('1,500', 18, ','), { value: '1.5', ambiguous: true });
+  assert.deepEqual(parseAmountInput('1.500', 18, '.'), { value: '1.5', ambiguous: true });
+  assert.deepEqual(parseAmountInput('1.500', 18, ','), { value: '1500', ambiguous: true });
+  assert.deepEqual(parseAmountInput('12,5', 18, '.'), { value: '12.5' }, 'not three digits: a decimal comma');
+  assert.equal(localeDecimalSep('de-DE'), ',');
+  assert.equal(localeDecimalSep('en-US'), '.');
 });
 
 test('nothing is rewritten silently', () => {

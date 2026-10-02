@@ -1,7 +1,8 @@
 // src/lib/rift/order-state.ts
 //
 // Rules about a stored order that the tracker, the orders list and the buy flow must agree on: where its
-// payment stands, whether it may still be paid, how saved records are checked, and which may be dropped.
+// payment stands, whether it may still be paid, which status changes are real, how saved records are
+// checked, and which may be dropped.
 // Pure, with type-only imports, so `node --test` can run it (tests/rift/).
 
 import type { RiftOrderStatus, SourceChainKey, StoredOrder } from './types';
@@ -9,15 +10,21 @@ import type { RiftOrderStatus, SourceChainKey, StoredOrder } from './types';
 export type SourceKind = 'evm' | 'bitcoin' | 'hypercore';
 
 const STATUSES: readonly RiftOrderStatus[] = ['awaiting_deposit', 'funded', 'underfunded', 'expired', 'executing', 'delivered', 'refunded', 'frozen'];
-const TERMINAL: readonly RiftOrderStatus[] = ['delivered', 'refunded', 'expired', 'frozen'];
+/** Statuses that never change again. */
+const FINAL: readonly RiftOrderStatus[] = ['delivered', 'refunded', 'expired'];
 const CHAINS: readonly SourceChainKey[] = ['ethereum', 'arbitrum', 'base', 'bitcoin', 'hyperliquid'];
+const KIND_OF: Record<SourceChainKey, SourceKind> = { ethereum: 'evm', arbitrum: 'evm', base: 'evm', bitcoin: 'bitcoin', hyperliquid: 'hypercore' };
+export const sourceKindOf = (chain: SourceChainKey): SourceKind => KIND_OF[chain];
 
 /** Pay within the quote's 10-minute life: Rift fills at the price when the deposit arrives, with no
  *  minimum, so an older order is re-priced as a new one instead. Bitcoin needs time to send. */
 export const PAY_WINDOW_MS = 10 * 60_000;
 export const BTC_PAY_WINDOW_MS = 60 * 60_000;
-/** A payment requested this long ago with no result recorded is treated as unknown. */
+/** A payment request whose marker has not been refreshed for this long (the tab that asked refreshes it
+ *  every 15 s while the wallet is open) was lost: its outcome is unknown. */
 export const UNKNOWN_AFTER_MS = 2 * 60_000;
+/** How often the tab waiting on the wallet refreshes its marker. */
+export const PAY_HEARTBEAT_MS = 15_000;
 /** No paying in the last minutes before Rift stops watching the deposit address. */
 const DEADLINE_MARGIN_MS = 15 * 60_000;
 
@@ -25,8 +32,8 @@ export type PayState = 'none' | 'requesting' | 'sent' | 'unknown' | 'failed';
 
 /** Where this browser's payment for an order stands. */
 export function payState(o: StoredOrder, now: number): PayState {
-  if (o.depositSentAt && !o.depositFailed) return 'sent';
   if (o.payUnknown) return 'unknown';
+  if (o.depositSentAt && !o.depositFailed) return 'sent';
   if (o.payRequestedAt) return now - o.payRequestedAt > UNKNOWN_AFTER_MS ? 'unknown' : 'requesting';
   if (o.depositFailed) return 'failed';
   return 'none';
@@ -51,46 +58,118 @@ export function canPay(o: StoredOrder, kind: SourceKind, now: number): boolean {
   return s === 'none' || s === 'failed';
 }
 
+/** An unpaid order past its pay window: nothing was sent, and it can only expire. */
+export function isAbandoned(o: StoredOrder, now: number): boolean {
+  const kind = KIND_OF[o.sourceChain];
+  if (o.status !== 'awaiting_deposit' || payWindowOpen(o, kind, now) || o.btc?.txid) return false;
+  const s = payState(o, now);
+  return s === 'none' || s === 'failed';
+}
+
 /** The payment facts the progress phases are computed from (timing.ts phaseOf), the same everywhere. */
 export function phaseInput(o: StoredOrder, kind: SourceKind) {
+  const unknown = !!o.payUnknown;
   return {
     status: o.status,
     sourceKind: kind,
-    depositSentAt: o.depositSentAt && !o.depositFailed ? o.depositSentAt : undefined,
-    depositConfirmedAt: o.depositFailed ? undefined : o.depositConfirmedAt,
+    depositSentAt: o.depositSentAt && !o.depositFailed && !unknown ? o.depositSentAt : undefined,
+    depositConfirmedAt: o.depositFailed || unknown ? undefined : o.depositConfirmedAt,
     btcSeenAt: o.btc?.firstSeenAt,
   };
 }
 
-export const isTerminalStatus = (s: RiftOrderStatus) => TERMINAL.includes(s);
+/** Frozen orders are not moving (Rift's operators decide), but they can still be refunded or delivered. */
+export const isTerminalStatus = (s: RiftOrderStatus) => FINAL.includes(s) || s === 'frozen';
+export const isFinalStatus = (s: RiftOrderStatus) => FINAL.includes(s);
 /** Finished orders that still need the user's attention (Rift support needs the order ID). */
 export const needsAttention = (s: RiftOrderStatus) => s === 'frozen' || s === 'underfunded';
 
+const RANK: Record<RiftOrderStatus, number> = {
+  awaiting_deposit: 0, funded: 1, underfunded: 1, executing: 2, frozen: 3, delivered: 4, refunded: 4, expired: 4,
+};
+
+/**
+ * Whether a polled status may replace the stored one. Final statuses never change; nothing goes back to
+ * awaiting_deposit, or from executing to funded (a late answer from another poller); a frozen order can be
+ * released or settled by Rift.
+ */
+export function canMoveTo(prev: RiftOrderStatus, next: RiftOrderStatus): boolean {
+  if (prev === next) return true;
+  if (FINAL.includes(prev)) return false;
+  if (next === 'awaiting_deposit') return false;
+  if (prev === 'frozen') return true;
+  return RANK[next] >= RANK[prev];
+}
+
 const isStr = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const DECIMAL_RE = /^\d+(\.\d+)?$/;
+const UINT_RE = /^\d+$/;
+const HASH_RE = /^0x[0-9a-fA-F]{64}$/;
 
-/** A saved record, checked field by field (it may come from an older version of the app, another tab, or
- *  be damaged); null if it cannot be shown or tracked safely. */
+/** Optional fields that must have their type when present; a wrong one is dropped, not the order. */
+const OPTIONAL_NUMBERS = [
+  'payRequestedAt', 'payAttemptAt', 'payNonce', 'depositNonce', 'depositSentAt', 'depositConfirmedAt', 'lastPolledAt',
+  'deliveredAtChain', 'marketUsdIn', 'marketIaeroUsd', 'gasDeskUsd',
+] as const;
+const OPTIONAL_UINTS = ['depositReceivedRaw', 'baseFromBlock', 'deliveryScannedTo'] as const;
+const OPTIONAL_DECIMALS = ['expectedOut', 'amountOut'] as const;
+
+/** A saved record, checked field by field (it may come from an older or newer version of the app, another
+ *  tab, or be damaged); null if it cannot be shown or tracked safely. */
 export function sanitizeOrder(x: unknown): StoredOrder | null {
   const o = x as Partial<StoredOrder> | null;
   if (!o || typeof o !== 'object') return null;
   if (!isStr(o.id) || !isStr(o.quoteId) || !isNum(o.createdAt) || !CHAINS.includes(o.sourceChain as SourceChainKey)) return null;
   const t = o.token as StoredOrder['token'] | undefined;
-  if (!t || !isStr(t.symbol) || !isStr(t.asset) || !Number.isInteger(t.decimals)) return null;
-  if (!isStr(o.fromAmount) || !isStr(o.fromAmountRaw) || !/^\d+$/.test(o.fromAmountRaw) || !isStr(o.estimatedOut)) return null;
+  if (!t || !isStr(t.symbol) || !isStr(t.asset) || !Number.isInteger(t.decimals) || t.decimals < 0 || t.decimals > 36) return null;
+  if (t.address !== undefined && !/^0x[0-9a-fA-F]{40}$/.test(String(t.address))) return null;
+  if (!isStr(o.fromAmount) || !DECIMAL_RE.test(o.fromAmount) || !isStr(o.fromAmountRaw) || !UINT_RE.test(o.fromAmountRaw)) return null;
+  if (!isStr(o.estimatedOut) || !DECIMAL_RE.test(o.estimatedOut)) return null;
   if (!Array.isArray(o.route) || o.route.some(r => !r || !isStr(r.venue) || !isStr(r.from) || !isStr(r.to))) return null;
   if (!isStr(o.depositAddress) || !isStr(o.depositDeadline) || !isStr(o.toAddress)) return null;
   if (!STATUSES.includes(o.status as RiftOrderStatus)) return null;
-  const statusTimes = o.statusTimes && typeof o.statusTimes === 'object' ? o.statusTimes : {};
-  return { ...(o as StoredOrder), statusTimes };
+
+  const clean: Record<string, unknown> = { ...o };
+  for (const k of OPTIONAL_NUMBERS) if (clean[k] !== undefined && !isNum(clean[k])) delete clean[k];
+  for (const k of OPTIONAL_UINTS) if (clean[k] !== undefined && !(isStr(clean[k]) && UINT_RE.test(clean[k] as string))) delete clean[k];
+  for (const k of OPTIONAL_DECIMALS) if (clean[k] != null && !(isStr(clean[k]) && DECIMAL_RE.test(clean[k] as string))) delete clean[k];
+  if (clean.depositTxHash !== undefined && !(isStr(clean.depositTxHash) && HASH_RE.test(clean.depositTxHash as string))) delete clean.depositTxHash;
+  if (clean.pastTxHashes !== undefined) {
+    const list = Array.isArray(clean.pastTxHashes) ? (clean.pastTxHashes as unknown[]).filter(h => isStr(h) && HASH_RE.test(h)) : [];
+    if (list.length) clean.pastTxHashes = list.slice(-5); else delete clean.pastTxHashes;
+  }
+  const btc = clean.btc as StoredOrder['btc'] | undefined;
+  if (btc !== undefined) {
+    if (!btc || typeof btc !== 'object') delete clean.btc;
+    else {
+      const b: NonNullable<StoredOrder['btc']> = {};
+      if (isStr(btc.txid) && /^[0-9a-f]{64}$/i.test(btc.txid)) b.txid = btc.txid;
+      if (isNum(btc.confirmations)) b.confirmations = btc.confirmations;
+      if (isNum(btc.firstSeenAt)) b.firstSeenAt = btc.firstSeenAt;
+      if (isStr(btc.totalSats) && UINT_RE.test(btc.totalSats)) b.totalSats = btc.totalSats;
+      if (isNum(btc.payments)) b.payments = btc.payments;
+      if (btc.missing === true) b.missing = true;
+      if (btc.seenLate === true) b.seenLate = true;
+      clean.btc = b;
+    }
+  }
+  const hl = clean.hlAction as StoredOrder['hlAction'] | undefined;
+  if (hl !== undefined && !(hl && isStr(hl.destination) && isStr(hl.token) && isStr(hl.amount) && isNum(hl.time) && isStr(hl.r) && isStr(hl.s) && isNum(hl.v))) {
+    delete clean.hlAction;
+  }
+  const times = o.statusTimes && typeof o.statusTimes === 'object' ? o.statusTimes : {};
+  clean.statusTimes = Object.fromEntries(Object.entries(times).filter(([k, v]) => STATUSES.includes(k as RiftOrderStatus) && isNum(v)));
+  return clean as unknown as StoredOrder;
 }
 
 /** Keep at most `max` orders: never drop one still in flight or needing attention; drop the oldest
- *  finished ones first. */
-export function capOrders(list: StoredOrder[], max: number): StoredOrder[] {
+ *  finished or abandoned (never paid, past their window) ones first. */
+export function capOrders(list: StoredOrder[], max: number, now: number): StoredOrder[] {
   if (list.length <= max) return list;
-  const keep = new Set(list.filter(o => !isTerminalStatus(o.status) || needsAttention(o.status)).map(o => o.id));
-  const finished = list.filter(o => !keep.has(o.id)).sort((a, b) => b.createdAt - a.createdAt);
-  for (const o of finished) { if (keep.size >= max) break; keep.add(o.id); }
+  const droppable = (o: StoredOrder) => (isFinalStatus(o.status) && !needsAttention(o.status)) || isAbandoned(o, now);
+  const keep = new Set(list.filter(o => !droppable(o)).map(o => o.id));
+  const rest = list.filter(o => !keep.has(o.id)).sort((a, b) => b.createdAt - a.createdAt);
+  for (const o of rest) { if (keep.size >= max) break; keep.add(o.id); }
   return list.filter(o => keep.has(o.id));
 }

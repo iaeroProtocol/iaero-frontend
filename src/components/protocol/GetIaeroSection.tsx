@@ -6,11 +6,13 @@
 // get, what that costs against market prices, the route and how long it takes. One click re-checks the price
 // against your tolerance, creates the order and asks the wallet for a single plain transfer (or, for
 // HyperCore, one signed Hyperliquid transfer) to the order's one-time deposit address. Rift does the rest;
-// OrderTracker shows every step, and every unfinished order is tracked in the background (watch.ts).
+// OrderTracker shows every step, and every unfinished order is tracked in the background (OrderWatcher).
 //
-// Money safety: one purchase at a time and one payment per order (in-flight guards); a quote is never reused
-// for a second order; a payment whose outcome is unknown is checked before it can be repeated; an order is
-// paid only by the wallet it delivers to and only while its price is current (order-state.ts).
+// Money safety: one purchase at a time and one payment per order (in-flight guards, re-checked after every
+// wallet prompt); a quote is never reused for a second order; an attempt that may have sent money is checked
+// before it can be repeated, and a HyperCore retry re-posts the same signed transfer; an order is paid only by
+// the wallet it delivers to and only while its price is current (order-state.ts), with the price checked again
+// when paying from the order card.
 
 'use client';
 
@@ -22,7 +24,7 @@ import {
 } from 'wagmi';
 import { arbitrum, base, mainnet } from 'wagmi/chains';
 import { useConnectModal } from '@rainbow-me/rainbowkit';
-import { erc20Abi, formatUnits, isAddress, parseSignature, type Address } from 'viem';
+import { erc20Abi, formatUnits, isAddress, parseSignature, type Address, type PublicClient } from 'viem';
 import { AlertTriangle, ArrowLeftRight, Bell, Bitcoin, Info, Loader2, RefreshCw, Route as RouteIcon, ShieldCheck, Timer } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -31,27 +33,30 @@ import { Label } from '@/components/ui/label';
 import { useDebounce } from '@/components/lib/defi-utils';
 import RouteSteps from '@/components/rift/RouteSteps';
 import OrderTracker from '@/components/rift/OrderTracker';
-import RecentOrders from '@/components/rift/RecentOrders';
+import RecentOrders, { clearable } from '@/components/rift/RecentOrders';
+import RiftErrorBoundary from '@/components/rift/RiftErrorBoundary';
 import { CURATED_TOKENS, KNOWN_SYMBOLS, RIFT_DESTINATION, RIFT_SECURITY_URL, SOURCE_CHAINS } from '@/lib/rift/config';
-import { classifyRiftError, createOrder, explainRiftError, fetchQuote, RiftApiError } from '@/lib/rift/client';
+import { classifyRiftError, createOrder, explainRiftError, fetchQuote, riftPricing, RiftApiError } from '@/lib/rift/client';
 import { decimalToRaw, isContractCode, normalizeDecimal, parseOrder, parseQuote } from '@/lib/rift/validate';
 import { estimateRoute, formatRange } from '@/lib/rift/timing';
 import { isBtcAddress, normalizeBtcAddress } from '@/lib/rift/bitcoin';
 import { rawToNumber, type Holding } from '@/lib/rift/holdings';
 import { useRiftSupport } from '@/lib/rift/support';
-import { useMarketPrices } from '@/lib/rift/prices';
-import { parseAmountInput } from '@/lib/rift/amount';
+import { RIFT_TOKEN_NAMES } from '@/lib/rift/rift-tokens';
+import { useMarketPrices, type MarketPrices } from '@/lib/rift/prices';
+import { localeDecimalSep, parseAmountInput } from '@/lib/rift/amount';
 import {
-  HL_API, HL_NEW_ADDRESS_FEE_USDC, HL_SIGNATURE_CHAIN_ID, HYPERCORE_TOKENS, hyperCoreToken, parseSpotBalances, spotSendRequest,
-  spotSendResult, spotSendToken, spotSendTypedData, usdcForFee,
+  HL_API, HL_NEW_ADDRESS_FEE_USDC, HL_SIGNATURE_CHAIN_ID, HYPERCORE_TOKENS, hyperCoreToken, parseSpotBalances, spotSendToken,
+  spotSendTypedData, usdcForFee,
 } from '@/lib/rift/hypercore';
 import {
-  DEFAULT_TOLERANCE_PCT, TOLERANCE_CHOICES, assessCost, costNeedsTick, costText, formatPct, gasDeskChains, gasDeskUsd,
-  priceDropPct, type CostCheck, type CostLevel,
+  DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, assessCost, costNeedsTick, costText, formatPct, gasDeskChains,
+  gasDeskUsd, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
-import { canPay, isTerminalStatus, needsAttention } from '@/lib/rift/order-state';
+import { PAY_HEARTBEAT_MS, canPay, isAbandoned, isTerminalStatus, needsAttention, sourceKindOf } from '@/lib/rift/order-state';
 import { loadOrders, patchOrder, removeOrders, storageFailing, upsertOrder, useStoredOrders } from '@/lib/rift/storage';
-import { useOrderWatcher } from '@/lib/rift/watch';
+import { accountNonce, hyperDepositEvidence, postHyperTransfer, transferDeliversInFull } from '@/lib/rift/payment-io';
+import { enableNotifications } from '@/lib/rift/watch';
 import type { RiftQuote, SourceToken, StoredOrder } from '@/lib/rift/types';
 
 type EvmChainId = 1 | 42161 | 8453;
@@ -61,6 +66,10 @@ const TOLERANCE_KEY = 'iaero.rift.tolerance.v1';
 /** A quote older than this is re-fetched when you click Buy, and compared with what you saw. */
 const RECHECK_AFTER_MS = 20_000;
 const HOLDINGS_TIMEOUT_MS = 45_000;
+/** A wallet prompt open this long gets a reminder that Rift fills at the price when the payment arrives. */
+const SLOW_PROMPT_MS = 3 * 60_000;
+/** Ethereum's gas price older than this (its refreshes failing) is not used for the cost. */
+const GAS_MAX_AGE_MS = 3 * 60_000;
 
 const COST_STYLE: Record<CostLevel, string> = {
   low: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200',
@@ -107,12 +116,14 @@ const isUserRejection = (e: unknown) => {
 };
 /** viem could not reach a chain's RPC ("HTTP request failed."), anywhere in the error's cause chain. */
 const isNetworkError = (e: unknown) => errorNames(e).some(n => n === 'HttpRequestError' || n === 'TimeoutError' || n === 'WebSocketRequestError');
-/** Wallet errors raised before anything could be broadcast: the payment certainly did not go out. */
+/** Wallet errors raised before anything could be broadcast: the payment certainly did not go out. Not here:
+ *  "nonce too low" (viem also uses it for "already known", the same transaction already broadcast) and wallet
+ *  disconnects (4900, 4901), which can come after the wallet sent it; those are treated as unknown. */
 const PRE_SEND = new Set([
   'ChainMismatchError', 'ChainNotConfiguredError', 'ConnectorNotConnectedError', 'ConnectorAccountNotFoundError', 'InsufficientFundsError',
   'EstimateGasExecutionError', 'ExecutionRevertedError', 'IntrinsicGasTooLowError', 'IntrinsicGasTooHighError', 'FeeCapTooLowError',
-  'FeeCapTooHighError', 'NonceTooLowError', 'NonceTooHighError', 'NonceMaxValueError', 'SwitchChainError', 'UnsupportedProviderMethodError',
-  'UnauthorizedProviderError', 'ProviderDisconnectedError', 'ChainDisconnectedError',
+  'FeeCapTooHighError', 'NonceTooHighError', 'NonceMaxValueError', 'SwitchChainError', 'UnsupportedProviderMethodError',
+  'UnauthorizedProviderError',
 ]);
 const isPreSend = (e: unknown) => errorNames(e).some(n => PRE_SEND.has(n));
 
@@ -128,9 +139,9 @@ function loadTolerance(): number {
 function warningText(w: string): string {
   const [chain] = w.split(':');
   const name = chain.charAt(0).toUpperCase() + chain.slice(1);
+  if (/balances unavailable/.test(w)) return chain === 'hyperliquid' ? 'Hyperliquid balances unavailable' : `${name}: balances unavailable`;
   if (/token list unavailable/.test(w)) return `${name}: only major tokens checked`;
   if (/on-chain/.test(w)) return `${name}: balances may be out of date`;
-  if (chain === 'hyperliquid') return 'Hyperliquid balances unavailable';
   if (chain === 'prices') return 'some prices unavailable';
   return w;
 }
@@ -157,8 +168,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   const basePublic = usePublicClient({ chainId: base.id });
   const ethPublic = usePublicClient({ chainId: mainnet.id });
   const arbPublic = usePublicClient({ chainId: arbitrum.id });
+  const publicFor = (id: number): PublicClient | undefined =>
+    (id === mainnet.id ? ethPublic : id === arbitrum.id ? arbPublic : id === base.id ? basePublic : undefined) as PublicClient | undefined;
   const allOrders = useStoredOrders();
   // Orders of the connected wallet only: another account's unpaid order must not be paid from this one.
+  // (Every order in this browser is still tracked in the background, whichever account it is for.)
   const orders = useMemo(
     () => (address ? allOrders.filter(o => o.toAddress.toLowerCase() === address.toLowerCase()) : []),
     [allOrders, address],
@@ -182,11 +196,14 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   const [tolerance, setTolerance] = useState(DEFAULT_TOLERANCE_PCT);
   const [moved, setMoved] = useState<PriceMove | null>(null);
   const [ack, setAck] = useState<Ack | null>(null);
+  /** `<asset>|<amount>` whose quote went into an order: not re-quoted until the amount is entered again. */
+  const [spent, setSpent] = useState<string | null>(null);
+  const [decimalSep, setDecimalSep] = useState<'.' | ','>('.');
   const startingRef = useRef(false);
   const payingRef = useRef(new Set<string>());
   const formRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => { setTolerance(loadTolerance()); }, []);
+  useEffect(() => { setTolerance(loadTolerance()); setDecimalSep(localeDecimalSep()); }, []);
   const chooseTolerance = (v: number) => {
     setTolerance(v);
     try { localStorage.setItem(TOLERANCE_KEY, String(v)); } catch { /* private mode */ }
@@ -194,13 +211,14 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   // Asked when the box is ticked (a click), never in the middle of a purchase.
   const toggleNotify = async (on: boolean) => {
     if (!on || !notifySupported) { setNotify(false); return; }
-    if (Notification.permission === 'granted') { setNotify(true); return; }
     try {
-      const p = await Notification.requestPermission();
+      const p = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
       setNotify(p === 'granted');
+      if (p === 'granted') void enableNotifications();
       if (p === 'denied') showToast('Notifications are blocked for this site in your browser settings.', 'info');
     } catch { setNotify(false); }
   };
+  const typeAmount = (text: string) => { setAmountText(text); setSpent(null); };
 
   // --- Your tokens: balances on Ethereum, Arbitrum, Base and HyperCore, valued in USD, largest first ---
   const freshRef = useRef(false);
@@ -214,6 +232,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       try {
         const res = await fetch(`/api/rift/holdings?address=${address}${freshRef.current ? '&fresh=1' : ''}`, { signal: controller.signal });
         freshRef.current = false;
+        if (res.status === 429) throw new Error('Too many balance requests from this connection. Wait a minute, then refresh.');
         if (!res.ok) throw new Error(`Could not load your tokens (HTTP ${res.status})`);
         return res.json();
       } catch (e) {
@@ -232,7 +251,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   const checking = holdings.filter(h => support[h.asset] === 'checking').length;
 
   // A new account starts over.
-  useEffect(() => { setSelected(null); setAmountText(''); setAck(null); setMoved(null); setError(null); }, [address]);
+  useEffect(() => { setSelected(null); setAmountText(''); setAck(null); setMoved(null); setError(null); setSpent(null); }, [address]);
 
   // Start on the most valuable usable token, and keep a choice that drops out of a single refresh (a slow
   // source for a minute) instead of jumping to another token mid-review.
@@ -279,18 +298,19 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     : undefined;
   const hlUsdcShort = isHyperCore && token?.symbol !== 'USDC' && Number(holdingsQuery.data?.hyperliquidUsdc ?? 0) < HL_NEW_ADDRESS_FEE_USDC;
 
-  const amountState = useMemo((): { normalized?: string; raw?: bigint; error?: string } => {
+  const amountState = useMemo((): { normalized?: string; raw?: bigint; error?: string; ambiguous?: boolean } => {
     if (!token) return {};
-    const parsed = parseAmountInput(amountText, token.decimals);
+    const parsed = parseAmountInput(amountText, token.decimals, decimalSep);
     if (parsed.error) return { error: parsed.error };
     if (!parsed.value) return {};
     const raw = decimalToRaw(parsed.value, token.decimals);
+    const ambiguous = parsed.ambiguous;
     if (balanceRaw !== undefined && raw > balanceRaw) {
-      return { normalized: parsed.value, raw, error: hlFeeRaw ? 'Not enough USDC: 1 USDC stays for Hyperliquid’s transfer fee' : `Not enough ${token.symbol}` };
+      return { normalized: parsed.value, raw, ambiguous, error: hlFeeRaw ? 'Not enough USDC: 1 USDC stays for Hyperliquid’s transfer fee' : `Not enough ${token.symbol}` };
     }
-    if (hlUsdcShort) return { normalized: parsed.value, raw, error: 'Hyperliquid charges 1 USDC per transfer: keep 1 USDC available' };
-    return { normalized: parsed.value, raw };
-  }, [amountText, token, balanceRaw, hlFeeRaw, hlUsdcShort]);
+    if (hlUsdcShort) return { normalized: parsed.value, raw, ambiguous, error: 'Hyperliquid charges 1 USDC per transfer: keep 1 USDC available' };
+    return { normalized: parsed.value, raw, ambiguous };
+  }, [amountText, token, balanceRaw, hlFeeRaw, hlUsdcShort, decimalSep]);
 
   const setMax = () => {
     if (!token || balanceRaw === undefined) return;
@@ -299,61 +319,82 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       const reserve = decimalToRaw(chain.gasReserve, token.decimals);
       raw = raw > reserve ? raw - reserve : 0n;
     }
-    setAmountText(normalizeDecimal(formatUnits(raw, token.decimals)));
+    typeAmount(normalizeDecimal(formatUnits(raw, token.decimals)));
   };
 
-  // Market prices (prices.ts): iAERO from its Aerodrome pool, the token from DeFiLlama, else the list's price.
+  // Market prices (prices.ts): iAERO from its Aerodrome pool, the token from DeFiLlama, each checked for age when
+  // used. The list's price shows the amount's value, but never feeds the cost check.
   const market = useMarketPrices(token?.asset, active);
-  const inputPriceUsd = market.inputUsd ?? holding?.priceUsd ?? 0;
-  const iaeroUsd = market.iaeroUsd ?? 0;
-  const amountUsd = amountState.normalized && inputPriceUsd ? Number(amountState.normalized) * inputPriceUsd : 0;
+  const displayPriceUsd = market.inputUsd ?? (holding && !holding.priceMissing ? holding.priceUsd : 0);
+  const amountUsd = amountState.normalized && displayPriceUsd ? Number(amountState.normalized) * displayPriceUsd : 0;
 
-  // --- Live quote: re-priced every 30 s while shown (paused while a price move waits for your answer) ---
+  // --- Live quote: re-priced every 30 s while shown (paused while a price move waits for your answer, and while
+  //     buying). A rate-limited quote is not retried at once: the next refresh asks again. ---
   const quoteAmount = useDebounce(amountState.error ? undefined : amountState.normalized, 600);
+  const quoteKey = `${token?.asset}|${quoteAmount}`;
   const quoteQuery = useQuery({
     queryKey: ['rift-quote', token?.asset, quoteAmount],
-    enabled: active && !!token && !!quoteAmount,
+    enabled: active && !!token && !!quoteAmount && !busy && spent !== quoteKey,
     queryFn: async ({ signal }) =>
       parseQuote(await fetchQuote({ from: token!.asset, from_amount: quoteAmount! }, signal), {
-        destination: RIFT_DESTINATION, fromChain: chainKey, fromAmount: quoteAmount!,
+        destination: RIFT_DESTINATION, fromChain: chainKey, fromAmount: quoteAmount!, source: { fromAsset: token!.asset, names: RIFT_TOKEN_NAMES },
       }),
     refetchInterval: moved || !active ? false : 30_000,
     staleTime: 20_000,
-    retry: (count, e) => classifyRiftError(e) === 'rate_limited' && count < 2,
-    retryDelay: 8_000,
+    retry: (count, e) => classifyRiftError(e) === 'network' && count < 1,
+    retryDelay: 3_000,
   });
-  const quote = quoteQuery.data && quoteAmount && amountState.normalized === quoteAmount ? quoteQuery.data : undefined;
+  const quote = quoteQuery.data && quoteAmount && amountState.normalized === quoteAmount && spent !== quoteKey ? quoteQuery.data : undefined;
   const estimate = useMemo(() => (quote ? estimateRoute(chainKey, quote.route, KNOWN_SYMBOLS) : null), [quote, chainKey]);
+  // "Could not be priced": an outage, or no route for this token. Rift pricing a control route says which.
+  const quoteErrorKind = quoteQuery.error ? classifyRiftError(quoteQuery.error) : null;
+  const [riftUp, setRiftUp] = useState<boolean | null>(null);
+  useEffect(() => {
+    setRiftUp(null);
+    if (quoteErrorKind !== 'unavailable') return;
+    let live = true;
+    riftPricing('user').then(up => { if (live) setRiftUp(up); });
+    return () => { live = false; };
+  }, [quoteErrorKind, quoteQuery.errorUpdatedAt]);
+  const quoteErrorText = !quoteQuery.error ? null
+    : quoteErrorKind === 'unavailable' && riftUp === true ? 'Rift has no route for this token right now (other tokens are pricing normally). Try a different token.'
+    : explainRiftError(quoteQuery.error);
 
   // Rift's gas desk charges each chain's gas once you have paid, and its quote leaves that out (cost.ts). The
   // page expects the quote minus that charge, valued in iAERO at the pool price; Ethereum's gas price is
   // fetched only when the route runs on Ethereum.
   const routeOnEthereum = !!quote && gasDeskChains(quote.route).includes(1);
-  const { data: ethGasPrice } = useGasPrice({ chainId: mainnet.id, query: { enabled: active && routeOnEthereum, refetchInterval: 60_000 } });
-  const expectedFor = (q: RiftQuote | undefined) => {
-    if (!q) return null;
+  const gasQuery = useGasPrice({ chainId: mainnet.id, query: { enabled: active && routeOnEthereum, refetchInterval: 60_000 } });
+  const gasAt = (now: number) => (gasQuery.data !== undefined && now - gasQuery.dataUpdatedAt <= GAS_MAX_AGE_MS ? gasQuery.data : undefined);
+  const expectedFor = (q: RiftQuote, px: MarketPrices, gasWei: bigint | undefined) => {
     const chains = gasDeskChains(q.route);
-    const usd = gasDeskUsd(chains, ethGasPrice, market.ethUsd);
-    if (usd === null || (usd > 0 && !iaeroUsd)) return null;
-    return { out: Number(q.estimated_amount_out) - (usd > 0 ? usd / iaeroUsd : 0), gasUsd: usd, chains };
+    const usd = gasDeskUsd(chains, gasWei, px.ethUsd);
+    if (usd === null || (usd > 0 && !px.iaeroUsd)) return null;
+    return { out: Number(q.estimated_amount_out) - (usd > 0 ? usd / px.iaeroUsd! : 0), gasUsd: usd, chains };
   };
-  const expected = expectedFor(quote);
-  const expectedOut = quote ? Math.max(0, expected?.out ?? Number(quote.estimated_amount_out)) : 0;
 
-  // What the order costs against market prices; no price, or prices that disagree, also need the tick.
+  // What the order costs against market prices; no price, or prices that disagree, also need the tick. An
+  // order Rift's gas charge would swallow is refused, assuming at least a low gas price when it is unknown.
   const hlFeeUsd = isHyperCore ? HL_NEW_ADDRESS_FEE_USDC : 0;
-  const costOf = (q: RiftQuote) => {
-    const usdIn = inputPriceUsd > 0 ? Number(q.from_amount) * inputPriceUsd + hlFeeUsd : null;
-    const e = expectedFor(q);
-    const usdOut = e && iaeroUsd > 0 ? e.out * iaeroUsd : null;
-    return { check: assessCost(usdIn, usdOut), usdIn, usdOut };
+  const costOf = (q: RiftQuote, px: MarketPrices, gasWei: bigint | undefined) => {
+    const usdIn = px.inputUsd && px.inputUsd > 0 ? Number(q.from_amount) * px.inputUsd + hlFeeUsd : null;
+    const e = expectedFor(q, px, gasWei);
+    const usdOut = e && px.iaeroUsd ? e.out * px.iaeroUsd : null;
+    const atLeast = gasWei === undefined ? expectedFor(q, px, ETHEREUM_GAS_FLOOR_WEI) : e;
+    return { check: assessCost(usdIn, usdOut), usdIn, usdOut, tooSmall: (usdOut !== null && usdOut <= 0) || (!!atLeast && atLeast.out <= 0) };
   };
-  const cost = quote ? costOf(quote) : null;
-  const ackKey = `${token?.asset}|${quoteAmount}`;
+  const renderNow = Date.now();
+  const gasNow = gasAt(renderNow);
+  const expected = quote ? expectedFor(quote, market, gasNow) : null;
+  const expectedOut = quote ? Math.max(0, expected?.out ?? Number(quote.estimated_amount_out)) : 0;
+  const cost = quote ? costOf(quote, market, gasNow) : null;
+  const ackKey = quoteKey;
+  // A tick covers this token and amount, the same kind of check and (for a known cost) no more than half a
+  // point worse; "prices disagree" is one state whatever the size of the gap.
   const ackCovers = (a: Ack | null, c: CostCheck) =>
-    !!a && a.key === ackKey && a.kind === c.kind && (c.kind === 'unknown' || c.pct <= a.pct + 0.5);
+    !!a && a.key === ackKey && a.kind === c.kind && (c.kind !== 'ok' || c.pct <= a.pct + 0.5);
   const needsAck = !!cost && costNeedsTick(cost.check) && !ackCovers(ack, cost.check);
-  const tooSmall = !!cost && cost.usdOut !== null && cost.usdOut <= 0;
+  const tooSmall = !!cost?.tooSmall;
 
   // What you saw: the quote on screen, or the one before it if it changed in the last 3 seconds
   // (a refresh landing just before your click is not something you had time to read).
@@ -370,33 +411,29 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
 
   // --- Orders ---
   useEffect(() => {
-    // Resume this wallet's most recent unfinished order after a refresh.
+    // Resume this wallet's most recent unfinished order after a refresh: one in flight or still payable before
+    // one past its pay window, then one that needs attention, then the latest.
     if (activeId && orders.some(o => o.id === activeId)) return;
-    setActiveId(orders.length ? (orders.find(o => !isTerminalStatus(o.status)) ?? orders[0]).id : null);
+    const now = Date.now();
+    const pick = orders.find(o => !isTerminalStatus(o.status) && !isAbandoned(o, now)) ?? orders.find(o => needsAttention(o.status)) ?? orders[0];
+    setActiveId(pick ? pick.id : null);
   }, [orders, activeId]);
   const activeOrder = orders.find(o => o.id === activeId) ?? null;
-  useOrderWatcher(orders, activeId, showToast);
 
-  /** Pay an order, once: only the wallet it delivers to, only while its price is current, and never while a
-   *  previous attempt might still be on its way. */
-  async function pay(o: StoredOrder) {
-    const kind = SOURCE_CHAINS[o.sourceChain].kind;
+  /** Pay an order, once: only the wallet it delivers to, only while its price is current, never while a
+   *  previous attempt might still be on its way, and (from the order card) only if Rift's price for it has not
+   *  dropped by more than the tolerance since it was made. */
+  async function pay(o: StoredOrder, opts: { justCreated?: boolean } = {}) {
+    const kind = sourceKindOf(o.sourceChain);
     if (payingRef.current.has(o.id)) return;
-    const latest = loadOrders().find(x => x.id === o.id) ?? o; // another tab may have paid it
-    if (!addressRef.current || addressRef.current.toLowerCase() !== latest.toAddress.toLowerCase()) {
-      setError(`This order delivers iAERO to ${short(latest.toAddress)}. Connect that wallet to pay it.`);
-      return;
-    }
-    if (!canPay(latest, kind, Date.now())) {
-      setError('This order can’t be paid now: it is already paid, its payment is being checked, or its price is out of date.');
-      return;
-    }
     payingRef.current.add(o.id);
     setPayingId(o.id);
     setError(null);
     try {
-      if (kind === 'hypercore') await payHyperCore(latest);
-      else await payEvm(latest);
+      if (!payableNow(o.id)) return;
+      if (!opts.justCreated && !(await priceStillGood(o))) return;
+      if (kind === 'hypercore') await payHyperCore(o.id);
+      else await payEvm(o.id);
     } finally {
       payingRef.current.delete(o.id);
       setPayingId(null);
@@ -404,24 +441,80 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     }
   }
 
+  /** The order as stored now (another tab may have paid it), if this wallet may pay it now; else says why. */
+  function payableNow(id: string): StoredOrder | null {
+    const latest = loadOrders().find(x => x.id === id);
+    if (!latest) return null;
+    if (!addressRef.current || addressRef.current.toLowerCase() !== latest.toAddress.toLowerCase()) {
+      setError(`This order delivers iAERO to ${short(latest.toAddress)}. Connect that wallet to pay it.`);
+      return null;
+    }
+    if (!canPay(latest, sourceKindOf(latest.sourceChain), Date.now())) {
+      setError('This order can’t be paid now: it is already paid, its payment is being checked, or its price is out of date.');
+      return null;
+    }
+    return latest;
+  }
+
+  /** Paying from the order card: Rift fills at the price when the payment arrives, so its current price for
+   *  this order must not be worse than when it was made by more than the tolerance. */
+  async function priceStillGood(o: StoredOrder): Promise<boolean> {
+    setBusy('Checking the latest price…');
+    try {
+      const q = parseQuote(await fetchQuote({ from: o.token.asset, from_amount: o.fromAmount }), {
+        destination: RIFT_DESTINATION, fromChain: o.sourceChain, fromAmount: o.fromAmount, source: { fromAsset: o.token.asset, names: RIFT_TOKEN_NAMES },
+      });
+      const drop = priceDropPct(o.estimatedOut, q.estimated_amount_out);
+      if (drop > tolerance) {
+        setError(`Rift’s price for this order has dropped ${formatPct(drop)} since you made it, more than your ${tolerance}% limit. Nothing was sent. Start a new order at today’s price.`);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      setError(`Couldn’t re-check the price (${e instanceof RiftApiError ? explainRiftError(e) : errText(e)}). Nothing was sent; try again in a moment.`);
+      return false;
+    }
+  }
+
   /** What happened when the wallet call failed: cancelled, failed before anything went out, or unknown. */
-  function recordPayFailure(o: StoredOrder, e: unknown, where: string) {
+  function recordPayFailure(id: string, e: unknown, where: string) {
     if (isUserRejection(e)) {
-      patchOrder(o.id, { payRequestedAt: undefined });
+      patchOrder(id, { payRequestedAt: undefined });
       const msg = 'Payment cancelled in your wallet. You can pay from the order card while its price is current.';
       setError(msg); showToast(msg, 'info');
     } else if (isPreSend(e)) {
-      patchOrder(o.id, { payRequestedAt: undefined });
+      patchOrder(id, { payRequestedAt: undefined });
       const msg = `Payment failed before anything was sent: ${errText(e)}`;
       setError(msg); showToast(msg, 'error');
     } else {
-      patchOrder(o.id, { payRequestedAt: undefined, payUnknown: true });
-      const msg = `We couldn’t confirm whether your payment ${where}. Check your wallet before paying again; the order card can check the deposit address for you.`;
+      patchOrder(id, { payRequestedAt: undefined, payUnknown: true });
+      const msg = `We couldn’t confirm whether your payment ${where}. Check your wallet before paying again; the order card can check for you.`;
       setError(msg); showToast(msg, 'warning');
     }
   }
 
-  async function payEvm(o: StoredOrder) {
+  /** While the wallet is open: keep this tab's "payment requested" marker fresh (another tab would otherwise
+   *  take it for a lost prompt after 2 minutes), and remind about the price if the prompt stays open long. */
+  function whileWalletOpen(id: string, waiting: string) {
+    setBusy(waiting);
+    const beat = setInterval(() => patchOrder(id, prev => (prev.payRequestedAt ? { payRequestedAt: Date.now() } : {})), PAY_HEARTBEAT_MS);
+    const slow = setTimeout(() => setBusy('Still waiting for your wallet. Rift fills at the price when your payment arrives: if it may have moved, reject the request and buy again.'), SLOW_PROMPT_MS);
+    return () => { clearInterval(beat); clearTimeout(slow); };
+  }
+
+  /** A new attempt: the previous one's hash, times and results are cleared (the hash is kept in the history),
+   *  so nothing about it can be mistaken for this one. */
+  const newAttempt = (extra: Partial<StoredOrder>) => (prev: StoredOrder): Partial<StoredOrder> => ({
+    payRequestedAt: Date.now(), payAttemptAt: Date.now(), payUnknown: false,
+    depositFailed: false, depositFailReason: undefined, depositTxHash: undefined, depositNonce: undefined, depositSentAt: undefined,
+    depositConfirmedAt: undefined, depositReceivedRaw: undefined, startEstimated: undefined,
+    pastTxHashes: prev.depositTxHash ? [...(prev.pastTxHashes ?? []), prev.depositTxHash].slice(-5) : prev.pastTxHashes,
+    ...extra,
+  });
+
+  async function payEvm(id: string) {
+    let o = payableNow(id);
+    if (!o) return;
     const c = SOURCE_CHAINS[o.sourceChain];
     if (c.kind !== 'evm' || !c.chainId) return;
     if (walletChainRef.current !== c.chainId) {
@@ -431,89 +524,124 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         setError(msg); showToast(msg, 'info');
         return;
       }
+      // The switch prompt can stay open: check again (account, another tab) before asking to pay.
+      o = payableNow(id);
+      if (!o) return;
     }
-    patchOrder(o.id, { payRequestedAt: Date.now(), payUnknown: false, depositFailed: false, depositFailReason: undefined });
-    setBusy('Confirm the payment in your wallet…');
+    const client = publicFor(c.chainId);
+    let payNonce: number | undefined;
+    try { payNonce = client ? await accountNonce(client, o.toAddress, 'pending') : undefined; } catch { /* checked without it later */ }
+    if (!payableNow(id)) return;
+    await patchOrder(id, newAttempt({ payNonce }));
+    const stopWaiting = whileWalletOpen(id, 'Confirm the payment in your wallet…');
     try {
       const value = BigInt(o.fromAmountRaw);
       const to = o.depositAddress as Address;
       const hash = o.token.address
         ? await writeContractAsync({ address: o.token.address as Address, abi: erc20Abi, functionName: 'transfer', args: [to, value], chainId: c.chainId as EvmChainId })
         : await sendTransactionAsync({ to, value, chainId: c.chainId as EvmChainId });
-      patchOrder(o.id, { depositTxHash: hash, depositSentAt: Date.now(), payRequestedAt: undefined, depositConfirmedAt: undefined });
+      stopWaiting();
+      await patchOrder(id, {
+        depositTxHash: hash, depositSentAt: Date.now(), payRequestedAt: undefined, payUnknown: false,
+        depositConfirmedAt: undefined, depositFailed: false, depositFailReason: undefined,
+      });
       showToast('Payment sent. Tracking your order…', 'success');
     } catch (e) {
-      recordPayFailure(o, e, 'was sent');
+      stopWaiting();
+      recordPayFailure(id, e, 'was sent');
     }
   }
 
-  /** HyperCore: sign a spot transfer to the deposit address (on Arbitrum, the chain the signature's domain
-   *  names) and post it to Hyperliquid. Accepted means final; there is no transaction hash. */
-  async function payHyperCore(o: StoredOrder) {
+  /** HyperCore: one signed spot transfer to the deposit address (signed on Arbitrum, the chain the signature's
+   *  domain names), posted to Hyperliquid. Accepted means final; there is no transaction hash. The signed
+   *  transfer is saved before it is posted: a retry re-posts that same transfer, which Hyperliquid accepts at
+   *  most once, and the payer's ledger settles any doubt. */
+  async function payHyperCore(id: string) {
+    let o = payableNow(id);
+    if (!o) return;
     const t = hyperCoreToken(o.token.asset);
     if (!t) return;
-    if (walletChainRef.current !== HL_SIGNATURE_CHAIN_ID) {
-      setBusy('Switch your wallet to Arbitrum to sign…');
-      try { await switchChainAsync({ chainId: arbitrum.id }); } catch (e) {
-        const msg = isUserRejection(e) ? 'Switching to Arbitrum was cancelled. Nothing was sent.' : `Couldn’t switch your wallet to Arbitrum: ${errText(e)}`;
-        setError(msg); showToast(msg, 'info');
-        return;
+    const sentNow = (at: number) => patchOrder(id, { depositSentAt: at, depositConfirmedAt: Date.now(), payRequestedAt: undefined, payUnknown: false });
+    const ledger = async () => (await hyperDepositEvidence(o!, t.symbol)).evidence;
+
+    let action = o.hlAction;
+    if (action && (action.destination.toLowerCase() !== o.depositAddress.toLowerCase() || action.amount !== o.fromAmount || action.token !== spotSendToken(t))) action = undefined;
+    if (!action) {
+      if (walletChainRef.current !== HL_SIGNATURE_CHAIN_ID) {
+        setBusy('Switch your wallet to Arbitrum to sign…');
+        try { await switchChainAsync({ chainId: arbitrum.id }); } catch (e) {
+          const msg = isUserRejection(e) ? 'Switching to Arbitrum was cancelled. Nothing was sent.' : `Couldn’t switch your wallet to Arbitrum: ${errText(e)}`;
+          setError(msg); showToast(msg, 'info');
+          return;
+        }
+        o = payableNow(id);
+        if (!o) return;
       }
+      await patchOrder(id, newAttempt({ hlAction: undefined }));
+      const transfer = { destination: o.depositAddress, token: spotSendToken(t), amount: o.fromAmount, time: Date.now() };
+      const stopWaiting = whileWalletOpen(id, 'Sign the Hyperliquid transfer in your wallet…');
+      try {
+        const sig = parseSignature(await signTypedDataAsync(spotSendTypedData(transfer)));
+        action = { ...transfer, r: sig.r, s: sig.s, v: Number(sig.v ?? BigInt(27 + (sig.yParity ?? 0))) };
+      } catch (e) {
+        // Nothing can have moved without a signature.
+        patchOrder(id, { payRequestedAt: undefined });
+        const msg = isUserRejection(e) ? 'Signing cancelled in your wallet. Nothing was sent.' : `Signing failed, so nothing was sent: ${errText(e)}`;
+        setError(msg); showToast(msg, isUserRejection(e) ? 'info' : 'error');
+        return;
+      } finally {
+        stopWaiting();
+      }
+      await patchOrder(id, { hlAction: action, payRequestedAt: Date.now() });
+    } else {
+      // A transfer signed earlier, whose outcome was not known: if the ledger shows it, it went through.
+      await patchOrder(id, prev => ({ payRequestedAt: Date.now(), payAttemptAt: prev.payAttemptAt ?? action!.time, payUnknown: false, depositFailed: false }));
+      try {
+        if (await ledger() !== 'none') { await sentNow(action.time); showToast('Your Hyperliquid transfer had gone through. Tracking your order…', 'success'); return; }
+      } catch { /* re-posting is safe either way */ }
     }
-    patchOrder(o.id, { payRequestedAt: Date.now(), payUnknown: false, depositFailed: false, depositFailReason: undefined });
-    setBusy('Sign the Hyperliquid transfer in your wallet…');
-    const transfer = { destination: o.depositAddress, token: spotSendToken(t), amount: o.fromAmount, time: Date.now() };
-    let sig: ReturnType<typeof parseSignature>;
-    try {
-      sig = parseSignature(await signTypedDataAsync(spotSendTypedData(transfer)));
-    } catch (e) {
-      // Nothing can have moved without a signature.
-      if (isUserRejection(e)) { recordPayFailure(o, e, 'was sent'); return; }
-      patchOrder(o.id, { payRequestedAt: undefined });
-      const msg = `Signing failed, so nothing was sent: ${errText(e)}`;
-      setError(msg); showToast(msg, 'error');
-      return;
-    }
+
     setBusy('Sending on Hyperliquid…');
-    let res: Response;
-    try {
-      res = await fetch(`${HL_API}/exchange`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(spotSendRequest(transfer, { r: sig.r, s: sig.s, v: Number(sig.v ?? BigInt(27 + (sig.yParity ?? 0))) })),
-      });
-    } catch (e) {
-      recordPayFailure(o, e, 'reached Hyperliquid');
+    const outcome = await postHyperTransfer(action);
+    if (outcome.kind === 'ok') {
+      await sentNow(action.time);
+      showToast('Transfer sent on Hyperliquid. Tracking your order…', 'success');
       return;
     }
-    const text = await res.text().catch(() => '');
-    let json: unknown = null;
-    try { json = JSON.parse(text); } catch { /* not JSON: the outcome is unknown */ }
-    const result = json ? spotSendResult(json) : null;
-    if (result?.ok) {
-      const now = Date.now();
-      patchOrder(o.id, { depositSentAt: now, depositConfirmedAt: now, payRequestedAt: undefined });
+    // Refused, or no clear answer: Hyperliquid's ledger says whether this transfer (or an earlier post of it) went through.
+    let found: 'arrived' | 'partial' | 'none' | null = null;
+    try {
+      await new Promise(res => setTimeout(res, 2000));
+      found = await ledger();
+    } catch { found = null; }
+    if (found === 'arrived' || found === 'partial') {
+      await sentNow(action.time);
       showToast('Transfer sent on Hyperliquid. Tracking your order…', 'success');
-    } else if (result && !result.ok) {
-      // Hyperliquid answered and refused: nothing moved.
-      patchOrder(o.id, { payRequestedAt: undefined });
-      const msg = `Hyperliquid refused the transfer: ${result.error}`;
+    } else if (outcome.kind === 'refused' && found === 'none') {
+      // Hyperliquid refused and nothing moved: the next attempt signs a new transfer.
+      await patchOrder(id, { payRequestedAt: undefined, hlAction: undefined });
+      const msg = `Hyperliquid refused the transfer: ${outcome.error}`;
       setError(msg); showToast(msg, 'error');
     } else {
-      recordPayFailure(o, new Error(`HTTP ${res.status}`), 'reached Hyperliquid');
+      recordPayFailure(id, new Error('no clear answer from Hyperliquid'), 'reached Hyperliquid');
     }
   }
 
-  /** Is the wallet a smart-contract wallet on the chain it pays from (or is connected on) but not on Base?
-   *  Then it could not use the iAERO delivered there. */
-  async function smartWalletProblem(owner: Address): Promise<string | null> {
-    const checkChain = chain.kind === 'evm' ? chain.chainId : walletChainRef.current;
-    if (!checkChain || checkChain === base.id || !basePublic) return null;
-    const client = checkChain === mainnet.id ? ethPublic : checkChain === arbitrum.id ? arbPublic : null;
-    if (!client) return null;
-    const [code, onBase] = await Promise.all([client.getCode({ address: owner }), basePublic.getCode({ address: owner })]);
-    return isContractCode(code) && (!onBase || onBase === '0x')
-      ? `Your wallet is a smart-contract wallet on ${CHAIN_NAMES[checkChain]} but not on Base, so it could not receive iAERO there.`
-      : null;
+  /** Wallets that can't pay or receive here. A smart-contract wallet that exists on the paying chain but not
+   *  on Base could not use the iAERO delivered there. And a smart-contract wallet can't pay at all: Safe-style
+   *  wallets queue the payment for other signers (it would go out later, at that time's price, under a hash this
+   *  page can't follow), and Hyperliquid accepts signatures only from regular wallets. */
+  async function walletProblem(owner: Address): Promise<string | null> {
+    const payChain = chain.kind === 'evm' ? chain.chainId : chain.kind === 'hypercore' ? arbitrum.id : walletChainRef.current;
+    const client = payChain ? publicFor(payChain) : undefined;
+    if (!client || !basePublic) return null;
+    const [code, onBase] = await Promise.all([client.getCode({ address: owner }), payChain === base.id ? undefined : basePublic.getCode({ address: owner })]);
+    if (!isContractCode(code)) return null;
+    if (payChain !== base.id && !isContractCode(onBase)) {
+      return `Your wallet is a smart-contract wallet on ${CHAIN_NAMES[payChain!]} but not on Base, so it could not receive iAERO there.`;
+    }
+    if (chain.kind === 'bitcoin') return null; // Bitcoin is paid from another wallet; this one only receives.
+    return 'Payments from smart-contract wallets (Safe, smart accounts) aren’t supported here: they can go out later, at a different price, in a way this page can’t follow. Use a regular wallet, or swap on Aerodrome.';
   }
 
   /** Buy. `accepted` is a new price the user agreed to after a move; otherwise the baseline is what they saw. */
@@ -534,7 +662,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       }
       setBusy('Checking your wallet…');
       let problem: string | null;
-      try { problem = await smartWalletProblem(owner); } catch {
+      try { problem = await walletProblem(owner); } catch {
         throw new Error('Could not reach the network to check your wallet. Nothing was sent; try again in a moment.');
       }
       if (problem) throw new Error(problem);
@@ -554,16 +682,32 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         }
       }
 
+      // A token that delivers less than is sent (a fee or rebasing on transfer) would leave the order underfunded:
+      // the transfer is simulated first (nothing is signed or sent).
+      if (chain.kind === 'evm' && token.address && sourcePublic) {
+        setBusy('Checking the token…');
+        if (await transferDeliversInFull(sourcePublic as PublicClient, token.address as Address, owner, amountState.raw) === false) {
+          throw new Error(`${token.symbol} arrives short of the amount sent (it takes a fee or rebases on transfer), so Rift would receive less than the order needs. Nothing was sent; this token can’t be used here.`);
+        }
+      }
+
       // HyperCore: the spendable balance and the 1 USDC fee, live (the list can be a minute old).
       if (chain.kind === 'hypercore') {
         setBusy('Checking your Hyperliquid balance…');
         let state: unknown;
         try {
-          const res = await fetch(`${HL_API}/info`, {
-            method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ type: 'spotClearinghouseState', user: owner }),
-          });
-          state = await res.json();
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 10_000);
+          try {
+            const res = await fetch(`${HL_API}/info`, {
+              method: 'POST', headers: { 'content-type': 'application/json' }, signal: controller.signal,
+              body: JSON.stringify({ type: 'spotClearinghouseState', user: owner }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            state = await res.json();
+          } finally {
+            clearTimeout(timer);
+          }
         } catch {
           throw new Error('Could not reach Hyperliquid to check your balance. Nothing was sent; try again in a moment.');
         }
@@ -600,12 +744,15 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         setMoved({ seenOut, quote: q, fetchedAt, dropPct, limit: tolerance });
         return;
       }
-      // The cost tick, against the price actually used (it can cross into "high" with this refresh).
-      const freshExpected = expectedFor(q);
-      const freshCost = costOf(q);
-      if (freshCost.usdOut !== null && freshCost.usdOut <= 0) throw new Error('This amount is too small: Rift’s gas charge is more than the order is worth.');
+      // The cost tick, against the price actually used and market prices as they are now (it can cross into
+      // "high" with this refresh, or become unknown if a price source has gone quiet).
+      const px = market.at(Date.now());
+      const gasWei = gasAt(Date.now());
+      const freshExpected = expectedFor(q, px, gasWei);
+      const freshCost = costOf(q, px, gasWei);
+      if (freshCost.tooSmall) throw new Error('This amount is too small: Rift’s gas charge is more than the order is worth.');
       if (costNeedsTick(freshCost.check) && !ackCovers(ack, freshCost.check)) {
-        throw new Error('The cost changed with the latest price. Nothing was sent: tick the confirmation above to continue.');
+        throw new Error('The cost changed with the latest prices. Nothing was sent: tick the confirmation above to continue.');
       }
       stillSameAccount();
 
@@ -614,8 +761,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       const raw = decimalToRaw(fromAmount, token.decimals);
       const order = parseOrder(await createOrder({ quote_id: q.id, to_address: owner, refund_address: refund }), {
         destination: RIFT_DESTINATION, quoteId: q.id, toAddress: owner, fromChain: chainKey, fromAmount, refundAddress: refund, fresh: true,
+        source: { fromAsset: token.asset, names: RIFT_TOKEN_NAMES },
       });
-      // This quote is spent: the next purchase gets a new one.
+      // This quote is spent: it is not shown or re-fetched until an amount is entered again.
+      setSpent(quoteKey);
+      shown.current = null;
       queryClient.removeQueries({ queryKey: ['rift-quote'] });
       // Never ask the wallet to send anything the order does not say, or to an address of the wrong kind.
       if (decimalToRaw(order.from_amount, token.decimals) !== raw) throw new Error('The order amount does not match your request. Nothing was sent.');
@@ -624,27 +774,33 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       }
       let baseFromBlock: string | undefined;
       try { baseFromBlock = basePublic ? String(await basePublic.getBlockNumber()) : undefined; } catch { /* optional */ }
+      const created = Date.now();
       const stored: StoredOrder = {
-        id: order.id, quoteId: q.id, createdAt: Date.now(), sourceChain: chainKey,
+        id: order.id, quoteId: q.id, createdAt: created, sourceChain: chainKey,
         token: { symbol: token.symbol, decimals: token.decimals, address: token.address, asset: token.asset },
         fromAmount, fromAmountRaw: raw.toString(), estimatedOut: q.estimated_amount_out, route: q.route,
         depositAddress: order.deposit_address, depositDeadline: order.deposit_deadline, toAddress: owner,
-        refundAddress: refund, status: order.status, statusTimes: { [order.status]: Date.now() }, baseFromBlock, notify,
-        marketUsdIn: inputPriceUsd ? Number(fromAmount) * inputPriceUsd + hlFeeUsd : undefined, marketIaeroUsd: iaeroUsd || undefined,
+        refundAddress: refund, status: order.status, statusTimes: { [order.status]: created }, lastPolledAt: created, baseFromBlock, notify,
+        marketUsdIn: px.inputUsd ? Number(fromAmount) * px.inputUsd + hlFeeUsd : undefined, marketIaeroUsd: px.iaeroUsd,
         expectedOut: freshExpected ? Math.max(0, freshExpected.out).toFixed(6) : undefined, gasDeskUsd: freshExpected?.gasUsd,
       };
-      upsertOrder(stored);
+      await upsertOrder(stored);
       setActiveId(order.id);
       setAmountText('');
       setAck(null);
       if (chain.kind !== 'bitcoin') {
         stillSameAccount();
-        await pay(stored);
+        await pay(stored, { justCreated: true });
       } else {
         showToast('Order created. Send the exact BTC amount shown to complete it.', 'info');
       }
     } catch (e) {
-      if (e instanceof RiftApiError && classifyRiftError(e) === 'quote_expired') quoteQuery.refetch();
+      const kind = e instanceof RiftApiError ? classifyRiftError(e) : null;
+      // A used or expired quote: drop it and fetch a fresh one for the next click.
+      if (kind === 'quote_used' || kind === 'quote_expired') {
+        queryClient.removeQueries({ queryKey: ['rift-quote', token.asset, quoteAmount] });
+        void quoteQuery.refetch();
+      }
       const msg = e instanceof RiftApiError ? explainRiftError(e)
         : isNetworkError(e) ? 'Could not reach the network just now. Nothing was sent; try again in a moment.'
         : errText(e);
@@ -659,36 +815,46 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   /** An unpaid order whose price is out of date: the same token and amount, priced again. */
   const reorder = (o: StoredOrder) => {
     setSelected(o.token.asset === BTC_ASSET ? BTC_ASSET : o.token.asset);
-    setAmountText(o.fromAmount);
+    typeAmount(o.fromAmount);
     setError(null);
     formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
+  /** An out-of-date order that was never paid, removed from this browser. */
+  const dismiss = (o: StoredOrder) => {
+    void removeOrders([o.id]);
+    if (activeId === o.id) setActiveId(null);
+  };
 
   // The price-moved panel shows the same after-gas figures as the quote panel.
-  const movedDeduction = moved ? Number(moved.quote.estimated_amount_out) - (expectedFor(moved.quote)?.out ?? Number(moved.quote.estimated_amount_out)) : 0;
+  const movedDeduction = moved ? Number(moved.quote.estimated_amount_out) - (expectedFor(moved.quote, market, gasNow)?.out ?? Number(moved.quote.estimated_amount_out)) : 0;
 
   const cta = ((): { text: string; disabled: boolean; connect?: boolean } => {
     if (!isConnected) return { text: 'Connect a wallet to get iAERO', disabled: !openConnectModal, connect: true };
     if (!token) return { text: 'Choose a token to pay with', disabled: true };
     if (amountState.error) return { text: amountState.error, disabled: true };
     if (!amountState.normalized) return { text: 'Enter an amount', disabled: true };
+    if (busy) return { text: busy, disabled: true };
     if (quoteQuery.isFetching && !quote) return { text: 'Finding the best route…', disabled: true };
     if (!quote) {
-      const kind = quoteQuery.error ? classifyRiftError(quoteQuery.error) : null;
-      return { text: kind === 'unavailable' || kind === 'network' || kind === 'rate_limited' ? 'Rift is unavailable right now' : quoteQuery.error ? 'No route available' : 'Waiting for a quote', disabled: true };
+      return {
+        text: quoteErrorKind === 'unavailable' && riftUp === true ? 'No route available'
+          : quoteErrorKind === 'unavailable' || quoteErrorKind === 'network' || quoteErrorKind === 'rate_limited' ? 'Rift is unavailable right now'
+          : quoteQuery.error ? 'No route available' : 'Waiting for a quote',
+        disabled: true,
+      };
     }
     if (chain.kind === 'bitcoin' && !isBtcAddress(btcRefund)) return { text: 'Enter a valid BTC refund address', disabled: true };
     if (tooSmall) return { text: 'Amount too small for Rift’s gas charge', disabled: true };
     if (moved) return { text: 'The price moved: review it above', disabled: true };
     if (needsAck) return { text: 'Confirm the cost above to continue', disabled: true };
-    return { text: chain.kind === 'bitcoin' ? 'Create Bitcoin payment' : `Buy iAERO with ${token.symbol}`, disabled: !!busy };
+    return { text: chain.kind === 'bitcoin' ? 'Create Bitcoin payment' : `Buy iAERO with ${token.symbol}`, disabled: false };
   })();
 
   const choose = (asset: string) => {
     if (asset === selected || busy) return;
     setSelected(asset);
     if (asset !== BTC_ASSET) lastHolding.current = usable.find(h => h.asset === asset) ?? null;
-    setAmountText('');
+    typeAmount('');
     setError(null);
   };
 
@@ -721,17 +887,20 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
                 {usable.map(h => (
                   <button
                     key={h.asset} type="button" onClick={() => choose(h.asset)} disabled={!!busy} aria-pressed={selected === h.asset}
+                    aria-label={`${h.symbol} on ${SOURCE_CHAINS[h.chain].name}, ${fmt(rawToNumber(h.balanceRaw, h.decimals), 6)} ${h.symbol}${h.priceMissing ? ', price unavailable' : `, ${fmtUsd(h.valueUsd)}`}`}
                     className={`flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors ${selected === h.asset ? 'bg-indigo-500/15' : 'hover:bg-slate-800/60'}`}
                   >
                     <TokenIcon src={h.icon} symbol={h.symbol} />
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-baseline justify-between gap-2">
                         <span className="truncate font-medium text-white">{h.symbol}</span>
-                        <span className="shrink-0 rounded bg-slate-700/60 px-1.5 py-0.5 text-[10px] text-slate-300">{SOURCE_CHAINS[h.chain].name}</span>
+                        <span className={`shrink-0 text-sm font-medium ${h.priceMissing ? 'text-slate-400' : 'text-white'}`}>{h.priceMissing ? 'price unavailable' : fmtUsd(h.valueUsd)}</span>
                       </div>
-                      <div className="truncate text-xs text-slate-400">{fmt(rawToNumber(h.balanceRaw, h.decimals), 6)} {h.symbol}</div>
+                      <div className="flex min-w-0 items-center gap-2 text-xs text-slate-400">
+                        <span className="shrink-0 rounded bg-slate-700/60 px-1.5 py-0.5 text-[10px] text-slate-300">{SOURCE_CHAINS[h.chain].name}</span>
+                        <span className="truncate">{fmt(rawToNumber(h.balanceRaw, h.decimals), 6)} {h.symbol}</span>
+                      </div>
                     </div>
-                    <div className="shrink-0 text-right text-sm font-medium text-white">{fmtUsd(h.valueUsd)}</div>
                   </button>
                 ))}
                 {!usable.length && !checking && (
@@ -748,7 +917,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
             {isConnected && !holdingsQuery.isLoading && (
               <div className="flex items-center justify-between gap-2 text-xs text-slate-400">
                 <span>
-                  {checking > 0 ? `Checking routes for ${checking} more token${checking === 1 ? '' : 's'}…` : 'Highest value first. Tokens under $1 and those without a route are hidden.'}
+                  {checking > 0 ? `Checking routes for ${checking} more token${checking === 1 ? '' : 's'}…` : 'Highest value first. Tokens under $1, small Ethereum balances and tokens without a route are hidden.'}
                 </span>
                 <button type="button" onClick={() => { freshRef.current = true; holdingsQuery.refetch(); }} className="flex shrink-0 items-center gap-1 hover:text-white">
                   <RefreshCw className={`h-3.5 w-3.5 ${holdingsQuery.isFetching ? 'animate-spin' : ''}`} /> Refresh
@@ -772,7 +941,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
               <div className="relative">
                 <Input
                   id="rift-amount" type="text" inputMode="decimal" autoComplete="off" placeholder="0.0" value={amountText} disabled={!!busy}
-                  onChange={e => setAmountText(e.target.value)} aria-invalid={!!amountState.error} aria-describedby="rift-amount-note"
+                  onChange={e => typeAmount(e.target.value)} aria-invalid={!!amountState.error} aria-describedby="rift-amount-note"
                   className={`border-slate-600 bg-slate-900/50 pr-28 text-white placeholder-slate-400 ${amountState.error ? 'border-red-500/50' : ''}`}
                 />
                 <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
@@ -789,6 +958,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
                     : <span className="text-slate-400">You will pay from any Bitcoin wallet using a QR code or address.</span>}
                 {amountUsd > 0 && <span className="text-slate-400">≈ {fmtUsd(amountUsd)}</span>}
               </div>
+              {amountState.ambiguous && amountState.normalized && (
+                <div className="text-xs text-amber-300/90">
+                  Read as <span className="font-medium text-white">{fmt(amountState.normalized, token.decimals)} {token.symbol}</span>. If you meant something else, type it with a {decimalSep === '.' ? 'dot' : 'comma'} as the decimal point.
+                </div>
+              )}
             </div>
           )}
 
@@ -808,23 +982,23 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
           )}
 
           {/* Quote */}
-          {(quote || quoteQuery.isFetching || quoteQuery.error) && amountState.normalized && !amountState.error && (
-            <div className="space-y-4 rounded-xl border border-slate-700/30 bg-slate-900/50 p-4">
+          {(quote || quoteQuery.isFetching || quoteQuery.error) && amountState.normalized && !amountState.error && spent !== quoteKey && (
+            <div className="space-y-4 rounded-xl border border-slate-700/30 bg-slate-900/50 p-4" aria-busy={quoteQuery.isFetching}>
               {!quote && quoteQuery.isFetching && (
-                <div className="flex items-center gap-2 text-sm text-slate-300"><Loader2 className="h-4 w-4 animate-spin" /> Finding the best route across 20+ venues (a few seconds)…</div>
+                <div role="status" className="flex items-center gap-2 text-sm text-slate-300"><Loader2 className="h-4 w-4 animate-spin" /> Finding the best route across 20+ venues (a few seconds)…</div>
               )}
-              {!quote && quoteQuery.error && !quoteQuery.isFetching && (
-                <div role="alert" className="text-sm text-red-300">{explainRiftError(quoteQuery.error)}</div>
+              {!quote && quoteErrorText && !quoteQuery.isFetching && (
+                <div role="alert" className="text-sm text-red-300">{quoteErrorText}</div>
               )}
               {quote && estimate && cost && (
                 <>
                   <div className="flex items-end justify-between gap-3">
-                    <div className="min-w-0">
+                    <div className="min-w-0" aria-live="polite" aria-atomic="true">
                       <div className="text-xs text-slate-400">You receive (estimated)</div>
                       <div className="break-words text-2xl font-semibold text-white">{fmt(expectedOut)} iAERO</div>
-                      {iaeroUsd > 0 && <div className="text-xs text-slate-400">≈ {fmtUsd(expectedOut * iaeroUsd)}</div>}
+                      {(market.iaeroUsd ?? 0) > 0 && <div className="text-xs text-slate-400">≈ {fmtUsd(expectedOut * market.iaeroUsd!)}</div>}
                     </div>
-                    {quoteQuery.isFetching && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" />}
+                    {quoteQuery.isFetching && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" aria-label="Refreshing the price" />}
                   </div>
                   {expected && expected.gasUsd > 0 && (
                     <div className="text-xs text-slate-400">
@@ -843,7 +1017,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
                     const box = c.kind === 'ok' ? COST_STYLE[c.level] : 'border-slate-500/40 bg-slate-800/70 text-slate-200';
                     return (
                       <div className={`space-y-1 rounded-lg border p-3 text-sm ${box}`}>
-                        <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center justify-between gap-2" aria-live="polite" aria-atomic="true">
                           <span>Cost vs market price</span>
                           <span className="font-semibold">{c.kind === 'ok' ? `${LEVEL_WORD[c.level]} · ${costText(c.pct)}` : c.kind === 'unknown' ? 'Can’t check' : 'Prices disagree'}</span>
                         </div>
@@ -856,7 +1030,10 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
                           </div>
                         )}
                         {c.kind === 'unknown' && (
-                          <div className="text-xs">There’s no current market price to compare this quote with, so its cost can’t be checked.</div>
+                          <div className="text-xs">
+                            {tooSmall ? <>Rift’s gas charge would be more than this order is worth. Try a larger amount, or pay from Base or Arbitrum.</>
+                              : <>There’s no current market price to compare this quote with, so its cost can’t be checked.</>}
+                          </div>
                         )}
                         {c.kind === 'disagree' && (
                           <div className="text-xs">Rift’s quote is {formatPct(c.pct)} better than the market prices this page sees, so one of them is probably out of date.</div>
@@ -865,7 +1042,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
                           <label className="flex cursor-pointer items-start gap-2 pt-1 text-xs">
                             <input
                               type="checkbox" checked={ackCovers(ack, c)} disabled={!!busy} className="mt-0.5 h-4 w-4 shrink-0 accent-red-500"
-                              onChange={e => setAck(e.target.checked ? { key: ackKey, kind: c.kind, pct: c.kind === 'unknown' ? NaN : c.pct } : null)}
+                              onChange={e => setAck(e.target.checked ? { key: ackKey, kind: c.kind, pct: c.kind === 'ok' ? c.pct : NaN } : null)}
                             />
                             <span>
                               {c.kind === 'ok'
@@ -910,9 +1087,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
                       </div>
                     </div>
                     <div className="text-xs text-slate-400">
-                      The price refreshes every 30 seconds and is checked again when you click. If Rift’s price has dropped by more than{' '}
-                      {tolerance}%, nothing is sent and you are asked first. This is not a slippage limit: Rift has no way to cap the final
-                      amount, and fills at the market price when your payment arrives
+                      The price refreshes every 30 seconds and is checked again when you click (and when you pay from an order card). If Rift’s
+                      price has dropped by more than {tolerance}%, nothing is sent and you are asked first. This is not a slippage limit: Rift has
+                      no way to cap the final amount, and fills at the market price when your payment arrives
                       {chain.kind === 'bitcoin' ? ' (usually within the hour, after your BTC confirms)' : ''}.
                     </div>
                   </div>
@@ -993,10 +1170,26 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       {/* Progress */}
       <div className="min-w-0 space-y-6">
         {activeOrder ? (
-          <OrderTracker
-            key={activeOrder.id} order={activeOrder} account={address} walletChainId={walletChainId}
-            onPay={pay} paying={payingId === activeOrder.id} onReorder={reorder} onGoToStake={onGoToStake} showToast={showToast}
-          />
+          <RiftErrorBoundary
+            key={activeOrder.id}
+            fallback={() => (
+              <div role="alert" className="space-y-3 rounded-xl border border-red-500/20 bg-red-500/10 p-6 text-sm text-red-200">
+                <div className="font-medium text-white">This order can’t be shown</div>
+                <div>
+                  Its saved record is damaged. Your funds are not affected and Rift completes the order regardless. Order{' '}
+                  <span className="break-all font-mono text-red-100">{activeOrder.id}</span>: keep this ID if you need Rift’s support.
+                </div>
+                <button type="button" onClick={() => dismiss(activeOrder)} className="rounded-lg border border-red-400/40 px-3 py-1.5 text-red-100 hover:border-red-300">
+                  Remove it from this browser
+                </button>
+              </div>
+            )}
+          >
+            <OrderTracker
+              order={activeOrder} account={address} walletChainId={walletChainId}
+              onPay={o => { void pay(o); }} paying={payingId === activeOrder.id} onReorder={reorder} onDismiss={dismiss} onGoToStake={onGoToStake} showToast={showToast}
+            />
+          </RiftErrorBoundary>
         ) : (
           <Card className="border-slate-700/50 bg-slate-800/50 backdrop-blur-xl">
             <CardContent className="space-y-3 p-6 text-sm text-slate-400">
@@ -1010,14 +1203,17 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
             </CardContent>
           </Card>
         )}
-        <RecentOrders
-          orders={orders} activeId={activeId} onSelect={setActiveId}
-          onClearFinished={() => {
-            const done = orders.filter(o => isTerminalStatus(o.status) && !needsAttention(o.status)).map(o => o.id);
-            removeOrders(done);
-            if (activeId && done.includes(activeId)) setActiveId(null);
-          }}
-        />
+        <RiftErrorBoundary fallback={() => null}>
+          <RecentOrders
+            orders={orders} activeId={activeId} onSelect={setActiveId}
+            onClearFinished={() => {
+              const now = Date.now();
+              const done = orders.filter(o => clearable(o, now)).map(o => o.id);
+              void removeOrders(done);
+              if (activeId && done.includes(activeId)) setActiveId(null);
+            }}
+          />
+        </RiftErrorBoundary>
       </div>
     </div>
   );

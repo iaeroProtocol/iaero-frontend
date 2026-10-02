@@ -3,22 +3,29 @@
 // The wallet's balances on Ethereum, Arbitrum and Base, and its HyperCore spot balances on Hyperliquid,
 // valued in USD and sorted largest first, for the "Get iAERO" token picker.
 // - Blockscout's /tokens page (sorted by USD value, about 25 KB) says which tokens the wallet holds and prices
-//   most of them. The balances themselves are read on-chain, in one multicall per chain covering those
+//   most of them. That list is kept for 10 minutes per wallet and chain (Blockscout can take half a minute for
+//   a big wallet). The balances themselves are read on-chain, in one multicall per chain covering those
 //   tokens, the major tokens Rift routes and ETH, because Blockscout's numbers can be stale.
-// - Hyperliquid's API gives the HyperCore balances; one DeFiLlama call prices the rest, major tokens first.
+// - Hyperliquid's API gives the HyperCore balances; one DeFiLlama call prices the rest, major tokens first,
+//   keeping only recent, confident prices (as the page's own cost check does).
 // - A source that fails is reported in `warnings` and the others are still returned. If no RPC answers for a
-//   chain, Blockscout's own numbers are used and flagged.
-// - Answers are cached for 30 s per wallet (Cloudflare's cache, where available); `?fresh=1` skips it.
+//   chain, Blockscout's own numbers are used and flagged. If DeFiLlama is down, ETH is priced from Blockscout,
+//   and major tokens without a price are listed unvalued rather than dropped.
+// - Answers are cached per wallet (Cloudflare's cache, where available) for 90 s, longer than the page's
+//   60 s refresh, or 20 s when a source failed; `?fresh=1` (the Refresh button) skips it, at most every 20 s.
+// - Each Worker instance limits callers to 30 requests a minute per IP address.
 // - `hyperliquidUsdc` is the USDC that can pay Hyperliquid's 1 USDC new-address fee, whatever token is sent.
 
 import { type NextRequest, NextResponse } from 'next/server';
 import { createPublicClient, erc20Abi, fallback, http, type Address } from 'viem';
 import { arbitrum, base, mainnet } from 'viem/chains';
 import { CURATED_TOKENS, RIFT_DESTINATION } from '@/lib/rift/config';
+import { RIFT_LISTED } from '@/lib/rift/rift-tokens';
 import { EVM_ADDRESS_RE, badRequest } from '@/lib/rift/server';
+import { parseLlamaPrices } from '@/lib/rift/cost';
 import { rpcUrls } from '@/lib/public-rpcs';
 import {
-  HOLDING_CHAINS, applyLlamaPrices, blockscoutCandidates, candidatesToHoldings, nativeHolding, parseTokenBalances,
+  HOLDING_CHAINS, applyLlamaPrices, blockscoutCandidates, candidatesToHoldings, nativeHolding, parseNative, parseTokenBalances,
   rankHoldings, rawToNumber, type EvmHoldingChain, type Holding, type TokenCandidate,
 } from '@/lib/rift/holdings';
 import { HL_API, HYPERCORE_TOKENS, hyperCoreHoldings, parseSpotBalances, usdcForFee } from '@/lib/rift/hypercore';
@@ -27,7 +34,12 @@ export const runtime = 'edge';
 
 const SOURCE_TIMEOUT_MS = 8_000;
 const RPC_TIMEOUT_MS = 4_000;
-const CACHE_SECONDS = 30;
+const CACHE_SECONDS = 90;
+const WARNED_CACHE_SECONDS = 20;
+const LIST_FRESH_MS = 10 * 60_000;
+const LIST_MAX_AGE_MS = 60 * 60_000;
+const FRESH_EVERY_MS = 20_000;
+const PER_IP_PER_MINUTE = 30;
 const MAX_LLAMA_LOOKUPS = 80;
 const VIEM_CHAINS = { 1: mainnet, 42161: arbitrum, 8453: base } as const;
 const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11' as const;
@@ -55,6 +67,40 @@ async function getJson(url: string, body?: unknown): Promise<unknown> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// --- Cloudflare's cache (absent in `next dev`) ---
+
+const edgeCache = (): Cache | undefined => (typeof caches !== 'undefined' ? (caches as unknown as { default?: Cache }).default : undefined);
+const cacheKey = (kind: string, id: string) => new Request(`https://iaero-cache.invalid/${kind}/${id}`);
+
+async function cacheGet(key: Request): Promise<Response | undefined> {
+  return edgeCache()?.match(key).catch(() => undefined);
+}
+async function cachePut(key: Request, body: string, seconds: number, extra: Record<string, string> = {}) {
+  await edgeCache()?.put(key, new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${seconds}`, ...extra } })).catch(() => {});
+}
+
+// --- Per-instance limits (a loop over addresses would otherwise spend the RPC key's quota) ---
+
+const hits = new Map<string, number[]>();
+const lastFresh = new Map<string, number>();
+
+function overLimit(ip: string, now: number): boolean {
+  const recent = (hits.get(ip) ?? []).filter(t => now - t < 60_000);
+  recent.push(now);
+  hits.set(ip, recent);
+  if (hits.size > 5000) hits.clear();
+  return recent.length > PER_IP_PER_MINUTE;
+}
+
+/** Whether a `fresh=1` for this wallet may skip the caches now. */
+function freshAllowed(owner: string, now: number): boolean {
+  const last = lastFresh.get(owner) ?? 0;
+  if (now - last < FRESH_EVERY_MS) return false;
+  lastFresh.set(owner, now);
+  if (lastFresh.size > 5000) lastFresh.clear();
+  return true;
 }
 
 /** The major tokens Rift routes on a chain, read even when Blockscout does not list them. */
@@ -102,13 +148,24 @@ async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: T
 
 const chainKey = (chainId: 1 | 42161 | 8453): EvmHoldingChain => (chainId === 1 ? 'ethereum' : chainId === 42161 ? 'arbitrum' : 'base');
 
-async function chainHoldings(chain: EvmHoldingChain, chainId: 1 | 42161 | 8453, blockscout: string, owner: Address, warnings: Warnings): Promise<Holding[]> {
-  let list: unknown = null;
+/** Blockscout's token list for a wallet: kept 10 minutes, and used up to an hour old when Blockscout fails. */
+async function tokenList(chain: EvmHoldingChain, blockscout: string, owner: Address, fresh: boolean): Promise<unknown | null> {
+  const key = cacheKey('rift-token-list', `${chain}/${owner}`);
+  const hit = await cacheGet(key);
+  const cached = hit ? await hit.json().catch(() => null) as { at?: number; list?: unknown } | null : null;
+  const age = cached?.at ? Date.now() - cached.at : Infinity;
+  if (!fresh && cached?.list && age < LIST_FRESH_MS) return cached.list;
   try {
-    list = await getJson(`${blockscout}/api/v2/addresses/${owner}/tokens?type=ERC-20`);
+    const list = await getJson(`${blockscout}/api/v2/addresses/${owner}/tokens?type=ERC-20`);
+    await cachePut(key, JSON.stringify({ at: Date.now(), list }), LIST_MAX_AGE_MS / 1000);
+    return list;
   } catch {
-    warnings.push(`${chain}: token list unavailable, major tokens only`);
+    return cached?.list && age < LIST_MAX_AGE_MS ? cached.list : null;
   }
+}
+
+async function chainHoldings(chain: EvmHoldingChain, chainId: 1 | 42161 | 8453, blockscout: string, owner: Address, fresh: boolean, warnings: Warnings): Promise<Holding[]> {
+  const list = await tokenList(chain, blockscout, owner, fresh);
   const listed = list ? blockscoutCandidates(list, [RIFT_DESTINATION]) : [];
   const listedPrice = new Map(listed.map(c => [c.address, c]));
   // Major tokens keep Blockscout's price and icon when it lists them.
@@ -119,10 +176,15 @@ async function chainHoldings(chain: EvmHoldingChain, chainId: 1 | 42161 | 8453, 
   let read: Awaited<ReturnType<typeof readBalances>> = null;
   try { read = await readBalances(chainId, owner, candidates); } catch { read = null; }
   if (!read) {
-    warnings.push(`${chain}: balances could not be checked on-chain and may be out of date`);
+    // No RPC answered: Blockscout's own numbers (ETH from its address page), flagged.
     const items = (list as { items?: unknown[] } | null)?.items;
-    return items ? parseTokenBalances(chain, items, [RIFT_DESTINATION]) : [];
+    let native: Holding | null = null;
+    try { native = parseNative(chain, await getJson(`${blockscout}/api/v2/addresses/${owner}`)); } catch { /* none */ }
+    const out = [...(items ? parseTokenBalances(chain, items, [RIFT_DESTINATION]) : []), ...(native ? [native] : [])];
+    warnings.push(!items && !native ? `${chain}: balances unavailable` : `${chain}: balances could not be checked on-chain and may be out of date`);
+    return out;
   }
+  if (!list) warnings.push(`${chain}: token list unavailable, major tokens only`);
   const out = candidatesToHoldings(chain, read.tokens, read.balances);
   if (read.native !== null) { const n = nativeHolding(chain, read.native, 0); if (n) out.push(n); }
   return out;
@@ -139,21 +201,37 @@ function lookupOrder(holdings: Holding[]): Holding[] {
   return [...major, ...rest].slice(0, MAX_LLAMA_LOOKUPS);
 }
 
+/** ETH's price from Blockscout, when DeFiLlama is down. */
+async function blockscoutEthUsd(): Promise<number | undefined> {
+  try {
+    const stats = await getJson('https://base.blockscout.com/api/v2/stats') as { coin_price?: unknown };
+    const p = Number(stats?.coin_price);
+    return p > 0 ? p : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function GET(request: NextRequest) {
   const address = request.nextUrl.searchParams.get('address') ?? '';
   if (!EVM_ADDRESS_RE.test(address)) return badRequest('invalid address');
   const owner = address.toLowerCase() as Address;
+  const now = Date.now();
+  const ip = request.headers.get('cf-connecting-ip') ?? request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
+  if (overLimit(ip, now)) {
+    return NextResponse.json({ error: 'Too many requests. Try again in a minute.' }, { status: 429, headers: { 'retry-after': '60', 'cache-control': 'no-store' } });
+  }
+  const fresh = request.nextUrl.searchParams.get('fresh') === '1' && freshAllowed(owner, now);
 
-  const cache = typeof caches !== 'undefined' ? (caches as unknown as { default?: Cache }).default : undefined;
-  const cacheKey = new Request(`https://iaero-cache.invalid/rift-holdings/${owner}`);
-  if (cache && request.nextUrl.searchParams.get('fresh') !== '1') {
-    const hit = await cache.match(cacheKey).catch(() => undefined);
+  const key = cacheKey('rift-holdings', owner);
+  if (!fresh) {
+    const hit = await cacheGet(key);
     if (hit) return new NextResponse(hit.body, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-cache': 'hit' } });
   }
 
   const warnings: Warnings = [];
   const [evm, hyperJson] = await Promise.all([
-    Promise.all(HOLDING_CHAINS.map(c => chainHoldings(c.chain, c.chainId, c.blockscout, owner, warnings))),
+    Promise.all(HOLDING_CHAINS.map(c => chainHoldings(c.chain, c.chainId, c.blockscout, owner, fresh, warnings))),
     getJson(`${HL_API}/info`, { type: 'spotClearinghouseState', user: owner }).catch(() => { warnings.push('hyperliquid: balances unavailable'); return null; }),
   ]);
   let holdings = evm.flat();
@@ -167,25 +245,28 @@ export async function GET(request: NextRequest) {
     ...(holdings.some(h => !h.address) ? ['coingecko:ethereum'] : []),
     ...lookups.map(h => `${llamaChain(h.chain)}:${h.address}`),
   ];
-  let prices: unknown = null;
+  let prices: Record<string, number> | null = ids.length ? {} : null;
   if (ids.length) {
-    try { prices = await getJson(`https://coins.llama.fi/prices/current/${[...new Set(ids)].join(',')}`); } catch { warnings.push('prices: some token prices unavailable'); }
-  }
-  if (prices) {
-    holdings = applyLlamaPrices(holdings, prices, llamaChain);
-    const eth = (prices as { coins?: Record<string, { price?: number }> }).coins?.['coingecko:ethereum']?.price;
-    if (typeof eth === 'number' && eth > 0) {
-      holdings = holdings.map(h => (!h.address ? { ...h, priceUsd: eth, valueUsd: eth * rawToNumber(h.balanceRaw, h.decimals) } : h));
+    try {
+      prices = parseLlamaPrices(await getJson(`https://coins.llama.fi/prices/current/${[...new Set(ids)].join(',')}?searchWidth=4h`), Date.now());
+    } catch {
+      prices = null;
+      warnings.push('prices: some token prices unavailable');
     }
   }
-  holdings = [...holdings, ...hyperCoreHoldings(hyperBalances, prices)];
+  if (prices) holdings = applyLlamaPrices(holdings, prices, llamaChain);
+  let ethUsd = prices?.['coingecko:ethereum'];
+  if (!ethUsd && holdings.some(h => !h.address)) ethUsd = await blockscoutEthUsd();
+  if (ethUsd) holdings = holdings.map(h => (!h.address ? { ...h, priceUsd: ethUsd, valueUsd: ethUsd * rawToNumber(h.balanceRaw, h.decimals) } : h));
+  holdings = [...holdings, ...hyperCoreHoldings(hyperBalances, prices ?? {})];
+  // Tokens known to be real (ETH, major tokens, Rift's list) stay listed without a value when no price is to be
+  // had; the unknown, unpriced long tail (mostly airdropped spam) is not shown.
+  holdings = holdings.map(h => (h.priceUsd > 0 || !(!h.address || MAJOR.has(h.asset) || RIFT_LISTED.has(h.asset)) ? h : { ...h, priceMissing: true }));
 
   const body = JSON.stringify({
     holdings: rankHoldings(holdings), warnings,
     hyperliquidUsdc: hyperJson ? String(usdcForFee(hyperJson)) : undefined,
   });
-  if (cache && !warnings.length) {
-    await cache.put(cacheKey, new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${CACHE_SECONDS}` } })).catch(() => {});
-  }
+  await cachePut(key, body, warnings.length ? WARNED_CACHE_SECONDS : CACHE_SECONDS);
   return new NextResponse(body, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
 }

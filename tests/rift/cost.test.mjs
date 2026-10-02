@@ -55,6 +55,17 @@ test('market prices: DeFiLlama ids and parsing', async () => {
   assert.deepEqual(parseLlamaPrices(null, now), {});
 });
 
+test('prices are checked for age when used, not only when fetched', async () => {
+  const { freshPrice, parseLlamaQuotes, PRICE_MAX_AGE_SEC } = await import('../../src/lib/rift/cost.ts');
+  const t = 1_790_922_940;
+  const quotes = parseLlamaQuotes({ coins: { 'coingecko:ethereum': { price: 2700, timestamp: t, confidence: 0.99 } } }, t * 1000);
+  assert.deepEqual(quotes, { 'coingecko:ethereum': { price: 2700, ts: t } });
+  assert.equal(freshPrice(quotes['coingecko:ethereum'], t * 1000 + 60_000), 2700);
+  // A failed refresh keeps the old answer: twenty minutes later it is still there, an hour later it no longer counts.
+  assert.equal(freshPrice(quotes['coingecko:ethereum'], (t + PRICE_MAX_AGE_SEC + 1) * 1000), undefined);
+  assert.equal(freshPrice(undefined, t * 1000), undefined);
+});
+
 test('iAERO market price from its Aerodrome pools, and cost wording', async () => {
   const { clAeroPerIaero, v2AeroPerIaero, costText } = await import('../../src/lib/rift/cost.ts');
   // Live reads, 2026-10-02 07:05 UTC: Slipstream pool slot0 and the classic pool's reserves.

@@ -37,10 +37,12 @@ test('native ETH, DeFiLlama fallback prices and ranking by USD value', () => {
     tok('0x4444444444444444444444444444444444444444', 'NOPRICE', 18, '7000000000000000000', null),
     tok('0x5555555555555555555555555555555555555555', 'DUST', 18, '1000000000000000', '0.5'),
   ]);
-  const priced = applyLlamaPrices(tokens, { coins: { 'ethereum:0x4444444444444444444444444444444444444444': { price: 2 } } }, c => c);
+  const priced = applyLlamaPrices(tokens, { 'ethereum:0x4444444444444444444444444444444444444444': 2 }, c => c);
   assert.equal(priced[0].valueUsd, 14);
   const ranked = rankHoldings([...priced, eth]);
   assert.deepEqual(ranked.map(h => h.symbol), ['ETH', 'NOPRICE'], 'largest first; dust under $1 dropped');
+  const missing = { ...eth, chain: 'base', asset: 'base.eth', priceUsd: 0, valueUsd: 0, priceMissing: true };
+  assert.deepEqual(rankHoldings([missing, ...priced]).map(h => h.symbol), ['NOPRICE', 'ETH'], 'a holding without a price stays listed, last');
 });
 
 test('route checks use the balance, capped near $100', () => {

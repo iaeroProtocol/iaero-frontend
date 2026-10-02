@@ -1,34 +1,49 @@
 // src/lib/rift/storage.ts
 //
 // Orders live in this browser's localStorage, so progress survives a refresh, a closed tab or a crash.
-// A copy is also kept in memory: if storage is full or blocked, the order stays tracked on this page and
-// the page says so, instead of the order disappearing. Saved records are checked one by one (order-state.ts)
-// and damaged ones are dropped rather than rendered.
+// - Every change is a read-modify-write of the whole list, run under a Web Lock shared by all tabs of the
+//   site, so two tabs writing at once cannot undo each other's changes (without the lock, a stress test lost
+//   182 of 600 updates). Changes therefore apply asynchronously; await the returned promise when the next step
+//   reads the result.
+// - A copy is also kept in memory: if storage is full or blocked, the order stays tracked on this page and
+//   the page says so, instead of the order disappearing.
+// - Saved records are checked one by one (order-state.ts). Ones this version cannot read (written by a newer
+//   version, or damaged) are kept as they are, not erased by the next write.
 
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { capOrders, isTerminalStatus, sanitizeOrder } from './order-state';
+import { canMoveTo, capOrders, sanitizeOrder } from './order-state';
 import type { OrderUpdate } from './validate';
 import type { StoredOrder } from './types';
 
 const KEY = 'iaero.rift.orders.v1';
+const LOCK = 'iaero-rift-orders';
 const EVENT = 'iaero-rift-orders';
 const MAX_ORDERS = 25;
+/** At most this many unreadable records are carried along. */
+const MAX_FOREIGN = 10;
 /** Polls refresh `lastPolledAt` at most this often, so an unchanged status does not rewrite storage. */
 const POLL_STAMP_MS = 30_000;
 /** A status first seen after a gap this long was not watched live: its time is not when it happened. */
 const LATE_AFTER_MS = 150_000;
 
 let memory: StoredOrder[] | null = null;
+let foreign: unknown[] = [];
 let writeFailed = false;
 
 function readStorage(): StoredOrder[] | null {
   try {
     const raw = window.localStorage.getItem(KEY);
-    const list = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(list)) return [];
-    return list.map(sanitizeOrder).filter((o): o is StoredOrder => !!o);
+    const list: unknown = raw ? JSON.parse(raw) : [];
+    const orders: StoredOrder[] = [];
+    const others: unknown[] = [];
+    for (const x of Array.isArray(list) ? list : []) {
+      const o = sanitizeOrder(x);
+      if (o) orders.push(o); else others.push(x);
+    }
+    foreign = others.slice(0, MAX_FOREIGN);
+    return orders;
   } catch {
     return null;
   }
@@ -46,10 +61,10 @@ export function loadOrders(): StoredOrder[] {
 export const storageFailing = () => writeFailed;
 
 function saveOrders(list: StoredOrder[]) {
-  const capped = capOrders(list, MAX_ORDERS);
+  const capped = capOrders(list, MAX_ORDERS, Date.now());
   memory = capped;
   try {
-    window.localStorage.setItem(KEY, JSON.stringify(capped));
+    window.localStorage.setItem(KEY, JSON.stringify([...capped, ...foreign]));
     writeFailed = false;
   } catch {
     writeFailed = true;
@@ -57,36 +72,53 @@ function saveOrders(list: StoredOrder[]) {
   window.dispatchEvent(new Event(EVENT));
 }
 
-/** A new order first. An order already stored under the same id keeps what this browser learned about it. */
-export function upsertOrder(order: StoredOrder) {
-  const list = loadOrders();
-  const prev = list.find(o => o.id === order.id);
-  saveOrders([prev ? { ...order, ...prev } : order, ...list.filter(o => o.id !== order.id)]);
+/** Read, change and save the list under the cross-tab lock. `change` returns null for "nothing to save". */
+function mutate(change: (list: StoredOrder[]) => StoredOrder[] | null): Promise<void> {
+  const run = () => {
+    const next = change(loadOrders());
+    if (next) saveOrders(next);
+  };
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  if (!locks?.request) { run(); return Promise.resolve(); }
+  return locks.request(LOCK, run).then(() => undefined, () => run());
 }
 
-/** Change one order. Nothing is written when nothing changes, and a finished status never goes back (a late
- *  poll from another tab can land after the final one). */
-export function patchOrder(id: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>)) {
-  const list = loadOrders();
-  const i = list.findIndex(o => o.id === id);
-  if (i < 0) return;
-  const prev = list[i];
-  const p = { ...(typeof patch === 'function' ? patch(prev) : patch) };
-  if (p.status && isTerminalStatus(prev.status) && p.status !== prev.status) delete p.status;
-  const next = { ...prev, ...p };
-  if (JSON.stringify(next) === JSON.stringify(prev)) return;
-  const copy = list.slice();
-  copy[i] = next;
-  saveOrders(copy);
+/** A new order first. An order already stored under the same id keeps what this browser learned about it. */
+export function upsertOrder(order: StoredOrder): Promise<void> {
+  return mutate(list => {
+    const prev = list.find(o => o.id === order.id);
+    return [prev ? { ...order, ...prev } : order, ...list.filter(o => o.id !== order.id)];
+  });
+}
+
+/** Change one order. Nothing is written when nothing changes, and statuses only move forward (a late poll
+ *  from another tab can land after a newer one): order-state.ts canMoveTo. */
+export function patchOrder(id: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>)): Promise<void> {
+  return mutate(list => {
+    const i = list.findIndex(o => o.id === id);
+    if (i < 0) return null;
+    const prev = list[i];
+    const p = { ...(typeof patch === 'function' ? patch(prev) : patch) };
+    if (p.status && !canMoveTo(prev.status, p.status)) delete p.status;
+    const next = { ...prev, ...p };
+    if (JSON.stringify(next) === JSON.stringify(prev)) return null;
+    const copy = list.slice();
+    copy[i] = next;
+    return copy;
+  });
 }
 
 /** Record a status poll: the status, when it was first seen (and whether that was live), the amount out. */
-export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()) {
-  patchOrder(id, prev => {
+export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()): Promise<void> {
+  markPolled(id, now);
+  return patchOrder(id, prev => {
     const stamp = !prev.lastPolledAt || now - prev.lastPolledAt > POLL_STAMP_MS ? now : prev.lastPolledAt;
     if (!u.status) return { rawStatus: u.rawStatus, lastPolledAt: stamp };
+    // An answer older than what is stored (two pollers, out of order): keep the newer status.
+    if (!canMoveTo(prev.status, u.status)) return { lastPolledAt: stamp };
     const isNew = !prev.statusTimes[u.status];
-    const late = isNew && !!prev.lastPolledAt && now - prev.lastPolledAt > LATE_AFTER_MS;
+    // Not watched live: no poll before (orders saved by older versions), or a long gap since the last one.
+    const late = isNew && (!prev.lastPolledAt || now - prev.lastPolledAt > LATE_AFTER_MS);
     return {
       status: u.status,
       rawStatus: undefined,
@@ -100,8 +132,32 @@ export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()) 
   });
 }
 
-export function removeOrders(ids: string[]) {
-  saveOrders(loadOrders().filter(o => !ids.includes(o.id)));
+export function removeOrders(ids: string[]): Promise<void> {
+  return mutate(list => (list.some(o => ids.includes(o.id)) ? list.filter(o => !ids.includes(o.id)) : null));
+}
+
+// --- Poll stamps: when any tab last asked Rift about an order, so tabs and pollers do not repeat each other ---
+
+const POLLED_KEY = 'iaero.rift.polled.v1';
+
+function readPolled(): Record<string, number> {
+  try { return JSON.parse(window.localStorage.getItem(POLLED_KEY) ?? '{}') ?? {}; } catch { return {}; }
+}
+
+export function markPolled(id: string, now = Date.now()) {
+  try {
+    const m = readPolled();
+    m[id] = now;
+    // Only recent stamps matter.
+    for (const k of Object.keys(m)) if (now - m[k] > 3600_000) delete m[k];
+    window.localStorage.setItem(POLLED_KEY, JSON.stringify(m));
+  } catch { /* storage blocked: each tab polls for itself */ }
+}
+
+/** Whether any tab polled this order less than `withinMs` ago. */
+export function polledWithin(id: string, withinMs: number, now = Date.now()): boolean {
+  const t = readPolled()[id];
+  return typeof t === 'number' && now - t >= 0 && now - t < withinMs;
 }
 
 /** Live view of stored orders, across components and tabs. */

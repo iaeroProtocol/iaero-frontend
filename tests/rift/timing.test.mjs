@@ -102,7 +102,12 @@ test('a long step says "usually done by now, up to N more", and nothing goes neg
   const late = computeProgress({ ...base, now: t0 + 10_000 + 200_000 });
   assert.equal(late.overrun, true, 'past the usual time of every hop');
   assert.ok(late.upToSec > 0 && late.upToSec < est.slowSec, String(late.upToSec));
-  assert.equal(late.slow, true, 'the last hop is past its own slow threshold before the whole route is');
+  assert.equal(late.slow, false, 'Across alone may take 240 s: not slow yet, whichever hop is running');
+  assert.equal(computeProgress({ ...base, now: t0 + 10_000 + 300_000 }).slow, true, 'past the usual total plus Across running long');
+  const hours = computeProgress({ ...base, now: t0 + 3 * 3600_000 });
+  assert.equal(hours.upToSec, undefined, 'no "up to 45 sec more" three hours in');
+  const stuck = computeProgress({ ...base, status: 'awaiting_deposit', depositConfirmedAt: undefined, fundedAt: undefined, now: t0 + 3600_000 });
+  assert.deepEqual([stuck.phase, stuck.slow, stuck.upToSec], ['confirming', true, undefined], 'a payment stuck for an hour has no "7 min more"');
   const skewed = computeProgress({ ...base, depositSentAt: t0 + 60_000, now: t0, status: 'awaiting_deposit', depositConfirmedAt: undefined, fundedAt: undefined });
   assert.ok(skewed.elapsedSec >= 0 && skewed.fraction >= 0, 'a clock behind the saved times');
 });

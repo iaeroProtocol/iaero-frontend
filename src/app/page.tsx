@@ -18,6 +18,7 @@ import LiqStaking from '@/components/protocol/LiqStaking';
 import RewardsSection from '@/components/protocol/RewardsSection';
 import AutoVaultSection from '@/components/protocol/AutoVaultSection';
 import RiftErrorBoundary from '@/components/rift/RiftErrorBoundary';
+import OrderWatcher from '@/components/rift/OrderWatcher';
 import { WrongNetworkBanner } from '@/components/SwitchToBase';
 import { useWalletOnProtocolChain } from '@/lib/protocol-chain';
 import ToastNotification from '@/components/protocol/ToastNotification';
@@ -40,8 +41,9 @@ const XIcon = ({ className }: { className?: string }) => (
   </svg>
 );
 
-// Get iAERO renders in the browser only: it reads the wallet and saved orders, and its code (including the
-// Bitcoin QR library) stays out of the first page load.
+// Get iAERO renders in the browser only, and loads the first time its tab is opened: it reads the wallet and
+// saved orders, and its code stays out of the page load for everyone else. Orders are tracked in the background
+// by OrderWatcher, which is small and always mounted.
 const GetIaeroSection = dynamic(() => import('@/components/protocol/GetIaeroSection'), {
   ssr: false,
   loading: () => <div className="h-40 animate-pulse rounded-xl bg-slate-800/40" />,
@@ -80,9 +82,16 @@ export default function IaeroProtocolApp() {
     setToasts(prev => prev.filter(t => t.id !== id));
   }, 5000);
 };
+ // Get iAERO is loaded when first opened, then kept mounted (hidden) so a purchase in progress survives tab switches.
+ const [getIaeroOpened, setGetIaeroOpened] = useState(false);
+ React.useEffect(() => { if (tab === 'get-iaero') setGetIaeroOpened(true); }, [tab]);
 
  return (
    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950">
+     {/* Background tracking of Get iAERO orders, on every tab; an error in it renders nothing. */}
+     <RiftErrorBoundary fallback={() => null}>
+       <OrderWatcher showToast={showToast} />
+     </RiftErrorBoundary>
      {/* Animated Background */}
      <div className="fixed inset-0 overflow-hidden pointer-events-none">
        <div className="absolute -top-40 -right-40 w-80 h-80 bg-purple-500 rounded-full mix-blend-multiply filter blur-3xl opacity-10 animate-blob" />
@@ -326,11 +335,13 @@ export default function IaeroProtocolApp() {
             </TabsTrigger>
           </TabsList>
 
-             {/* Kept mounted (hidden when inactive) so order tracking and its notifications carry on in other tabs. */}
+             {/* Loaded on first open, then kept mounted (hidden when inactive). */}
              <TabsContent value="get-iaero" forceMount className="data-[state=inactive]:hidden">
-               <RiftErrorBoundary>
-                 <GetIaeroSection active={tab === 'get-iaero'} showToast={showToast} onGoToStake={() => setTab('stake')} />
-               </RiftErrorBoundary>
+               {getIaeroOpened && (
+                 <RiftErrorBoundary>
+                   <GetIaeroSection active={tab === 'get-iaero'} showToast={showToast} onGoToStake={() => setTab('stake')} />
+                 </RiftErrorBoundary>
+               )}
              </TabsContent>
 
              <TabsContent value="lock">

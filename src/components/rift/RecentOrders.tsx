@@ -5,10 +5,10 @@ import React from 'react';
 import { History, Trash2 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { PHASE_STYLE } from './status';
+import { PHASE_STYLE, STALE_STYLE } from './status';
 import { phaseOf } from '@/lib/rift/timing';
 import { SOURCE_CHAINS } from '@/lib/rift/config';
-import { isTerminalStatus, needsAttention, phaseInput } from '@/lib/rift/order-state';
+import { isAbandoned, isFinalStatus, isTerminalStatus, needsAttention, phaseInput } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
 const ago = (ts: number) => {
@@ -30,10 +30,14 @@ interface Props {
   onClearFinished: () => void;
 }
 
+/** Orders "Clear finished" removes: finished ones, and unpaid ones past their pay window. Frozen and underpaid
+ *  orders stay: their ID is what Rift support needs. */
+export const clearable = (o: StoredOrder, now: number) => (isFinalStatus(o.status) && !needsAttention(o.status)) || isAbandoned(o, now);
+
 export default function RecentOrders({ orders, activeId, onSelect, onClearFinished }: Props) {
   if (!orders.length) return null;
-  // Frozen and underpaid orders stay: their ID is what Rift support needs.
-  const finished = orders.filter(o => isTerminalStatus(o.status) && !needsAttention(o.status)).length;
+  const now = Date.now();
+  const finished = orders.filter(o => clearable(o, now)).length;
   return (
     <Card className="border-slate-700/50 bg-slate-800/50 backdrop-blur-xl">
       <CardHeader className="pb-2">
@@ -49,10 +53,11 @@ export default function RecentOrders({ orders, activeId, onSelect, onClearFinish
       <CardContent className="space-y-2">
         {orders.map(o => {
           const phase = phaseOf(phaseInput(o, SOURCE_CHAINS[o.sourceChain].kind));
-          const style = PHASE_STYLE[phase];
+          const stale = isAbandoned(o, now);
+          const style = stale ? STALE_STYLE : PHASE_STYLE[phase];
           const outcome = o.status === 'delivered' ? `${fmt(o.amountOut)} iAERO`
             : o.status === 'refunded' ? `refunded ${o.amountOut ? `${fmt(o.amountOut)} ` : ''}${o.token.symbol}`
-            : isTerminalStatus(o.status) ? '—'
+            : isTerminalStatus(o.status) || stale ? '—'
             : `~${fmt(o.expectedOut ?? o.estimatedOut)} iAERO`;
           return (
             <button
@@ -68,7 +73,7 @@ export default function RecentOrders({ orders, activeId, onSelect, onClearFinish
                 <div className="truncate text-sm text-white">
                   {fmt(o.fromAmount)} {o.token.symbol} ({SOURCE_CHAINS[o.sourceChain].name}) → {outcome}
                 </div>
-                <div className="text-xs text-slate-500">{ago(o.createdAt)}</div>
+                <div className="text-xs text-slate-400">{ago(o.createdAt)}</div>
               </div>
               <Badge className={`shrink-0 ${style.className}`}>{style.label}</Badge>
             </button>
