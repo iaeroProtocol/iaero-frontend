@@ -45,15 +45,18 @@ export function symbolOf(asset: string, known: Record<string, string> = {}): str
 }
 
 // Seconds as [typical, slow]. Deposit: until Rift has seen the payment (inclusion plus confirmations).
+// Typical values for Arbitrum and Base, Across and same-chain swaps follow the first real order
+// (2026-10-02: mPendle on Arbitrum -> USDC -> Across -> iAERO on Base, delivered 54 s after the order
+// was created, wallet confirmation included). The slow thresholds are unchanged.
 export const DEPOSIT_TIMING: Record<string, [number, number]> = {
-  base: [15, 90],
-  arbitrum: [20, 120],
+  base: [8, 90],
+  arbitrum: [10, 120],
   ethereum: [60, 300],
   bitcoin: [20 * 60, 60 * 60],
 };
 
 export const VENUE_TIMING: Record<string, [number, number]> = {
-  across: [45, 240],
+  across: [15, 240],
   relay: [30, 180],
   cctp_fast: [60, 300],
   cctp_hyperliquid_fast: [60, 300],
@@ -68,7 +71,7 @@ export const VENUE_TIMING: Record<string, [number, number]> = {
   lifi_fast: [60, 5 * 60],
   lifi_standard: [5 * 60, 20 * 60],
 };
-const SWAP_TIMING: [number, number] = [20, 120];
+const SWAP_TIMING: [number, number] = [10, 120];
 const UNKNOWN_BRIDGE_TIMING: [number, number] = [3 * 60, 15 * 60];
 const DELIVERY_TIMING: [number, number] = [5, 45];
 

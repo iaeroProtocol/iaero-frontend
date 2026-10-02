@@ -44,6 +44,22 @@ export function formatPct(pct: number): string {
   return `${a >= 10 ? a.toFixed(0) : a.toFixed(1)}%`;
 }
 
+/** A cost for display. At or below zero it reads "about 0%": market prices are only accurate to a fraction
+ *  of a percent, so "better than market" would be a claim the data cannot make. */
+export const costText = (pct: number) => (pct > 0 ? formatPct(pct) : 'about 0%');
+
+// --- iAERO's market price: its Aerodrome pools on Base (iAERO/AERO, iAERO is token0, both 18 decimals) ---
+
+/** AERO per iAERO at a concentrated-liquidity (Slipstream) pool's current price. */
+export function clAeroPerIaero(sqrtPriceX96: bigint): number {
+  const r = Number(sqrtPriceX96) / 2 ** 96;
+  return r * r;
+}
+
+/** AERO per iAERO from a classic pool's reserves. */
+export const v2AeroPerIaero = (reserveIaero: bigint, reserveAero: bigint): number =>
+  reserveIaero > 0n ? Number(reserveAero) / Number(reserveIaero) : 0;
+
 // --- Market prices (DeFiLlama, keyless, allows browser requests) ---
 
 /** DeFiLlama coin id for a Rift asset id: natives by CoinGecko id, ERC-20s by `<chain>:<address>`. */
@@ -54,8 +70,9 @@ export function llamaIdOf(asset: string): string | null {
   return m[2] === 'eth' ? 'coingecko:ethereum' : `${m[1]}:${m[2]}`;
 }
 
-/** Prices an hour old or older, or below DeFiLlama's 0.9 confidence, are left out: no number beats a wrong one. */
-export const PRICE_MAX_AGE_SEC = 3600;
+/** Prices over 30 minutes old, or below DeFiLlama's 0.9 confidence, are left out: no number beats a wrong one.
+ *  (DeFiLlama refreshes liquid tokens every couple of minutes and thin ones every 10-15.) */
+export const PRICE_MAX_AGE_SEC = 1800;
 
 /** USD prices by DeFiLlama id from a /prices/current response. */
 export function parseLlamaPrices(json: unknown, nowMs: number): Record<string, number> {

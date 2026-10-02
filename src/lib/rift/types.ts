@@ -92,8 +92,9 @@ export interface StoredOrder {
   /** Base block at order creation: where the delivery scan starts. */
   baseFromBlock?: string;
   notify?: boolean;
-  /** USD value of the payment and the iAERO price when the order was made (market prices), for the
-   *  all-in cost once delivered. */
-  usdIn?: number;
-  iaeroUsd?: number;
+  /** USD value of the payment and iAERO's pool price when the order was made, for the all-in cost once
+   *  delivered. (The first orders stored DeFiLlama's lagging iAERO price as usdIn/iaeroUsd; those fields
+   *  are ignored, so those orders show no all-in cost.) */
+  marketUsdIn?: number;
+  marketIaeroUsd?: number;
 }

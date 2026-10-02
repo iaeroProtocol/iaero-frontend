@@ -28,7 +28,7 @@ import { patchOrder } from '@/lib/rift/storage';
 import { findBtcDeposit } from '@/lib/rift/bitcoin';
 import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, SOURCE_CHAINS } from '@/lib/rift/config';
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
-import { costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
+import { costText, costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
 import type { RiftOrderStatus, StoredOrder } from '@/lib/rift/types';
 
 type EvmChainId = 1 | 42161 | 8453;
@@ -194,8 +194,8 @@ export default function OrderTracker({ order, onPay, paying, onGoToStake, showTo
   // Once delivered: what arrived against the quote, and the all-in cost against market prices when ordered
   // (the iAERO price then, so a market move during the trip does not count as cost).
   const vsQuote = order.status === 'delivered' ? deliveredVsQuotedPct(order.amountOut, order.estimatedOut) : null;
-  const allIn = order.status === 'delivered' && order.usdIn && order.iaeroUsd && order.amountOut
-    ? costVsMarketPct(order.usdIn, Number(order.amountOut) * order.iaeroUsd) : null;
+  const allIn = order.status === 'delivered' && order.marketUsdIn && order.marketIaeroUsd && order.amountOut
+    ? costVsMarketPct(order.marketUsdIn, Number(order.amountOut) * order.marketIaeroUsd) : null;
 
   const copy = async (v: string) => { try { await navigator.clipboard.writeText(v); showToast?.('Copied', 'info'); } catch { /* blocked */ } };
 
@@ -234,7 +234,7 @@ export default function OrderTracker({ order, onPay, paying, onGoToStake, showTo
               </div>
               {allIn !== null && (
                 <div className="text-xs text-slate-500">
-                  All-in cost vs market price when you ordered: {allIn > 0 ? formatPct(allIn) : `none (${formatPct(allIn)} more)`}.
+                  All-in cost vs market price when you ordered: {costText(allIn)}.
                 </div>
               )}
             </div>

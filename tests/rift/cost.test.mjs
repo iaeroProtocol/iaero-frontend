@@ -44,7 +44,7 @@ test('market prices: DeFiLlama ids and parsing', async () => {
   const json = { coins: {
     'base:0x81034fb34009115f215f5d5f564aac9ffa46a1dc': { price: 0.5975797707224795, timestamp: 1790922110, confidence: 0.99 },
     'coingecko:bitcoin': { price: 85947.03, timestamp: 1790922940, confidence: 0.99 },
-    'base:0xstale': { price: 1, timestamp: 1790922940 - 3601, confidence: 0.99 },
+    'base:0xstale': { price: 1, timestamp: 1790922940 - 1801, confidence: 0.99 },
     'base:0xunsure': { price: 1, timestamp: 1790922940, confidence: 0.5 },
     'base:0xzero': { price: 0, timestamp: 1790922940 },
   } };
@@ -53,4 +53,16 @@ test('market prices: DeFiLlama ids and parsing', async () => {
     'coingecko:bitcoin': 85947.03,
   });
   assert.deepEqual(parseLlamaPrices(null, now), {});
+});
+
+test('iAERO market price from its Aerodrome pools, and cost wording', async () => {
+  const { clAeroPerIaero, v2AeroPerIaero, costText } = await import('../../src/lib/rift/cost.ts');
+  // Live reads, 2026-10-02 07:05 UTC: Slipstream pool slot0 and the classic pool's reserves.
+  assert.ok(Math.abs(clAeroPerIaero(68366852591258221366807171016n) - 0.744615) < 1e-6);
+  assert.ok(Math.abs(v2AeroPerIaero(35750224959386513595392n, 26721494850357903054290n) - 0.74745) < 1e-5);
+  assert.equal(v2AeroPerIaero(0n, 5n), 0);
+  assert.equal(costText(0.88), '0.9%');
+  assert.equal(costText(0.04), '<0.1%');
+  assert.equal(costText(0), 'about 0%');
+  assert.equal(costText(-0.3), 'about 0%', 'never "better than market"');
 });

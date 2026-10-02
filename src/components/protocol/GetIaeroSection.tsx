@@ -35,7 +35,7 @@ import { rawToNumber, type Holding } from '@/lib/rift/holdings';
 import { useRiftSupport } from '@/lib/rift/support';
 import { useMarketPrices } from '@/lib/rift/prices';
 import {
-  DEFAULT_TOLERANCE_PCT, TOLERANCE_CHOICES, costLevel, costVsMarketPct, formatPct, priceDropPct, type CostLevel,
+  DEFAULT_TOLERANCE_PCT, TOLERANCE_CHOICES, costLevel, costText, costVsMarketPct, formatPct, priceDropPct, type CostLevel,
 } from '@/lib/rift/cost';
 import { patchOrder, removeOrders, upsertOrder, useStoredOrders } from '@/lib/rift/storage';
 import type { RiftQuote, SourceToken, StoredOrder } from '@/lib/rift/types';
@@ -202,8 +202,9 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
     setAmount(normalizeDecimal(formatUnits(raw, token.decimals)));
   };
 
-  // Market prices for the cost check, both from DeFiLlama; the site's own iAERO price only once it has
-  // really loaded (it starts from placeholder values), and the wallet list's price for the token.
+  // Market prices for the cost check (prices.ts): iAERO from its Aerodrome pool, the token from DeFiLlama.
+  // Fallbacks: the site's own iAERO price once it has really loaded (it starts from placeholder values),
+  // and the wallet list's price for the token.
   const market = useMarketPrices(token?.asset);
   const inputPriceUsd = market.inputUsd ?? holding?.priceUsd ?? 0;
   const iaeroUsd = market.iaeroUsd ?? (lastUpdate ? (prices as { iAERO?: { usd?: number } } | undefined)?.iAERO?.usd ?? 0 : 0);
@@ -358,7 +359,7 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
         fromAmount, fromAmountRaw: raw.toString(), estimatedOut: q.estimated_amount_out, route: q.route,
         depositAddress: order.deposit_address, depositDeadline: order.deposit_deadline, toAddress: address,
         refundAddress: refund, status: order.status, statusTimes: { [order.status]: Date.now() }, baseFromBlock, notify,
-        usdIn: inputPriceUsd ? Number(fromAmount) * inputPriceUsd : undefined, iaeroUsd: iaeroUsd || undefined,
+        marketUsdIn: inputPriceUsd ? Number(fromAmount) * inputPriceUsd : undefined, marketIaeroUsd: iaeroUsd || undefined,
       };
       upsertOrder(stored);
       setActiveId(order.id);
@@ -525,11 +526,11 @@ export default function GetIaeroSection({ showToast, onGoToStake }: Props) {
                     <div className={`space-y-1 rounded-lg border p-3 text-sm ${COST_STYLE[cost.level]}`}>
                       <div className="flex items-center justify-between gap-2">
                         <span>Cost vs market price</span>
-                        <span className="font-semibold">{cost.pct > 0 ? formatPct(cost.pct) : 'none'}</span>
+                        <span className="font-semibold">{costText(cost.pct)}</span>
                       </div>
                       <div className="text-[11px] opacity-80">
-                        You pay ≈ {fmtUsd(cost.usdIn)} and get ≈ {fmtUsd(cost.usdOut)} of iAERO at market prices
-                        {cost.pct < 0 && <> ({formatPct(cost.pct)} more)</>}. Includes every bridge, swap and network cost.
+                        You pay ≈ {fmtUsd(cost.usdIn)} and get ≈ {fmtUsd(cost.usdOut)} of iAERO at its Aerodrome pool price.
+                        Includes every bridge, swap and network cost.
                       </div>
                       {cost.level === 'high' && (
                         <label className="flex cursor-pointer items-start gap-2 pt-1 text-xs">
