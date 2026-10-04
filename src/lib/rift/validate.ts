@@ -20,10 +20,9 @@ export const SOURCE_ASSET_RE = /^(ethereum\.eth|arbitrum\.eth|base\.eth|bitcoin\
 export const AMOUNT_RE = /^(?=.*[1-9])\d{1,24}(\.\d{1,18})?$/;
 export const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
-/** Rift writes known tokens by symbol in its "formatted" responses; iAERO is written by address today, and
- *  would become `base.iaero` if Rift adds it to its list. Both mean iAERO on Base. */
+/** The destination must be the actual iAERO contract. A formatted ticker alone is not proof of its address. */
 export const isIaeroOnBase = (asset: string, destination: string) =>
-  asset.toLowerCase() === destination.toLowerCase() || asset.toLowerCase() === 'base.iaero';
+  asset.toLowerCase() === destination.toLowerCase();
 
 const obj = (v: unknown, what: string): Record<string, unknown> => {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(`Rift returned an invalid ${what}`);
@@ -39,6 +38,12 @@ const str = (o: Record<string, unknown>, key: string, what: string): string => {
 export const chainOf = (id: string) => (id.includes('.') ? id.slice(0, id.indexOf('.')).toLowerCase() : '');
 /** Address strings may come back as `<chain>.<address>`; addresses themselves never contain a dot. */
 export const stripChainPrefix = (id: string) => (id.includes('.') ? id.slice(id.lastIndexOf('.') + 1) : id);
+const addressOnChain = (id: string, chain: string, field: string) => {
+  const prefix = chainOf(id);
+  if (id.includes('.') && (id.indexOf('.') !== id.lastIndexOf('.') || !prefix)) throw new Error(`Rift order ${field} has an invalid chain prefix`);
+  if (prefix && prefix !== chain) throw new Error(`Rift order ${field} is on a different chain`);
+  return stripChainPrefix(id);
+};
 
 /** "0.50" -> "0.5", "1." -> "1", "001.20" -> "1.2". Rejects anything that is not a plain decimal. */
 export function normalizeDecimal(s: string): string {
@@ -61,8 +66,7 @@ const sameAmount = (a: string, b: string) => normalizeDecimal(a) === normalizeDe
 /**
  * Whether Rift's `from` is the asset asked for. Rift writes a token on its list by its name (`arbitrum.usdt0`)
  * even when asked by address, and others as `<chain>.<address>`; `names` maps its names to addresses
- * (rift-tokens.ts). A name missing from that copy of the list (a token Rift listed later) can only be checked
- * for its chain.
+ * (rift-tokens.ts). An unknown name cannot be verified against the requested contract and is rejected.
  */
 export function sameSourceAsset(riftFrom: string, asked: string, names: Readonly<Record<string, string>>): boolean {
   const from = riftFrom.toLowerCase(), want = asked.toLowerCase();
@@ -72,7 +76,7 @@ export function sameSourceAsset(riftFrom: string, asked: string, names: Readonly
   // Another address, a native coin for a token, or anything for a native coin or a HyperCore token.
   if (/^0x[0-9a-f]{40}$/.test(id) || id === 'eth' || !/^0x[0-9a-f]{40}$/.test(wantId)) return false;
   const named = names[from];
-  return named === undefined || named === wantId;
+  return named === wantId;
 }
 
 /** The asset asked for, when the response's `from` should be checked against it. */
@@ -106,7 +110,7 @@ export function parseQuote(json: unknown, expect: QuoteExpectation): RiftQuote {
   if (chainOf(q.from) !== expect.fromChain) throw new Error('Rift quote is for a different source chain');
   if (expect.source && !sameSourceAsset(q.from, expect.source.fromAsset, expect.source.names)) throw new Error('Rift quote is for a different token');
   if (!sameAmount(q.from_amount, expect.fromAmount)) throw new Error('Rift quote is for a different amount');
-  if (!(Number(q.estimated_amount_out) > 0)) throw new Error('Rift quote has no output');
+  if (!Number.isFinite(Number(q.estimated_amount_out)) || !(Number(q.estimated_amount_out) > 0)) throw new Error('Rift quote has no output');
   if (Number.isNaN(Date.parse(q.expires_at))) throw new Error('Rift quote has no valid expiry');
   return q;
 }
@@ -133,9 +137,9 @@ export function parseOrder(json: unknown, expect: OrderExpectation): RiftOrder {
   const order: RiftOrder = {
     id: str(o, 'id', 'order'), quote_id: str(o, 'quote_id', 'order'), from: str(o, 'from', 'order'),
     to: str(o, 'to', 'order'), from_amount: str(o, 'from_amount', 'order'),
-    deposit_address: stripChainPrefix(str(o, 'deposit_address', 'order')),
-    deposit_deadline: str(o, 'deposit_deadline', 'order'), to_address: stripChainPrefix(str(o, 'to_address', 'order')),
-    refund_address: typeof o.refund_address === 'string' ? stripChainPrefix(o.refund_address) : null,
+    deposit_address: addressOnChain(str(o, 'deposit_address', 'order'), expect.fromChain, 'deposit address'),
+    deposit_deadline: str(o, 'deposit_deadline', 'order'), to_address: addressOnChain(str(o, 'to_address', 'order'), 'base', 'delivery address'),
+    refund_address: typeof o.refund_address === 'string' ? addressOnChain(o.refund_address, expect.fromChain, 'refund address') : null,
     status: parseStatus(o), amount_out: typeof o.amount_out === 'string' ? o.amount_out : null,
     created_at: typeof o.created_at === 'string' ? o.created_at : new Date().toISOString(),
   };

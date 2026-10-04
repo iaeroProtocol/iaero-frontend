@@ -14,8 +14,8 @@
 import { useEffect, useRef } from 'react';
 import { getOrder, riftBudget } from './client';
 import { parseOrderUpdate } from './validate';
-import { applyStatusUpdate, markPolled, patchOrder, polledWithin } from './storage';
-import { isAbandoned, isFinalStatus, isTerminalStatus } from './order-state';
+import { applyStatusUpdate, markPolled, patchOrder, polledWithin, pollStamps } from './storage';
+import { isAbandoned, isFinalStatus, isTerminalStatus, pendingByLeastRecentPoll } from './order-state';
 import type { RiftOrderStatus, StoredOrder } from './types';
 
 const POLL_MS = 60_000;
@@ -66,25 +66,35 @@ export function useOrderWatcher(
   showToast: (message: string, type: 'success' | 'error' | 'info' | 'warning') => void,
 ) {
   // 1. Poll unfinished orders no tab has asked about recently, starting as soon as the saved orders are loaded.
+  //    Least recently polled first prevents a long list from starving its oldest orders at the 8/min budget.
   const ordersRef = useRef(orders);
   ordersRef.current = orders;
   const any = orders.length > 0;
   useEffect(() => {
     if (!any) return;
     let stop = false;
+    let running = false;
     const tick = async () => {
-      for (const o of ordersRef.current) {
-        const now = Date.now();
-        if (stop || isFinalStatus(o.status)) continue;
-        const idle = o.status === 'frozen' || isAbandoned(o, now);
-        if (polledWithin(o.id, idle ? IDLE_POLL_MS : POLL_MS - 5000, now)) continue;
-        if (!riftBudget('poll', now)) break;
-        try {
-          const u = parseOrderUpdate(await getOrder(o.id, undefined, 'poll'), o.id);
-          if (!stop) await applyStatusUpdate(o.id, u);
-        } catch {
-          markPolled(o.id); // next round, not straight away from another tab
+      if (running) return;
+      running = true;
+      try {
+        const stamps = pollStamps();
+        const due = pendingByLeastRecentPoll(ordersRef.current, stamps);
+        for (const o of due) {
+          const now = Date.now();
+          if (stop) break;
+          const idle = o.status === 'frozen' || isAbandoned(o, now);
+          if (polledWithin(o.id, idle ? IDLE_POLL_MS : POLL_MS - 5000, now)) continue;
+          if (!riftBudget('poll', now)) break;
+          try {
+            const u = parseOrderUpdate(await getOrder(o.id, undefined, 'poll'), o.id);
+            if (!stop) await applyStatusUpdate(o.id, u);
+          } catch {
+            markPolled(o.id); // next round, not straight away from another tab
+          }
         }
+      } finally {
+        running = false;
       }
     };
     const t = setInterval(tick, 20_000);

@@ -2,9 +2,8 @@
 //
 // The wallet's balances on Ethereum, Arbitrum and Base, and its HyperCore spot balances on Hyperliquid,
 // valued in USD and sorted largest first, for the "Get iAERO" token picker.
-// - Blockscout's /tokens page (sorted by USD value, about 25 KB) says which tokens the wallet holds and prices
-//   most of them. That list is kept for 10 minutes per wallet and chain (Blockscout can take half a minute for
-//   a big wallet). The balances themselves are read on-chain, in one multicall per chain covering those
+// - Blockscout's paginated /tokens list says which tokens the wallet holds and prices most of them. It is kept
+//   for 10 minutes per wallet and chain. The balances themselves are read on-chain, in one multicall covering
 //   tokens, the major tokens Rift routes and ETH, because Blockscout's numbers can be stale.
 // - Hyperliquid's API gives the HyperCore balances; one DeFiLlama call prices the rest, major tokens first,
 //   keeping only recent, confident prices (as the page's own cost check does).
@@ -13,7 +12,8 @@
 //   and major tokens without a price are listed unvalued rather than dropped.
 // - Answers are cached per wallet (Cloudflare's cache, where available) for 90 s, longer than the page's
 //   60 s refresh, or 20 s when a source failed; `?fresh=1` (the Refresh button) skips it, at most every 20 s.
-// - Each Worker instance limits callers to 30 requests a minute per IP address.
+// - Each Worker instance limits callers to 30 requests a minute per IP address. The public holdings route
+//   uses public RPCs, so anonymous callers cannot spend the site's private Alchemy quota.
 // - `hyperliquidUsdc` is the USDC that can pay Hyperliquid's 1 USDC new-address fee, whatever token is sent.
 
 import { type NextRequest, NextResponse } from 'next/server';
@@ -23,12 +23,13 @@ import { CURATED_TOKENS, RIFT_DESTINATION } from '@/lib/rift/config';
 import { RIFT_LISTED } from '@/lib/rift/rift-tokens';
 import { EVM_ADDRESS_RE, badRequest } from '@/lib/rift/server';
 import { parseLlamaPrices } from '@/lib/rift/cost';
-import { rpcUrls } from '@/lib/public-rpcs';
 import {
-  HOLDING_CHAINS, applyLlamaPrices, blockscoutCandidates, candidatesToHoldings, nativeHolding, parseNative, parseTokenBalances,
+  HOLDING_CHAINS, MAX_UNPRICED_CANDIDATES, applyLlamaPrices, blockscoutCandidates, candidatesToHoldings, nativeHolding, parseNative, parseTokenBalances,
   rankHoldings, rawToNumber, type EvmHoldingChain, type Holding, type TokenCandidate,
 } from '@/lib/rift/holdings';
 import { HL_API, HYPERCORE_TOKENS, hyperCoreHoldings, parseSpotBalances, usdcForFee } from '@/lib/rift/hypercore';
+import { collectTokenPages, type TokenPages } from '@/lib/rift/blockscout-pages';
+import { PUBLIC_RPCS } from '@/lib/public-rpcs';
 
 export const runtime = 'edge';
 
@@ -36,11 +37,14 @@ const SOURCE_TIMEOUT_MS = 8_000;
 const RPC_TIMEOUT_MS = 4_000;
 const CACHE_SECONDS = 90;
 const WARNED_CACHE_SECONDS = 20;
+const PARTIAL_LIST_CACHE_SECONDS = 90;
 const LIST_FRESH_MS = 10 * 60_000;
 const LIST_MAX_AGE_MS = 60 * 60_000;
+const LIST_FETCH_BUDGET_MS = 12_000;
 const FRESH_EVERY_MS = 20_000;
 const PER_IP_PER_MINUTE = 30;
 const MAX_LLAMA_LOOKUPS = 80;
+const MAX_CHAIN_CANDIDATES = 120;
 const VIEM_CHAINS = { 1: mainnet, 42161: arbitrum, 8453: base } as const;
 const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11' as const;
 const GET_ETH_BALANCE = [{
@@ -119,7 +123,7 @@ const DECIMALS = [{ type: 'function', name: 'decimals', stateMutability: 'view',
 async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: TokenCandidate[]) {
   const client = createPublicClient({
     chain: VIEM_CHAINS[chainId],
-    transport: fallback(rpcUrls(chainId, { server: true }).map(url => http(url, { timeout: RPC_TIMEOUT_MS, retryCount: 0 })), { retryCount: 0 }),
+    transport: fallback(PUBLIC_RPCS[chainId].map(url => http(url, { timeout: RPC_TIMEOUT_MS, retryCount: 0 })), { retryCount: 0 }),
   });
   const unlisted = tokens.filter(t => !MAJOR.has(`${chainKey(chainId)}.${t.address}`));
   const contracts = [
@@ -128,7 +132,8 @@ async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: T
     ...unlisted.map(t => ({ address: t.address, abi: DECIMALS, functionName: 'decimals', args: [] })),
   ] as unknown as Parameters<typeof client.multicall>[0]['contracts'];
   const results = await client.multicall({ contracts, allowFailure: true, batchSize: 0 });
-  if (results.every(r => r.status === 'failure')) return null;
+  const balanceReads = results.slice(0, 1 + tokens.length);
+  if (balanceReads.every(r => r.status === 'failure')) return null;
   const eth = results[0];
   const balanceResults = results.slice(1, 1 + tokens.length);
   const decimals = new Map(unlisted.map((t, i) => {
@@ -136,6 +141,7 @@ async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: T
     return [t.address, r.status === 'success' ? Number(r.result) : null] as const;
   }));
   return {
+    incomplete: balanceReads.some(r => r.status === 'failure') || [...decimals.values()].some(d => d === null),
     native: eth.status === 'success' ? (eth.result as bigint) : null,
     // A token whose decimals the chain does not confirm is left out rather than mis-sized.
     tokens: tokens.map(t => (decimals.has(t.address) ? { ...t, decimals: decimals.get(t.address) ?? -1 } : t)),
@@ -149,15 +155,20 @@ async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: T
 const chainKey = (chainId: 1 | 42161 | 8453): EvmHoldingChain => (chainId === 1 ? 'ethereum' : chainId === 42161 ? 'arbitrum' : 'base');
 
 /** Blockscout's token list for a wallet: kept 10 minutes, and used up to an hour old when Blockscout fails. */
-async function tokenList(chain: EvmHoldingChain, blockscout: string, owner: Address, fresh: boolean): Promise<unknown | null> {
-  const key = cacheKey('rift-token-list', `${chain}/${owner}`);
+async function tokenList(chain: EvmHoldingChain, blockscout: string, owner: Address, fresh: boolean): Promise<TokenPages | null> {
+  const key = cacheKey('rift-token-list-v2', `${chain}/${owner}`);
   const hit = await cacheGet(key);
-  const cached = hit ? await hit.json().catch(() => null) as { at?: number; list?: unknown } | null : null;
+  const cached = hit ? await hit.json().catch(() => null) as { at?: number; list?: TokenPages } | null : null;
   const age = cached?.at ? Date.now() - cached.at : Infinity;
-  if (!fresh && cached?.list && age < LIST_FRESH_MS) return cached.list;
+  if (!fresh && cached?.list && age < (cached.list.complete ? LIST_FRESH_MS : PARTIAL_LIST_CACHE_SECONDS * 1000)) return cached.list;
   try {
-    const list = await getJson(`${blockscout}/api/v2/addresses/${owner}/tokens?type=ERC-20`);
-    await cachePut(key, JSON.stringify({ at: Date.now(), list }), LIST_MAX_AGE_MS / 1000);
+    const started = Date.now();
+    const list = await collectTokenPages(`${blockscout}/api/v2/addresses/${owner}/tokens?type=ERC-20`, url => {
+      if (Date.now() - started > LIST_FETCH_BUDGET_MS) throw new Error('token list time budget');
+      return getJson(url);
+    });
+    if (!list.complete && cached?.list?.complete && age < LIST_MAX_AGE_MS) return cached.list;
+    await cachePut(key, JSON.stringify({ at: Date.now(), list }), list.complete ? LIST_MAX_AGE_MS / 1000 : PARTIAL_LIST_CACHE_SECONDS);
     return list;
   } catch {
     return cached?.list && age < LIST_MAX_AGE_MS ? cached.list : null;
@@ -166,18 +177,23 @@ async function tokenList(chain: EvmHoldingChain, blockscout: string, owner: Addr
 
 async function chainHoldings(chain: EvmHoldingChain, chainId: 1 | 42161 | 8453, blockscout: string, owner: Address, fresh: boolean, warnings: Warnings): Promise<Holding[]> {
   const list = await tokenList(chain, blockscout, owner, fresh);
-  const listed = list ? blockscoutCandidates(list, [RIFT_DESTINATION]) : [];
+  if (list && !list.complete) warnings.push(`${chain}: token list incomplete; some tokens may be missing`);
+  const listed = list ? blockscoutCandidates(list.items, [RIFT_DESTINATION], () => {
+    warnings.push(`${chain}: only the first ${MAX_UNPRICED_CANDIDATES} unpriced tokens checked on-chain`);
+  }) : [];
   const listedPrice = new Map(listed.map(c => [c.address, c]));
   // Major tokens keep Blockscout's price and icon when it lists them.
-  const candidates = [
+  const allCandidates = [
     ...curatedFor(chain).map(c => ({ ...c, priceUsd: listedPrice.get(c.address)?.priceUsd ?? 0, icon: listedPrice.get(c.address)?.icon })),
     ...listed.filter(c => !MAJOR.has(`${chain}.${c.address}`)),
   ];
+  if (allCandidates.length > MAX_CHAIN_CANDIDATES) warnings.push(`${chain}: only the first ${MAX_CHAIN_CANDIDATES} tokens checked on-chain`);
+  const candidates = allCandidates.slice(0, MAX_CHAIN_CANDIDATES);
   let read: Awaited<ReturnType<typeof readBalances>> = null;
   try { read = await readBalances(chainId, owner, candidates); } catch { read = null; }
   if (!read) {
     // No RPC answered: Blockscout's own numbers (ETH from its address page), flagged.
-    const items = (list as { items?: unknown[] } | null)?.items;
+    const items = list?.items;
     let native: Holding | null = null;
     try { native = parseNative(chain, await getJson(`${blockscout}/api/v2/addresses/${owner}`)); } catch { /* none */ }
     const out = [...(items ? parseTokenBalances(chain, items, [RIFT_DESTINATION]) : []), ...(native ? [native] : [])];
@@ -185,6 +201,7 @@ async function chainHoldings(chain: EvmHoldingChain, chainId: 1 | 42161 | 8453, 
     return out;
   }
   if (!list) warnings.push(`${chain}: token list unavailable, major tokens only`);
+  if (read.incomplete) warnings.push(`${chain}: some balances could not be checked on-chain`);
   const out = candidatesToHoldings(chain, read.tokens, read.balances);
   if (read.native !== null) { const n = nativeHolding(chain, read.native, 0); if (n) out.push(n); }
   return out;

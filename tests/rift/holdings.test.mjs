@@ -11,6 +11,7 @@ const tok = (address, symbol, decimals, value, rate, extra = {}) => ({
 test('Blockscout balances become holdings; NFTs, scams, zero balances and iAERO itself are dropped', () => {
   const rows = [
     tok('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', 'USDC', 6, '250000000', '1.0'),
+    tok('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', 'USDC-DUPLICATE', 6, '250000000', '1.0'),
     tok('0x940181a94A35A4569E4529A3CDfB74e38FD98631', 'AERO', 18, '1000000000000000000000', '0.8'),
     tok('0x81034Fb34009115F215f5d5F564AAc9FfA46a1Dc', 'iAERO', 18, '5000000000000000000', '0.6'),
     tok('0x1111111111111111111111111111111111111111', 'SCAM', 18, '1000000000000000000000000', '1000', { reputation: 'scam' }),
@@ -25,6 +26,7 @@ test('Blockscout balances become holdings; NFTs, scams, zero balances and iAERO 
   assert.equal(usdc.decimals, 6);
   assert.equal(usdc.valueUsd, 250);
   assert.equal(hs[2].priceUsd, 0, 'unpriced until DeFiLlama answers');
+  assert.equal(parseTokenBalances('base', [tok('0x6666666666666666666666666666666666666666', 'OVERFLOW', 18, '1000000000000000000', '1e999')])[0].priceUsd, 0);
   assert.deepEqual(parseTokenBalances('base', { not: 'an array' }), []);
 });
 
@@ -32,6 +34,7 @@ test('native ETH, DeFiLlama fallback prices and ranking by USD value', () => {
   const eth = parseNative('arbitrum', { coin_balance: '500000000000000000', exchange_rate: '3000' });
   assert.deepEqual([eth.asset, eth.symbol, eth.valueUsd], ['arbitrum.eth', 'ETH', 1500]);
   assert.equal(parseNative('base', { coin_balance: '0', exchange_rate: '3000' }), null);
+  assert.equal(parseNative('base', { coin_balance: '1', exchange_rate: '1e999' }).priceUsd, 0);
 
   const tokens = parseTokenBalances('ethereum', [
     tok('0x4444444444444444444444444444444444444444', 'NOPRICE', 18, '7000000000000000000', null),
@@ -62,20 +65,26 @@ test('on-chain balances replace stale Blockscout ones; curated tokens fill its g
   // 0x010B…9831 on Base, 2026-10-02: Blockscout said 1,402.605006 USDC (on-chain: 0) and had no cbBTC row.
   const rows = [
     tok(USDC, 'USDC', 6, '1402605006', '0.999876'),
+    tok(USDC.toUpperCase().replace('0X', '0x'), 'USDC-DUPLICATE', 6, '1402605006', '0.999876'),
     tok('0x5cda0e1ca4ce2af96315f7f8963c85399c172204', 'WTCOIN', 18, '0', '193.31'),
     tok('0x1111111111111111111111111111111111111111', 'SPAM', 18, '6000000000000000000000000', null),
     tok('0x2222222222222222222222222222222222222222', 'ZERO', 18, '0', null),
+    tok('0x2222222222222222222222222222222222222222', 'NOW-HELD', 18, '1000000000000000000', null),
     tok(IAERO.slice(5), 'iAERO', 18, '10000000000000000', '0.59'),
   ];
   const listed = blockscoutCandidates(rows, [IAERO]);
-  assert.deepEqual(listed.map(c => c.symbol), ['USDC', 'WTCOIN', 'SPAM'], 'priced at any balance, unpriced only with a balance, iAERO excluded');
+  assert.deepEqual(listed.map(c => c.symbol), ['USDC', 'WTCOIN', 'SPAM', 'NOW-HELD'], 'duplicates are checked once, including a balance that appeared during pagination');
   const curated = [{ address: USDC, symbol: 'USDC', name: 'USD Coin', decimals: 6, priceUsd: 0 }, { address: CBBTC, symbol: 'cbBTC', name: 'Coinbase Wrapped BTC', decimals: 8, priceUsd: 0 }];
   const all = mergeCandidates(listed, curated);
-  assert.deepEqual(all.map(c => c.symbol), ['USDC', 'WTCOIN', 'SPAM', 'cbBTC']);
-  const held = candidatesToHoldings('base', all, [0n, 460076320000000000n, null, 4981205n]);
+  assert.deepEqual(all.map(c => c.symbol), ['USDC', 'WTCOIN', 'SPAM', 'NOW-HELD', 'cbBTC']);
+  const held = candidatesToHoldings('base', all, [0n, 460076320000000000n, null, 0n, 4981205n]);
   assert.deepEqual(held.map(h => [h.symbol, h.balanceRaw]), [['WTCOIN', '460076320000000000'], ['cbBTC', '4981205']]);
   assert.equal(held[1].asset, `base.${CBBTC}`);
   assert.equal(held[1].priceUsd, 0, 'priced later, from DeFiLlama');
   assert.equal(nativeHolding('base', 0n, 2700), null);
   assert.equal(nativeHolding('base', 10n ** 18n, 2700).valueUsd, 2700);
+  let truncated = false;
+  const longTail = Array.from({ length: 61 }, (_, i) => tok(`0x${(i + 1).toString(16).padStart(40, '0')}`, `T${i}`, 18, '1000000000000000000', null));
+  assert.equal(blockscoutCandidates(longTail, [], () => { truncated = true; }).length, 60);
+  assert.equal(truncated, true, 'an incomplete token scan must be disclosed');
 });

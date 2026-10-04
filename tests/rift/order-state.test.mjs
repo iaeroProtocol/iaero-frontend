@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PAY_WINDOW_MS, canMoveTo, canPay, capOrders, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowOpen, phaseInput,
-  sanitizeOrder,
+  pendingByLeastRecentPoll, sanitizeOrder,
 } from '../../src/lib/rift/order-state.ts';
 
 const T0 = 1_790_930_000_000;
@@ -23,7 +23,10 @@ test('payment state: requested, unknown, sent, failed', () => {
   assert.equal(payState(order({ payUnknown: true }), T0), 'unknown');
   assert.equal(payState(order({ depositSentAt: T0, depositTxHash: HASH }), T0), 'sent');
   assert.equal(payState(order({ depositSentAt: T0 }), T0), 'sent', 'HyperCore: no hash');
-  assert.equal(payState(order({ depositSentAt: T0, depositFailed: true }), T0), 'failed');
+  assert.equal(payState(order({ depositSentAt: T0, depositFailed: true, depositFailReason: 'reverted' }), T0), 'failed');
+  assert.equal(payState(order({ payAttemptAt: T0, payRequestedAt: undefined }), T0 + 30_000), 'unknown', 'old cleared EVM attempts are not proof of no broadcast');
+  assert.equal(payState(order({ payAttemptAt: T0, depositFailed: true, depositFailReason: 'lost' }), T0 + 30_000), 'unknown');
+  assert.equal(payState(order({ payAttemptAt: T0, depositFailed: true, depositFailReason: 'cancelled' }), T0 + 30_000), 'failed');
   assert.equal(payState(order({ depositSentAt: T0, depositTxHash: HASH, payUnknown: true }), T0), 'unknown', 'a hash that never showed up');
 });
 
@@ -32,6 +35,8 @@ test('an order is paid only inside its window, once', () => {
   assert.equal(canPay(order(), 'evm', T0 + PAY_WINDOW_MS + 1), false, 'an old order is re-priced, not paid');
   assert.equal(canPay(order({ payRequestedAt: T0 }), 'evm', T0 + 1000), false, 'a prompt is open');
   assert.equal(canPay(order({ payUnknown: true }), 'evm', T0 + 1000), false, 'check first');
+  assert.equal(canPay(order({ payAttemptAt: T0 }), 'evm', T0 + 1000), false, 'a cleared legacy EVM marker is still inconclusive');
+  assert.equal(canPay(order({ depositFailed: true, depositFailReason: 'lost' }), 'evm', T0 + 1000), false, 'legacy lost has no definitive evidence');
   assert.equal(canPay(order({ depositSentAt: T0, depositTxHash: HASH }), 'evm', T0 + 1000), false, 'already paid');
   assert.equal(canPay(order({ depositFailed: true, depositFailReason: 'reverted' }), 'evm', T0 + 1000), true);
   assert.equal(canPay(order({ status: 'funded' }), 'evm', T0 + 1000), false);
@@ -46,7 +51,7 @@ test('abandoned: unpaid past the window, nothing in doubt', () => {
   assert.equal(isAbandoned(order(), T0 + 1000), false, 'still payable');
   assert.equal(isAbandoned(order({ payUnknown: true }), late), false, 'a payment may be on its way');
   assert.equal(isAbandoned(order({ depositSentAt: T0, depositTxHash: HASH }), late), false);
-  assert.equal(isAbandoned(order({ depositFailed: true }), late), true);
+  assert.equal(isAbandoned(order({ depositFailed: true, depositFailReason: 'reverted' }), late), true);
   assert.equal(isAbandoned(order({ sourceChain: 'bitcoin', btc: { txid: 'ab'.repeat(32) } }), T0 + 2 * 3600_000), false);
   assert.equal(isAbandoned(order({ status: 'expired' }), late), false);
 });
@@ -81,15 +86,24 @@ test('saved records are checked; bad ones are dropped, not rendered', () => {
   assert.equal(sanitizeOrder(order({ route: [{ venue: 'x' }] })), null);
   assert.equal(sanitizeOrder(order({ status: 'teleported' })), null);
   assert.equal(sanitizeOrder(order({ fromAmountRaw: '1e6' })), null);
+  assert.equal(sanitizeOrder(order({ fromAmountRaw: '1000000000' })), null, 'the displayed amount must equal the raw wallet transfer');
+  assert.equal(sanitizeOrder(order({ estimatedOut: '9'.repeat(400) })), null, 'an overflowing estimate is not renderable');
+  assert.equal(sanitizeOrder(order({ token: { ...order().token, asset: 'arbitrum.eth' } })), null, 'source asset must match its chain and contract');
+  assert.equal(sanitizeOrder(order({ depositAddress: '0x333333333333333333333333333333333333333' })), null, 'a restored order cannot pay a malformed address');
+  assert.equal(sanitizeOrder(order({ depositDeadline: 'later' })), null);
   assert.equal(sanitizeOrder(order({ fromAmount: '0.001x' })), null, 'the amount is used in BigInt maths while rendering');
+  assert.ok(sanitizeOrder(order({
+    sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' },
+    fromAmount: '0.01', fromAmountRaw: '1000000', depositAddress: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
+  })), 'a saved Bitcoin order is still tracked');
   assert.deepEqual(sanitizeOrder(order({ statusTimes: undefined })).statusTimes, {});
   assert.equal(sanitizeOrder(null), null);
 });
 
 test('damaged optional fields are dropped, the order kept', () => {
   const o = sanitizeOrder(order({
-    sourceChain: 'bitcoin', btc: { txid: 'ab'.repeat(32), totalSats: '0.001', confirmations: 'x', firstSeenAt: T0 },
-    depositTxHash: '0x12', depositReceivedRaw: '-1', baseFromBlock: '1e9', payRequestedAt: 'soon', amountOut: 'lots',
+    btc: { txid: 'ab'.repeat(32), totalSats: '0.001', confirmations: 'x', firstSeenAt: T0 },
+    depositTxHash: '0x12', depositReceivedRaw: '-1', baseFromBlock: '1e9', payRequestedAt: 'soon', payAttemptId: 'bad', amountOut: 'lots',
     statusTimes: { funded: 'later', awaiting_deposit: T0, teleported: T0 }, pastTxHashes: [HASH, 'nope'],
     hlAction: { destination: '0x1', token: 'USDC:0x6d', amount: '5', time: T0 },
   }));
@@ -99,10 +113,21 @@ test('damaged optional fields are dropped, the order kept', () => {
   assert.equal(o.depositReceivedRaw, undefined);
   assert.equal(o.baseFromBlock, undefined);
   assert.equal(o.payRequestedAt, undefined);
+  assert.equal(o.payAttemptId, undefined);
   assert.equal(o.amountOut, undefined);
   assert.deepEqual(o.statusTimes, { awaiting_deposit: T0 });
   assert.deepEqual(o.pastTxHashes, [HASH]);
   assert.equal(o.hlAction, undefined, 'unsigned');
+});
+
+test('orders skipped by the poll budget move to the front on the next round', () => {
+  const all = Array.from({ length: 12 }, (_, i) => order({ id: String(i), lastPolledAt: T0 }));
+  const first = pendingByLeastRecentPoll(all, {});
+  assert.deepEqual(first.map(o => o.id), all.map(o => o.id));
+  const stamps = Object.fromEntries(first.slice(0, 8).map(o => [o.id, T0 + 60_000]));
+  const next = pendingByLeastRecentPoll(all, stamps);
+  assert.deepEqual(next.slice(0, 4).map(o => o.id), ['8', '9', '10', '11']);
+  assert.deepEqual(pendingByLeastRecentPoll([...all, order({ id: 'done', status: 'delivered' })], stamps).map(o => o.id), next.map(o => o.id));
 });
 
 test('capping never drops an order in flight or one needing support; abandoned ones go first', () => {

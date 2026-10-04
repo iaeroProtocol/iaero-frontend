@@ -57,7 +57,7 @@ const unitsOf = (amount: string) => { try { return parseUnits(amount, 18); } cat
 const notFound = (e: unknown) => /NotFound/.test((e as { name?: string } | null)?.name ?? '');
 
 /** What a check of an uncertain payment found. */
-type Verdict = 'moved' | 'arrived' | 'partial' | 'pending' | 'nothing';
+type Verdict = 'moved' | 'arrived' | 'partial' | 'pending' | 'nothing' | 'reverted';
 
 interface Props {
   order: StoredOrder;
@@ -94,6 +94,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
 
   // The tab waiting on the wallet says "requesting" for as long as the wallet is open.
   const ps = paying ? 'requesting' : payState(order, now);
+  const [settlementAck, setSettlementAck] = useState(false);
   const paid = ps === 'sent' || !!order.btc?.txid;
   const btcConfirming = kind === 'bitcoin' && order.status === 'awaiting_deposit' && !!order.btc?.txid;
   const staleRef = useRef(stale);
@@ -279,7 +280,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
   //    read never offers "Pay again"). Then the deposit address (any sign of a payment counts), then the paying
   //    account: anything sent from it since the payment was requested means a payment may be on its way.
   const [checking, setChecking] = useState(false);
-  const [checkSaid, setCheckSaid] = useState<'nothing' | 'partial' | 'pending' | 'error' | null>(null);
+  const [checkSaid, setCheckSaid] = useState<'nothing' | 'partial' | 'pending' | 'reverted' | 'error' | null>(null);
   async function judgePayment(): Promise<Verdict> {
     const u = parseOrderUpdate(await getOrder(order.id), order.id);
     await applyStatusUpdate(order.id, u);
@@ -288,6 +289,12 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
       if (!sourcePublic) throw new Error('no client');
       const ev = await evmDepositEvidence(sourcePublic, order);
       if (ev !== 'none') return ev;
+      if (order.depositTxHash) {
+        const receipt = await sourcePublic.getTransactionReceipt({ hash: order.depositTxHash as `0x${string}` })
+          .catch(e => (notFound(e) ? null : Promise.reject(e)));
+        if (receipt?.status === 'reverted') return 'reverted';
+        if (receipt) return 'pending'; // a successful transfer with no deposit needs investigation
+      }
       if (order.payNonce !== undefined && await accountNonce(sourcePublic, order.toAddress, 'pending') > order.payNonce) return 'pending';
     } else if (kind === 'hypercore') {
       const t = hyperCoreToken(order.token.asset);
@@ -302,6 +309,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
     depositSentAt: prev.depositSentAt ?? prev.payAttemptAt ?? Date.now(), startEstimated: prev.startEstimated || !prev.depositSentAt,
   }));
   async function checkPayment(thenPay = false) {
+    if (thenPay && !settlementAck) return;
     setChecking(true);
     setCheckSaid(null);
     try {
@@ -309,11 +317,15 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
       if (v === 'arrived') {
         await markArrived();
         showToast?.('Your payment reached the deposit address. Tracking your order…', 'success');
+      } else if (v === 'reverted') {
+        await patchOrder(order.id, prev => prev.depositTxHash === order.depositTxHash && payState(prev, Date.now()) === 'unknown'
+          ? { payUnknown: false, payRequestedAt: undefined, depositFailed: true, depositFailReason: 'reverted' as const }
+          : {});
+        setCheckSaid('reverted');
       } else if (v !== 'moved') {
         setCheckSaid(v);
-        if (v === 'nothing' && thenPay) {
-          // Clears only a lost marker: a tab still waiting on the wallet keeps its marker fresh. A hash that never
-          // showed up counts as a failed attempt, so the order can be paid again.
+        if (v === 'nothing' && thenPay && kind === 'hypercore') {
+          // HyperCore retries the same saved signed action. A tab still waiting on the wallet keeps its marker fresh.
           await patchOrder(order.id, prev => (payState(prev, Date.now()) !== 'unknown' ? {} : {
             payUnknown: false, payRequestedAt: undefined,
             ...(prev.depositSentAt ? { depositFailed: true, depositFailReason: 'lost' as const } : {}),
@@ -489,18 +501,25 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
         {/* Paying (EVM and HyperCore) */}
         {phase === 'pay' && kind !== 'bitcoin' && (
           <div className="space-y-3 rounded-xl border border-indigo-500/20 bg-indigo-500/5 p-4 text-sm text-slate-200">
+            {!wrongAccount && windowOpen && ps !== 'requesting' && (ps !== 'unknown' || kind === 'hypercore') && (
+              <label className="flex cursor-pointer items-start gap-2 text-xs text-amber-100">
+                <input type="checkbox" checked={settlementAck} onChange={e => setSettlementAck(e.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 accent-amber-500" />
+                <span>I understand Rift can deliver less iAERO than this order estimates. There is no guaranteed minimum after payment is sent.</span>
+              </label>
+            )}
             {wrongAccount ? (
               <div>This order delivers iAERO to <span className="font-mono">{short(order.toAddress)}</span>. Connect that wallet to pay it.</div>
             ) : ps === 'unknown' ? (
               <>
                 <div className="flex gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
-                  <div>We couldn’t confirm whether your payment went out. Check your wallet’s activity before paying again.</div>
+                  <div>We couldn’t confirm whether your payment went out. Check your wallet’s activity and this order before sending anything else.</div>
                 </div>
                 <div aria-live="polite" className="space-y-1 text-xs">
                   {checkSaid === 'nothing' && (windowOpen
-                    ? <div className="text-slate-300">Nothing has reached the deposit address, and nothing new was sent from your account. If your wallet shows no pending payment, you can pay again.</div>
+                    ? <div className="text-slate-300">Nothing has reached the deposit address.{kind === 'evm' ? ' An RPC check cannot prove a wallet request was never broadcast. Keep checking your wallet and this order before sending anything else.' : ' You can retry the same signed Hyperliquid transfer without sending it twice.'}</div>
                     : <div className="text-slate-300">Nothing has reached the deposit address. Don’t pay this order now: its price is out of date. If your wallet shows the payment as pending, this order completes when it arrives; otherwise start a new order.</div>)}
+                  {checkSaid === 'reverted' && <div className="text-slate-300">The payment transaction reverted. Nothing reached Rift; you can try again while the price is current.</div>}
                   {checkSaid === 'partial' && <div className="text-amber-200">Part of the amount has reached the deposit address. Don’t pay again: if the rest doesn’t follow, Rift treats the order as underpaid, and you can {supportLink} with the order ID.</div>}
                   {checkSaid === 'pending' && <div className="text-amber-200">A transaction was sent from your account after the payment was requested. If it is this payment, it shows up here once it confirms. Don’t pay again.</div>}
                   {checkSaid === 'error' && <div className="text-amber-200">Couldn’t check right now (Rift or the network didn’t answer). Don’t pay again yet; try again in a moment.</div>}
@@ -509,8 +528,8 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                   <Button onClick={() => checkPayment()} disabled={checking} variant="outline" className="border-slate-600 text-slate-200">
                     {checking && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Check payment
                   </Button>
-                  {checkSaid === 'nothing' && windowOpen && (
-                    <Button onClick={() => checkPayment(true)} disabled={paying || checking} className="bg-gradient-to-r from-indigo-600 to-purple-600">Pay again</Button>
+                  {checkSaid === 'nothing' && windowOpen && kind === 'hypercore' && (
+                    <Button onClick={() => checkPayment(true)} disabled={!settlementAck || paying || checking} className="bg-gradient-to-r from-indigo-600 to-purple-600">Pay again</Button>
                   )}
                   {checkSaid === 'nothing' && !windowOpen && (
                     <Button onClick={() => onReorder(order)} className="bg-gradient-to-r from-indigo-600 to-purple-600">New order at today’s price</Button>
@@ -528,12 +547,13 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                   {order.depositFailed && (
                     <>Your last payment {order.depositFailReason === 'reverted' ? 'failed on-chain'
                       : order.depositFailReason === 'cancelled' ? 'was cancelled in your wallet'
+                      : order.depositFailReason === 'pre_send' ? 'failed before it was broadcast'
                       : order.depositFailReason === 'lost' ? 'never reached the network'
                       : 'was replaced or cancelled in your wallet'}, so nothing was sent.{' '}</>
                   )}
                   Send <span className="font-medium text-white">{fmt(order.fromAmount, 8)} {order.token.symbol}</span> on {chain.name} to start.
                 </div>
-                <Button onClick={() => onPay(order)} disabled={paying || ps === 'requesting'} className="h-auto min-h-10 w-full whitespace-normal bg-gradient-to-r from-indigo-600 to-purple-600 py-2.5 hover:from-indigo-700 hover:to-purple-700">
+                <Button onClick={() => onPay(order)} disabled={!settlementAck || paying || ps === 'requesting'} className="h-auto min-h-10 w-full whitespace-normal bg-gradient-to-r from-indigo-600 to-purple-600 py-2.5 hover:from-indigo-700 hover:to-purple-700">
                   {paying || ps === 'requesting' ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Waiting for your wallet…</> : `Pay ${fmt(order.fromAmount, 8)} ${order.token.symbol}`}
                 </Button>
               </>

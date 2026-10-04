@@ -67,12 +67,12 @@ function randomAddress(): Address {
 
 /**
  * Would a transfer of `amount` deliver all of it? Simulated with eth_simulateV1 (nothing is signed or sent) to a
- * fresh address, as the payment to a one-time deposit address would be: fee-on-transfer and rebasing tokens
- * deliver less, which would leave the order underfunded. null when it can't be told (the node does not
+ * fresh address before an order exists, or the actual deposit address immediately before paying:
+ * fee-on-transfer and rebasing tokens deliver less, which would leave the order underfunded. null when it can't be told (the node does not
  * simulate, or the transfer itself would fail, which the wallet then reports).
  */
-export async function transferDeliversInFull(client: PublicClient, token: Address, owner: Address, amount: bigint): Promise<boolean | null> {
-  const probe = randomAddress();
+export async function transferDeliversInFull(client: PublicClient, token: Address, owner: Address, amount: bigint, recipient?: Address): Promise<boolean | null> {
+  const probe = recipient ?? randomAddress();
   try {
     const { results } = await client.simulateCalls({
       account: owner,

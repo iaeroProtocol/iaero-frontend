@@ -86,6 +86,8 @@ export interface StoredOrder {
   payRequestedAt?: number;
   /** When the latest payment attempt started (kept after it ends). */
   payAttemptAt?: number;
+  /** Unique claim for this attempt. Async wallet results must only update the attempt that started them. */
+  payAttemptId?: string;
   /** The paying account's pending nonce just before the latest EVM prompt: a higher one later means something
    *  was sent from the account since. */
   payNonce?: number;
@@ -102,10 +104,9 @@ export interface StoredOrder {
   depositConfirmedAt?: number;
   /** depositSentAt is an estimate (the payment was found by a check, or seen late), not when it was sent. */
   startEstimated?: boolean;
-  /** The payment reverted, was cancelled or replaced in the wallet, or never reached the network (checked):
-   *  nothing was sent. */
+  /** A failed payment attempt. Legacy `lost` EVM attempts remain unknown until the wallet proves their outcome. */
   depositFailed?: boolean;
-  depositFailReason?: 'reverted' | 'cancelled' | 'replaced' | 'lost';
+  depositFailReason?: 'reverted' | 'cancelled' | 'pre_send' | 'replaced' | 'lost';
   /** Base units that actually reached the deposit address, when less than ordered (fee-on-transfer tokens). */
   depositReceivedRaw?: string;
   /** HyperCore: the signed transfer of the latest attempt. A retry re-posts this same transfer, which

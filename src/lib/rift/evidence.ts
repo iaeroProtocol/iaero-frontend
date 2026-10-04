@@ -1,9 +1,9 @@
 // src/lib/rift/evidence.ts
 //
 // Did a payment reach an order's deposit address? Asked when this browser does not know whether a payment
-// went out (lost wallet response, closed tab, a transaction replaced after a reload). The answer decides
-// whether "Pay again" may be offered, so every sign of activity counts as a payment: wrongly saying "arrived"
-// costs nothing (the order just waits), wrongly saying "nothing" can make someone pay twice.
+// went out (lost wallet response, closed tab, a transaction replaced after a reload). Every sign of activity
+// counts as a payment. A negative EVM read is inconclusive and never authorizes another transfer; HyperCore
+// retries the same saved signature, which the exchange accepts at most once.
 // - EVM: Rift's vault spends a deposit as soon as it executes, leaving dust, so the balance alone says
 //   nothing after execution; any transaction sent from the deposit address (its nonce), or code set on it,
 //   means Rift acted on a payment.

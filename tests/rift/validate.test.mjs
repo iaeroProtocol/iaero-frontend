@@ -52,8 +52,8 @@ test('a real quote passes; a quote for another destination, chain or amount is r
   assert.throws(() => parseQuote({ ...quote(), id: 'nope' }, { destination: DEST, fromChain: 'ethereum', fromAmount: '0.1' }), /UUID/);
   // Rift may echo a token by ticker even when it was requested by address: only the chain is compared.
   assert.ok(parseQuote({ ...quote(), from: 'ethereum.usdc' }, { destination: DEST, fromChain: 'ethereum', fromAmount: '0.10' }));
-  // ...and would write iAERO as base.iaero once it is on Rift's token list.
-  assert.ok(parseQuote({ ...quote(), to: 'base.iAERO' }, { destination: DEST, fromChain: 'ethereum', fromAmount: '0.1' }));
+  // A ticker alone cannot prove which contract Rift would deliver.
+  assert.throws(() => parseQuote({ ...quote(), to: 'base.iAERO' }, { destination: DEST, fromChain: 'ethereum', fromAmount: '0.1' }), /does not deliver iAERO/);
 });
 
 test('an order is accepted only if it delivers iAERO to this wallet, for this quote and amount', () => {
@@ -71,6 +71,10 @@ test('an order is accepted only if it delivers iAERO to this wallet, for this qu
     [{ refund_address: null }, /does not refund to the address you gave/, 'a refund address that was sent must come back'],
     [{ status: 'teleported' }, /unknown Rift order status/],
     [{ deposit_deadline: 'soon' }, /deposit deadline/],
+    [{ deposit_address: 'base.0x5adfc66c5e7158cbfb3b0129a8433c5da6f6382c' }, /deposit address is on a different chain/],
+    [{ deposit_address: 'ethereum.extra.0x5adfc66c5e7158cbfb3b0129a8433c5da6f6382c' }, /invalid chain prefix/],
+    [{ to_address: `arbitrum.${USER}` }, /delivery address is on a different chain/],
+    [{ refund_address: `base.${USER}` }, /refund address is on a different chain/],
     [{ id: 'x' }, /UUID/],
   ];
   for (const [patch, re] of refused) assert.throws(() => parseOrder(order(patch), expectOrder), re, JSON.stringify(patch));
@@ -79,7 +83,9 @@ test('an order is accepted only if it delivers iAERO to this wallet, for this qu
   assert.ok(parseOrder(order(), { ...expectOrder, fresh: true }));
   // Bitcoin refund addresses: bech32 compares case-insensitively.
   const btc = 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq';
-  assert.ok(parseOrder(order({ refund_address: `bitcoin.${btc}` }), { ...expectOrder, refundAddress: btc.toUpperCase() }));
+  assert.ok(parseOrder(order({
+    from: 'bitcoin.btc', deposit_address: `bitcoin.${btc}`, refund_address: `bitcoin.${btc}`,
+  }), { ...expectOrder, fromChain: 'bitcoin', refundAddress: btc.toUpperCase() }));
 });
 
 test("Rift's token in a quote or order is the one asked for, by name or by address", async () => {
@@ -95,7 +101,7 @@ test("Rift's token in a quote or order is the one asked for, by name or by addre
   assert.equal(sameSourceAsset('arbitrum.eth', USDT0, RIFT_TOKEN_NAMES), false, 'the native coin');
   assert.equal(sameSourceAsset('arbitrum.weth', 'arbitrum.eth', RIFT_TOKEN_NAMES), false, 'WETH is not ETH');
   assert.equal(sameSourceAsset('hyperliquid.HYPE', 'hyperliquid.hype', RIFT_TOKEN_NAMES), true);
-  assert.equal(sameSourceAsset('arbitrum.newtoken', USDT0, RIFT_TOKEN_NAMES), true, 'listed after our copy: only its chain can be checked');
+  assert.equal(sameSourceAsset('arbitrum.newtoken', USDT0, RIFT_TOKEN_NAMES), false, 'an unknown name cannot authenticate a contract');
   const expect = { destination: DEST, fromChain: 'arbitrum', fromAmount: '25', source: { fromAsset: USDT0, names: RIFT_TOKEN_NAMES } };
   const q = { ...quote(), from: 'arbitrum.usdt0', from_amount: '25' };
   assert.ok(parseQuote(q, expect));

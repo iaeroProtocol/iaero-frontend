@@ -33,9 +33,14 @@ export type PayState = 'none' | 'requesting' | 'sent' | 'unknown' | 'failed';
 /** Where this browser's payment for an order stands. */
 export function payState(o: StoredOrder, now: number): PayState {
   if (o.payUnknown) return 'unknown';
+  const evm = KIND_OF[o.sourceChain] === 'evm';
+  // Older app versions could clear an inconclusive EVM attempt after one empty RPC read. Those saved records
+  // have no proof that the wallet never broadcast a transaction and must not silently become payable again.
+  if (evm && (o.depositFailReason === 'lost'
+    || (o.payAttemptAt && !o.payRequestedAt && !o.depositTxHash && !o.depositFailed && !o.depositSentAt))) return 'unknown';
   if (o.depositSentAt && !o.depositFailed) return 'sent';
   if (o.payRequestedAt) return now - o.payRequestedAt > UNKNOWN_AFTER_MS ? 'unknown' : 'requesting';
-  if (o.depositFailed) return 'failed';
+  if (o.depositFailed) return !evm || ['reverted', 'cancelled', 'pre_send', 'replaced'].includes(o.depositFailReason ?? '') ? 'failed' : 'unknown';
   return 'none';
 }
 
@@ -48,7 +53,7 @@ export function payWindowOpen(o: StoredOrder, kind: SourceKind, now: number): bo
   if (o.status !== 'awaiting_deposit') return false;
   if (now - o.createdAt > payWindowMs(kind)) return false;
   const deadline = Date.parse(o.depositDeadline);
-  return !Number.isFinite(deadline) || deadline - now > DEADLINE_MARGIN_MS;
+  return Number.isFinite(deadline) && deadline - now > DEADLINE_MARGIN_MS;
 }
 
 /** Whether the app may ask the wallet to pay this order now. */
@@ -84,6 +89,12 @@ export const isFinalStatus = (s: RiftOrderStatus) => FINAL.includes(s);
 /** Finished orders that still need the user's attention (Rift support needs the order ID). */
 export const needsAttention = (s: RiftOrderStatus) => s === 'frozen' || s === 'underfunded';
 
+/** Serve the least recently polled unfinished orders first when the shared Rift budget is full. */
+export function pendingByLeastRecentPoll(orders: StoredOrder[], stamps: Record<string, number>): StoredOrder[] {
+  return orders.filter(o => !isFinalStatus(o.status))
+    .sort((a, b) => (stamps[a.id] ?? a.lastPolledAt ?? 0) - (stamps[b.id] ?? b.lastPolledAt ?? 0));
+}
+
 const RANK: Record<RiftOrderStatus, number> = {
   awaiting_deposit: 0, funded: 1, underfunded: 1, executing: 2, frozen: 3, delivered: 4, refunded: 4, expired: 4,
 };
@@ -106,6 +117,31 @@ const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFin
 const DECIMAL_RE = /^\d+(\.\d+)?$/;
 const UINT_RE = /^\d+$/;
 const HASH_RE = /^0x[0-9a-fA-F]{64}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EVM_ADDRESS_RE = /^0x[0-9a-f]{40}$/i;
+const BTC_ADDRESS_RE = /^(bc1[023456789acdefghjklmnpqrstuvwxyz]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/i;
+const HYPERCORE_DECIMALS: Record<string, number> = { hype: 8, usdc: 8, btc: 10, eth: 9 };
+
+/** Verify the saved amount against the exact base units the wallet would send, without floating point. */
+function amountMatchesRaw(amount: string, raw: string, decimals: number): boolean {
+  if (amount.length > 64 || raw.length > 80 || !DECIMAL_RE.test(amount) || !UINT_RE.test(raw)) return false;
+  const [whole, fraction = ''] = amount.split('.');
+  if (fraction.length > decimals) return false;
+  try {
+    return BigInt(raw) > 0n && BigInt(raw) === BigInt(whole) * 10n ** BigInt(decimals)
+      + BigInt((fraction + '0'.repeat(decimals)).slice(0, decimals) || '0');
+  } catch { return false; }
+}
+
+function tokenMatchesSource(chain: SourceChainKey, token: StoredOrder['token']): boolean {
+  const asset = token.asset.toLowerCase();
+  if (chain === 'bitcoin') return asset === 'bitcoin.btc' && !token.address && token.decimals === 8;
+  if (chain === 'hyperliquid') return !token.address && HYPERCORE_DECIMALS[asset.slice('hyperliquid.'.length)] === token.decimals
+    && asset.startsWith('hyperliquid.');
+  if (asset === `${chain}.eth`) return !token.address && token.decimals === 18;
+  return !!token.address && EVM_ADDRESS_RE.test(token.address)
+    && asset === `${chain}.${token.address.toLowerCase()}`;
+}
 
 /** Optional fields that must have their type when present; a wrong one is dropped, not the order. */
 const OPTIONAL_NUMBERS = [
@@ -120,14 +156,18 @@ const OPTIONAL_DECIMALS = ['expectedOut', 'amountOut'] as const;
 export function sanitizeOrder(x: unknown): StoredOrder | null {
   const o = x as Partial<StoredOrder> | null;
   if (!o || typeof o !== 'object') return null;
-  if (!isStr(o.id) || !isStr(o.quoteId) || !isNum(o.createdAt) || !CHAINS.includes(o.sourceChain as SourceChainKey)) return null;
+  if (!isStr(o.id) || !UUID_RE.test(o.id) || !isStr(o.quoteId) || !UUID_RE.test(o.quoteId)
+    || !isNum(o.createdAt) || !CHAINS.includes(o.sourceChain as SourceChainKey)) return null;
   const t = o.token as StoredOrder['token'] | undefined;
   if (!t || !isStr(t.symbol) || !isStr(t.asset) || !Number.isInteger(t.decimals) || t.decimals < 0 || t.decimals > 36) return null;
-  if (t.address !== undefined && !/^0x[0-9a-fA-F]{40}$/.test(String(t.address))) return null;
-  if (!isStr(o.fromAmount) || !DECIMAL_RE.test(o.fromAmount) || !isStr(o.fromAmountRaw) || !UINT_RE.test(o.fromAmountRaw)) return null;
-  if (!isStr(o.estimatedOut) || !DECIMAL_RE.test(o.estimatedOut)) return null;
+  if (!tokenMatchesSource(o.sourceChain!, t)) return null;
+  if (!isStr(o.fromAmount) || !isStr(o.fromAmountRaw) || !amountMatchesRaw(o.fromAmount, o.fromAmountRaw, t.decimals)) return null;
+  if (!isStr(o.estimatedOut) || !DECIMAL_RE.test(o.estimatedOut)
+    || !Number.isFinite(Number(o.estimatedOut)) || !(Number(o.estimatedOut) > 0)) return null;
   if (!Array.isArray(o.route) || o.route.some(r => !r || !isStr(r.venue) || !isStr(r.from) || !isStr(r.to))) return null;
-  if (!isStr(o.depositAddress) || !isStr(o.depositDeadline) || !isStr(o.toAddress)) return null;
+  if (!isStr(o.depositAddress) || !(o.sourceChain === 'bitcoin' ? BTC_ADDRESS_RE : EVM_ADDRESS_RE).test(o.depositAddress)
+    || !isStr(o.depositDeadline) || !Number.isFinite(Date.parse(o.depositDeadline))
+    || !isStr(o.toAddress) || !EVM_ADDRESS_RE.test(o.toAddress)) return null;
   if (!STATUSES.includes(o.status as RiftOrderStatus)) return null;
 
   const clean: Record<string, unknown> = { ...o };
@@ -135,6 +175,7 @@ export function sanitizeOrder(x: unknown): StoredOrder | null {
   for (const k of OPTIONAL_UINTS) if (clean[k] !== undefined && !(isStr(clean[k]) && UINT_RE.test(clean[k] as string))) delete clean[k];
   for (const k of OPTIONAL_DECIMALS) if (clean[k] != null && !(isStr(clean[k]) && DECIMAL_RE.test(clean[k] as string))) delete clean[k];
   if (clean.depositTxHash !== undefined && !(isStr(clean.depositTxHash) && HASH_RE.test(clean.depositTxHash as string))) delete clean.depositTxHash;
+  if (clean.payAttemptId !== undefined && !(isStr(clean.payAttemptId) && /^[0-9a-f-]{36}$/i.test(clean.payAttemptId as string))) delete clean.payAttemptId;
   if (clean.pastTxHashes !== undefined) {
     const list = Array.isArray(clean.pastTxHashes) ? (clean.pastTxHashes as unknown[]).filter(h => isStr(h) && HASH_RE.test(h)) : [];
     if (list.length) clean.pastTxHashes = list.slice(-5); else delete clean.pastTxHashes;

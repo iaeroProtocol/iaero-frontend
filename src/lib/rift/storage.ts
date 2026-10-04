@@ -13,7 +13,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { canMoveTo, capOrders, sanitizeOrder } from './order-state';
+import { canMoveTo, canPay, capOrders, sanitizeOrder, sourceKindOf } from './order-state';
 import { ORDERS_KEY } from './keys';
 import type { OrderUpdate } from './validate';
 import type { StoredOrder } from './types';
@@ -61,7 +61,7 @@ export function loadOrders(): StoredOrder[] {
 /** True while this browser is not saving orders (storage full or blocked). */
 export const storageFailing = () => writeFailed;
 
-function saveOrders(list: StoredOrder[]) {
+function saveOrders(list: StoredOrder[]): boolean {
   const capped = capOrders(list, MAX_ORDERS, Date.now());
   memory = capped;
   try {
@@ -71,6 +71,7 @@ function saveOrders(list: StoredOrder[]) {
     writeFailed = true;
   }
   window.dispatchEvent(new Event(EVENT));
+  return !writeFailed;
 }
 
 /** Read, change and save the list under the cross-tab lock. `change` returns null for "nothing to save". */
@@ -81,7 +82,11 @@ function mutate(change: (list: StoredOrder[]) => StoredOrder[] | null): Promise<
   };
   const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
   if (!locks?.request) { run(); return Promise.resolve(); }
-  return locks.request(LOCK, run).then(() => undefined, () => run());
+  return locks.request(LOCK, run).then(() => undefined, () => {
+    // Writing without the lock could overwrite a payment claim made in another tab.
+    writeFailed = true;
+    window.dispatchEvent(new Event(EVENT));
+  });
 }
 
 /** A new order first. An order already stored under the same id keeps what this browser learned about it. */
@@ -107,6 +112,49 @@ export function patchOrder(id: string, patch: Partial<StoredOrder> | ((o: Stored
     copy[i] = next;
     return copy;
   });
+}
+
+/** Claim a payment under the cross-tab Web Lock before opening a wallet prompt. A payment requires durable
+ *  storage: if Web Locks or localStorage are unavailable, two tabs cannot safely agree who owns the prompt. */
+export async function claimPayment(id: string, owner: string, extra: Partial<StoredOrder> = {}): Promise<StoredOrder | null> {
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  if (!locks?.request) throw new Error('This browser cannot safely coordinate payments across tabs. Use a browser with Web Locks support.');
+  try {
+    return await locks.request(LOCK, () => {
+      if (writeFailed) throw new Error('Browser storage is not saving orders. Nothing was sent; refresh this page after fixing storage.');
+      const list = readStorage();
+      if (!list) throw new Error('Could not read saved orders. Nothing was sent; enable browser storage and try again.');
+      memory = list;
+      const i = list.findIndex(o => o.id === id);
+      if (i < 0) return null;
+      const prev = list[i];
+      if (prev.toAddress.toLowerCase() !== owner.toLowerCase() || !canPay(prev, sourceKindOf(prev.sourceChain), Date.now())) return null;
+      const attempt: StoredOrder = {
+        ...prev,
+        payRequestedAt: Date.now(), payAttemptAt: Date.now(), payAttemptId: crypto.randomUUID(), payUnknown: false,
+        depositFailed: false, depositFailReason: undefined, depositTxHash: undefined, depositNonce: undefined,
+        depositSentAt: undefined, depositConfirmedAt: undefined, depositReceivedRaw: undefined, startEstimated: undefined,
+        pastTxHashes: prev.depositTxHash ? [...(prev.pastTxHashes ?? []), prev.depositTxHash].slice(-5) : prev.pastTxHashes,
+        ...extra,
+      };
+      const next = list.slice();
+      next[i] = attempt;
+      if (!saveOrders(next)) {
+        memory = list;
+        window.dispatchEvent(new Event(EVENT));
+        throw new Error('Could not save the payment attempt. Nothing was sent; enable browser storage and try again.');
+      }
+      return attempt;
+    });
+  } catch (e) {
+    // A failed lock request must never fall back to an unlocked payment.
+    throw e instanceof Error ? e : new Error('Could not coordinate this payment across tabs. Nothing was sent.');
+  }
+}
+
+/** A late wallet response or heartbeat must not change a newer attempt from another tab. */
+export function patchPaymentAttempt(id: string, attemptId: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>)): Promise<void> {
+  return patchOrder(id, prev => prev.payAttemptId === attemptId ? (typeof patch === 'function' ? patch(prev) : patch) : {});
 }
 
 /** Record a status poll: the status, when it was first seen (and whether that was live), the amount out. */
@@ -144,6 +192,9 @@ const POLLED_KEY = 'iaero.rift.polled.v1';
 function readPolled(): Record<string, number> {
   try { return JSON.parse(window.localStorage.getItem(POLLED_KEY) ?? '{}') ?? {}; } catch { return {}; }
 }
+
+/** Snapshot used to serve the least recently polled orders first when Rift's budget is tight. */
+export const pollStamps = () => readPolled();
 
 export function markPolled(id: string, now = Date.now()) {
   try {

@@ -88,7 +88,17 @@ export default function IaeroProtocolApp() {
  const [getIaeroOpened, setGetIaeroOpened] = useState(false);
  React.useEffect(() => { if (tab === 'get-iaero') setGetIaeroOpened(true); }, [tab]);
  const [hasSavedOrders, setHasSavedOrders] = useState(false);
- React.useEffect(() => { try { setHasSavedOrders(!!localStorage.getItem(ORDERS_KEY)); } catch { /* storage blocked */ } }, []);
+ React.useEffect(() => {
+   const refresh = () => { try { setHasSavedOrders(!!localStorage.getItem(ORDERS_KEY)); } catch { /* storage blocked */ } };
+   const onStorage = (e: StorageEvent) => { if (e.key === ORDERS_KEY || e.key === null) refresh(); };
+   refresh();
+   window.addEventListener('storage', onStorage);
+   window.addEventListener('iaero-rift-orders', refresh);
+   return () => {
+     window.removeEventListener('storage', onStorage);
+     window.removeEventListener('iaero-rift-orders', refresh);
+   };
+ }, []);
 
  return (
    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950">

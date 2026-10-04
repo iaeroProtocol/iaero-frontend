@@ -55,6 +55,7 @@ interface BlockscoutTokenBalance {
 export function parseTokenBalances(chain: HoldingChain, json: unknown, exclude: string[] = []): Holding[] {
   if (!Array.isArray(json)) return [];
   const out: Holding[] = [];
+  const seen = new Set<string>();
   for (const row of json as BlockscoutTokenBalance[]) {
     const t = row?.token;
     const address = (t?.address_hash ?? t?.address ?? '').toLowerCase();
@@ -65,8 +66,10 @@ export function parseTokenBalances(chain: HoldingChain, json: unknown, exclude: 
     const balanceRaw = String(row.value ?? '0');
     if (!/^\d+$/.test(balanceRaw) || balanceRaw === '0') continue;
     const asset = `${chain}.${address}`;
-    if (exclude.includes(asset)) continue;
-    const priceUsd = Number(t.exchange_rate ?? 0) || 0;
+    if (exclude.includes(asset) || seen.has(address)) continue;
+    seen.add(address);
+    const quotedPrice = Number(t.exchange_rate ?? 0);
+    const priceUsd = Number.isFinite(quotedPrice) && quotedPrice > 0 ? quotedPrice : 0;
     const symbol = (t.symbol ?? '').trim() || `${address.slice(0, 6)}…`;
     out.push({
       chain, asset, symbol: symbol.slice(0, 16), name: (t.name ?? symbol).slice(0, 48), decimals,
@@ -82,7 +85,8 @@ export function parseNative(chain: HoldingChain, json: unknown): Holding | null 
   const j = json as { coin_balance?: string | null; exchange_rate?: string | null } | null;
   const balanceRaw = String(j?.coin_balance ?? '0');
   if (!/^\d+$/.test(balanceRaw) || balanceRaw === '0') return null;
-  const priceUsd = Number(j?.exchange_rate ?? 0) || 0;
+  const quotedPrice = Number(j?.exchange_rate ?? 0);
+  const priceUsd = Number.isFinite(quotedPrice) && quotedPrice > 0 ? quotedPrice : 0;
   return {
     chain, asset: `${chain}.eth`, symbol: 'ETH', name: 'Ether', decimals: 18, balanceRaw, priceUsd,
     valueUsd: priceUsd * rawToNumber(balanceRaw, 18),
@@ -148,12 +152,13 @@ export const MAX_UNPRICED_CANDIDATES = 60;
  * Blockscout shows (it can be stale either way), plus unpriced ones Blockscout shows a balance for (the
  * long tail of airdropped spam, most of which nothing prices), largest first, capped.
  */
-export function blockscoutCandidates(json: unknown, exclude: string[] = []): TokenCandidate[] {
+export function blockscoutCandidates(json: unknown, exclude: string[] = [], onTruncate?: () => void): TokenCandidate[] {
   // `/addresses/{a}/tokens` pages ({ items }, sorted by USD value); the older `/token-balances` is an array.
   if (json && !Array.isArray(json) && Array.isArray((json as { items?: unknown }).items)) json = (json as { items: unknown[] }).items;
   if (!Array.isArray(json)) return [];
   const priced: TokenCandidate[] = [];
   const unpriced: { c: TokenCandidate; held: number }[] = [];
+  const seen = new Set<string>();
   for (const row of json as BlockscoutTokenBalance[]) {
     const t = row?.token;
     const address = (t?.address_hash ?? t?.address ?? '').toLowerCase();
@@ -162,18 +167,22 @@ export function blockscoutCandidates(json: unknown, exclude: string[] = []): Tok
     if (exclude.some(e => e.endsWith(`.${address}`))) continue;
     const decimals = Number(t.decimals ?? '');
     if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) continue;
+    if (seen.has(address)) continue; // a balance changing during pagination can appear on two pages
     const symbol = ((t.symbol ?? '').trim() || `${address.slice(0, 6)}…`).slice(0, 16);
+    const quotedPrice = Number(t.exchange_rate ?? 0);
     const c: TokenCandidate = {
       address: address as `0x${string}`, symbol, name: (t.name ?? symbol).slice(0, 48), decimals,
-      priceUsd: Number(t.exchange_rate ?? 0) || 0, icon: t.icon_url ?? undefined,
+      priceUsd: Number.isFinite(quotedPrice) && quotedPrice > 0 ? quotedPrice : 0,
+      icon: t.icon_url ?? undefined,
     };
-    if (c.priceUsd > 0) priced.push(c);
+    if (c.priceUsd > 0) { priced.push(c); seen.add(address); }
     else {
       const raw = String(row.value ?? '0');
-      if (/^\d+$/.test(raw) && raw !== '0') unpriced.push({ c, held: rawToNumber(raw, decimals) });
+      if (/^\d+$/.test(raw) && raw !== '0') { unpriced.push({ c, held: rawToNumber(raw, decimals) }); seen.add(address); }
     }
   }
   unpriced.sort((a, b) => b.held - a.held);
+  if (unpriced.length > MAX_UNPRICED_CANDIDATES) onTruncate?.();
   return [...priced, ...unpriced.slice(0, MAX_UNPRICED_CANDIDATES).map(u => u.c)];
 }
 
