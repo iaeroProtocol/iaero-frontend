@@ -150,7 +150,7 @@ export const L2_GAS_DESK_USD = 0.1;
 
 /** Chains whose steps run on the gas desk; it charges once per chain. */
 export const gasDeskChains = (route: { execution?: { mode: string; chain?: number } }[]): number[] =>
-  [...new Set(route.flatMap(s => (s.execution?.mode === 'evm_gas_desk' && s.execution.chain ? [s.execution.chain] : [])))];
+  [...new Set(route.flatMap(s => (s.execution?.mode === 'evm_gas_desk' && Number.isSafeInteger(s.execution.chain) && s.execution.chain! > 0 ? [s.execution.chain!] : [])))];
 
 /** Expected gas-desk charge in USD, or null when Ethereum is involved and its gas price or ETH price is unknown. */
 export function gasDeskUsd(chains: number[], ethGasPriceWei: bigint | undefined, ethUsd: number | undefined): number | null {

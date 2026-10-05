@@ -32,6 +32,7 @@ const WINDOW_MS = 60_000;
 const LIMIT: Record<Exclude<RiftCallKind, 'user'>, number> = { poll: 8, track: 6, probe: 5 };
 const PROBE_SPACING_MS = 15_000;
 const PAUSE_AFTER_429_MS = 60_000;
+const PAUSE_AFTER_FAILURE_MS = 20_000;
 
 interface CallLog { t: number[]; pausedUntil: number; lastProbe: number }
 let memLog: CallLog = { t: [], pausedUntil: 0, lastProbe: 0 };
@@ -87,9 +88,10 @@ function logCall(kind: RiftCallKind, now: number) {
   const log = readLog(now);
   writeLog({ ...log, t: [...log.t, now], lastProbe: kind === 'probe' ? now : log.lastProbe });
 }
-function logRateLimited(now: number) {
+function logRateLimited(now: number, pause = PAUSE_AFTER_429_MS) {
   if (typeof window === 'undefined') return;
-  writeLog({ ...readLog(now), pausedUntil: now + PAUSE_AFTER_429_MS });
+  const log = readLog(now);
+  writeLog({ ...log, pausedUntil: Math.max(log.pausedUntil, now + pause) });
 }
 
 async function call(path: string, init: { method?: 'GET' | 'POST'; body?: unknown; signal?: AbortSignal; kind?: RiftCallKind } = {}): Promise<unknown> {
@@ -110,6 +112,9 @@ async function call(path: string, init: { method?: 'GET' | 'POST'; body?: unknow
     text = await res.text(); // within the timeout: a stalled body must not hang the caller
   } catch (e) {
     if (init.signal?.aborted) throw e;
+    // Rift's rate-limit answers come from its CDN, possibly without the header a browser needs to read them: a call
+    // that can't be read at all may be one, so the calls that aren't the user's wait a little too.
+    logRateLimited(Date.now(), PAUSE_AFTER_FAILURE_MS);
     throw new RiftApiError(0, controller.signal.aborted ? 'Rift took too long to answer' : 'Could not reach Rift');
   } finally {
     clearTimeout(timer);

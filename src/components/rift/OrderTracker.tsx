@@ -33,8 +33,7 @@ import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, RIFT_SUPP
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
 import { costText, costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
 import {
-  BTC_MISSING_AFTER, btcCheckpoint, btcLookEveryMs, btcLookPatch, btcNeedsLook, btcUnchecked, canHide, isFinalStatus, isOutOfDate,
-  isTerminalStatus, missingButExpired, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput,
+  BTC_MISSING_AFTER, btcCheckpoint, btcConfirmed, btcLookEveryMs, btcLookPatch, btcNeedsLook, btcUnchecked, canHide, doubtButExpired, isFinalStatus, isOutOfDate, isTerminalStatus, missingButExpired, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput, PRE_SEND_COOLDOWN_MS,
 } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
@@ -120,7 +119,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
     let timer: ReturnType<typeof setTimeout> | undefined;
     let failures = 0;
     const tick = async () => {
-      const regular = order.status === 'frozen' ? 60_000 : staleRef.current ? 10 * 60_000
+      const regular = order.status === 'frozen' || order.status === 'underfunded' ? 60_000 : staleRef.current ? 10 * 60_000
         : order.status === 'funded' || order.status === 'executing' ? 8000 : btcConfirming ? 30000 : paid ? 10000 : 20000;
       const every = Math.max(regular, document.hidden ? 60_000 : 0);
       if (!polledWithin(order.id, every - 1000) && riftBudget('track')) {
@@ -159,14 +158,20 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
     const ifCurrent = (patch: Partial<StoredOrder> | ((prev: StoredOrder) => Partial<StoredOrder>)) =>
       patchOrder(id, prev => (prev.depositTxHash === hash && !prev.depositFailed && !prev.depositConfirmedAt && !prev.payUnknown
         ? (typeof patch === 'function' ? patch(prev) : patch) : {}));
-    const settle = (r: TransactionReceipt) => {
-      if (r.status !== 'success') return ifCurrent({ depositFailed: true, depositFailReason: 'reverted' });
+    /** This order's own transaction took nonce `n` (mined, or replaced with nothing arriving): an earlier attempt that
+     *  "failed before anything was sent" at that nonce provably sent nothing there (storage preSendNonce). */
+    const nonceUsed = (prev: StoredOrder, n: number | undefined) => (n !== undefined && prev.preSendNonce === n ? { preSendNonce: n + 1 } : {});
+    const settle = async (r: TransactionReceipt) => {
+      if (nonce === undefined) nonce = await sourcePublic.getTransaction({ hash }).then(t => t.nonce, () => undefined);
+      if (r.status !== 'success') return ifCurrent(prev => ({ depositFailed: true, depositFailReason: 'reverted' as const, ...nonceUsed(prev, nonce) }));
       let received: string | undefined;
       if (order.token.address) {
         const token = order.token.address.toLowerCase(), to = order.depositAddress.toLowerCase();
         const sum = r.logs
           .filter(l => l.address.toLowerCase() === token && l.topics[0] === TRANSFER_TOPIC && !!l.topics[2] && `0x${l.topics[2].slice(26)}`.toLowerCase() === to)
           .reduce((n, l) => n + BigInt(l.data), 0n);
+        // Mined, but nothing reached the deposit address (a token that returns false instead of reverting): failed.
+        if (sum === 0n) return ifCurrent(prev => ({ depositFailed: true, depositFailReason: 'reverted' as const, ...nonceUsed(prev, nonce) }));
         if (sum < BigInt(order.fromAmountRaw)) received = sum.toString();
       }
       return ifCurrent({ depositConfirmedAt: Date.now(), depositReceivedRaw: received });
@@ -200,7 +205,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
               if (again) { await settle(again); return; }
               const ev = await evmDepositEvidence(sourcePublic, order, head);
               if (stop) return;
-              if (ev === 'none') await ifCurrent({ depositFailed: true, depositFailReason: 'replaced' });
+              if (ev === 'none') await ifCurrent(prev => ({ depositFailed: true, depositFailReason: 'replaced' as const, ...nonceUsed(prev, nonce) }));
               // Sped up: the payment went out under a hash this page does not know.
               else {
                 const at = Date.now();
@@ -254,7 +259,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
           if (!stop) setBtcErrors(errors);
         }
       }
-      if (!stop) timer = setTimeout(tick, shared ? 15_000 : btcLookEveryMs(orderRef.current, Date.now()));
+      if (!stop) timer = setTimeout(tick, shared ? 15_000 : btcLookEveryMs(orderRef.current, Date.now(), { errors, failing: storageFailing() }));
     };
     tick();
     return () => { stop = true; if (timer) clearTimeout(timer); };
@@ -385,7 +390,9 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
   const phase = progress.phase;
   const moving = phase === 'confirming' || phase === 'detecting' || phase === 'executing';
   const style = badgeStyle(phase, stale, !!order.btc?.missing);
-  const windowOpen = payWindowOpen(order, kind, now);
+  // A status this page doesn't know: nothing is offered for payment until Rift says what it is.
+  const windowOpen = payWindowOpen(order, kind, now) && !order.rawStatus;
+  const coolingDown = order.preSendAt !== undefined && now - order.preSendAt < PRE_SEND_COOLDOWN_MS;
   const wrongAccount = !!account && account.toLowerCase() !== order.toAddress.toLowerCase();
 
   const links: Partial<Record<string, StepLink>> = {};
@@ -497,12 +504,16 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
             : order.btc?.missing
               // Seen, then gone (dropped or replaced): most likely nothing reached Rift, but only the wallet can say.
               ? <div className="text-sm text-amber-200">Rift closed this order. The Bitcoin payment seen earlier is no longer visible, so it was most likely dropped or replaced. If your wallet shows it as confirmed, please {supportLink} with the order ID below.</div>
+              : doubtButExpired(order, now)
+                // A payment this page couldn't settle: Rift saw nothing arrive, most likely nothing was sent.
+                ? <div className="text-sm text-amber-200">Rift closed this order without receiving a payment, so most likely nothing was taken. If your wallet shows a payment to its deposit address, please {supportLink} with the order ID below.</div>
               : btcUnchecked(order)
                 // Bitcoin is paid from any wallet: "nothing was taken" waits for a look at the address.
                 ? <div className="text-sm text-slate-300">Rift closed this order. Checking its Bitcoin address for a payment…</div>
                 : <div className="text-sm text-slate-300">No payment arrived before the deadline, so this order closed. Nothing was taken.</div>)}
           {/* Kept until the user says otherwise: Rift support needs the ID, or this page can't check the address. */}
-          {phase === 'expired' && (paidButExpired(order, now) || missingButExpired(order) || (btcUnchecked(order) && btcErrors >= 3)) && (
+          {((phase === 'expired' && (paidButExpired(order, now) || missingButExpired(order) || doubtButExpired(order, now) || (btcUnchecked(order) && btcErrors >= 3)))
+            || order.status === 'frozen' || order.status === 'underfunded') && (
             <button
               type="button"
               onClick={() => { if (window.confirm(`Remove this order from this browser? Keep its ID first if you may need Rift’s support: ${order.id}`)) onForget(order); }}
@@ -538,8 +549,10 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
             <div>
               {phase === 'confirming' && kind === 'evm'
                 ? <>Your payment hasn’t confirmed on {chain.name} yet. Check your wallet: a payment stuck on a low fee can be sped up there.</>
-                : phase === 'confirming' && kind === 'bitcoin'
+                : phase === 'confirming' && kind === 'bitcoin' && !btcConfirmed(order.btc)
                 ? <>Your Bitcoin payment hasn’t confirmed yet. If it was sent with a low fee, your wallet may let you speed it up (replace-by-fee); this page follows it either way.</>
+                : phase === 'confirming' && kind === 'bitcoin'
+                ? <>Your Bitcoin payment has confirmed, and Rift hasn’t picked it up yet. This page keeps checking; if it stays like this, please {supportLink} with the order ID below.</>
                 : <>Taking longer than usual. This happens when {chain.name} is congested or a bridge is slow. Your funds stay in Rift’s route; if it
                   cannot complete, Rift refunds you. There is nothing you need to do: this page keeps tracking.</>}
             </div>
@@ -625,8 +638,11 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                   )}
                   Send <span className="font-medium text-white">{fmt(order.fromAmount, 8)} {order.token.symbol}</span> on {chain.name} to start.
                 </div>
-                <Button onClick={() => onPay(order)} disabled={!settlementAck || paying} className="h-auto min-h-10 w-full whitespace-normal bg-gradient-to-r from-indigo-600 to-purple-600 py-2.5 hover:from-indigo-700 hover:to-purple-700">
-                  {paying ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Waiting for your wallet…</> : `Pay ${fmt(order.fromAmount, 8)} ${order.token.symbol}`}
+                {coolingDown && (
+                  <div className="text-xs text-slate-400">Wallets sometimes send a payment while reporting an error, and it can take a minute to show: Pay comes back shortly.</div>
+                )}
+                <Button onClick={() => onPay(order)} disabled={!settlementAck || paying || coolingDown} className="h-auto min-h-10 w-full whitespace-normal bg-gradient-to-r from-indigo-600 to-purple-600 py-2.5 hover:from-indigo-700 hover:to-purple-700">
+                  {paying ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Waiting for your wallet…</> : coolingDown ? 'Try again in a moment' : `Pay ${fmt(order.fromAmount, 8)} ${order.token.symbol}`}
                 </Button>
               </>
             )}
@@ -667,7 +683,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
             )}
           </div>
         ))}
-        {kind === 'bitcoin' && btcGot > 0n && btcGot !== btcNeeded && order.status === 'awaiting_deposit' && (
+        {kind === 'bitcoin' && btcGot > 0n && btcGot !== btcNeeded && order.status === 'awaiting_deposit' && !order.btc?.missing && (
           <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
             {btcGot < btcNeeded
               ? <>So far {satsToBtc(btcGot)} of {order.fromAmount} BTC has arrived. Don’t send more yet: if it stays short, Rift treats the order as underpaid.</>
@@ -681,7 +697,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
         )}
         {kind === 'bitcoin' && btcErrors >= 3 && (order.status === 'awaiting_deposit' || order.status === 'expired') && (
           <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
-            Can’t check the Bitcoin network right now. Don’t send again: Rift’s status here still updates when your payment arrives.
+            Can’t check the Bitcoin network right now. If you already sent the payment, don’t send it again: Rift’s status here still updates when it arrives.
           </div>
         )}
 

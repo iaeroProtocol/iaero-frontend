@@ -12,7 +12,7 @@ const OUTAGE = 'execution costs could not be priced, so no route was evaluated i
 
 /** client.ts against a stub Rift: route checks for `token` get the "could not be priced" answer; the control quote
  *  (USDC on Base) prices normally. */
-function load({ full = false, status } = {}) {
+function load({ full = false, status, throws = false } = {}) {
   const store = new Map();
   let refuse = false;
   const calls = [];
@@ -27,6 +27,7 @@ function load({ full = false, status } = {}) {
       const body = JSON.parse(init.body);
       calls.push(body.from);
       const control = body.from === 'base.0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+      if (throws) throw new TypeError('Failed to fetch');
       if (status) return { ok: false, status, text: async () => 'error code: 1015' };
       return { ok: control, status: control ? 200 : 422, text: async () => JSON.stringify(control ? {} : { error: OUTAGE }) };
     },
@@ -63,4 +64,13 @@ test('after a 429 the pause is known, so automatic refreshes wait it out', async
   await assert.rejects(c.fetchQuote({ from: 'base.0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', from_amount: '1' }));
   const left = c.riftPauseLeft();
   assert.ok(left > 50_000 && left <= 60_000, String(left));
+});
+
+test('a call that fails outright starts a short pause (a rate limit the browser may not be able to read)', async () => {
+  const c = load();
+  const failing = load({ throws: true });
+  assert.equal(c.riftPauseLeft(), 0);
+  await assert.rejects(failing.fetchQuote({ from: 'base.0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', from_amount: '1' }));
+  const left = failing.riftPauseLeft();
+  assert.ok(left > 0 && left <= 20_000, String(left));
 });

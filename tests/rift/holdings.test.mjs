@@ -192,3 +192,15 @@ test('unpriced tokens on Rift\u2019s list come before airdropped spam; absurd va
   const ranked = rankHoldings([{ chain: 'base', asset: 'base.x', symbol: 'X', name: 'X', decimals: 18, balanceRaw: '1', priceUsd: 1, valueUsd: Infinity }]);
   assert.equal(ranked.length, 0);
 });
+
+test('a Blockscout row whose fields can\u2019t be turned into text is skipped, never thrown on', () => {
+  // Round 5, Low: an object with a non-callable toString as address_hash or value threw and dropped the whole chain.
+  const hostile = { toString: null, valueOf: null };
+  const rows = [
+    { value: '5', token: { type: 'ERC-20', address_hash: hostile, decimals: '6', exchange_rate: '1' } },
+    { value: hostile, token: { type: 'ERC-20', address_hash: `0x${'66'.repeat(20)}`, decimals: '6', exchange_rate: '1' } },
+  ];
+  assert.deepEqual(parseTokenBalances('base', rows), []);
+  assert.deepEqual(blockscoutCandidates(rows).filter(c => c.address !== `0x${'66'.repeat(20)}`), []);
+  assert.equal(parseNative('base', { coin_balance: hostile, exchange_rate: '2000' }), null);
+});

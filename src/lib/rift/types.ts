@@ -103,6 +103,8 @@ export interface StoredOrder {
   /** The lowest pending nonce of an attempt that ended "failed before anything was sent": a transaction from the
    *  account since then may have been that payment after all, so the order is not paid again from here. */
   preSendNonce?: number;
+  /** When the latest attempt "failed before anything was sent": Pay waits a minute after it (order-state.ts canPay). */
+  preSendAt?: number;
   /** HyperCore: the one nonce (`time`) every transfer signed for this order uses, so at most one can ever execute. */
   hlNonce?: number;
   depositSentAt?: number;
@@ -135,6 +137,8 @@ export interface StoredOrder {
     emptyAt?: number;
     /** When the current run of empty answers began (order-state.ts BTC_EMPTY_SPAN_MS). */
     emptySince?: number;
+    /** When the latest sighting this record holds was made: an empty answer older than it counts for nothing. */
+    lastSeenAt?: number;
   };
 
   // --- Rift's status ---

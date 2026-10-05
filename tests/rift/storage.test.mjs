@@ -566,6 +566,9 @@ test('every HyperCore transfer signed for an order uses one nonce, fixed at its 
   await t.applyStatusUpdate(x.id, { status: 'funded', rawStatus: 'funded', amountOut: null });
   assert.equal(await t.beginHyperPost(x.id, second.payAttemptId, action), 'paid');
   assert.equal(h.read().hlPostedAt, undefined);
+  // A status this page doesn't know may mean Rift has the payment: not posted either.
+  const unknown = harness({ ...x, hlAction: action, payAttemptId: second.payAttemptId, hlNonce: second.hlNonce, rawStatus: 'rebalancing' });
+  assert.equal(await unknown.tab().beginHyperPost(x.id, second.payAttemptId, action), 'paid');
 });
 
 test('poll stamps hold while storage refuses writes', () => {

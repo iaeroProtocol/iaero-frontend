@@ -43,6 +43,7 @@ test('a name Rift gives iAERO is learned from one raw quote, then needs no looku
   const lookups = m.calls.filter(c => c.format === 'raw');
   assert.equal(lookups.length, 1);
   assert.equal(lookups[0].from_amount, '20000000', 'raw amounts are base units');
+  assert.equal(lookups[0].quote_mode, 'optimal', 'the same mode as the quote it resolves (route checks pass fast)');
   await m.checkQuote(formatted(), expect, { rawAmount: 20_000_000n, kind: 'user' });
   assert.equal(m.calls.filter(c => c.format === 'raw').length, 1, 'remembered');
   assert.deepEqual(Object.keys(m.names.learnedNames()), ['base.iaero'], 'only the unknown name is learned');

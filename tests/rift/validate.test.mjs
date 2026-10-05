@@ -136,3 +136,18 @@ test('contract wallets, and EIP-7702 delegated EOAs that are not', async () => {
   assert.equal(isContractCode('0x608060405234801561001057600080fd5b50'), true, 'real bytecode');
   assert.equal(isContractCode('0xef01005a7fc11397e9a8ad41bf10bf13f22b0a63f96f6d00'), true, 'not exactly a designator');
 });
+
+test('a route step\u2019s execution is only ever a mode name and a whole-number chain id', () => {
+  // Round 5, Low: an object as execution.chain crashed the section when the gas note was written.
+  const base = {
+    id: '01a10a8e-d95c-73f3-9ab7-71801cf89d01', from: 'arbitrum.0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9', to: 'base.0x81034fb34009115f215f5d5f564aac9ffa46a1dc',
+    from_amount: '20', estimated_amount_out: '31.4', expires_at: new Date(Date.now() + 60_000).toISOString(),
+  };
+  const step = execution => ({ venue: 'across', from: base.from, to: 'base.usdc', step_amount_in: '20', step_amount_out: '20', execution });
+  const expect = { destination: base.to, fromChain: 'arbitrum', fromAmount: '20' };
+  const q = ex => parseQuote({ ...base, route: [step(ex)] }, expect).route[0].execution;
+  assert.deepEqual({ ...q({ mode: 'evm_gas_desk', chain: 42161 }) }, { mode: 'evm_gas_desk', chain: 42161 });
+  assert.deepEqual({ ...q({ mode: 'evm_gas_desk', chain: { toString: null, valueOf: null } }) }, { mode: 'evm_gas_desk' });
+  assert.deepEqual({ ...q({ mode: 'evm_gas_desk', chain: 'constructor' }) }, { mode: 'evm_gas_desk' });
+  assert.equal(q({ mode: 7 }), undefined);
+});

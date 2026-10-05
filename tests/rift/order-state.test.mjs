@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PAY_WINDOW_MS, canMoveTo, canPay, capOrders, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowOpen, phaseInput,
-  BTC_MISSING_AFTER, BTC_GRACE_MS, btcCheckpoint, btcConfirmed, btcLookPatch, btcNeedsLook, btcPositive, btcUnchecked, btcUnpaid, canRetryUnknown, BTC_EMPTY_SPAN_MS, BTC_LOOK_FRESH_MS,
+  BTC_MISSING_AFTER, BTC_GRACE_MS, btcCheckpoint, btcConfirmed, btcLookPatch, btcNeedsLook, btcPositive, btcUnchecked, btcUnpaid, canRetryUnknown, BTC_EMPTY_SPAN_MS, BTC_LOOK_FRESH_MS, btcLookEveryMs, doubtButExpired,
+  PRE_SEND_COOLDOWN_MS,
   clearable, canHide, isOutOfDate, missingButExpired, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
 } from '../../src/lib/rift/order-state.ts';
 
@@ -317,7 +318,7 @@ test('Bitcoin evidence needs a run of empty answers over minutes; a stale or lag
   assert.equal(typeof rec.emptyAt, 'number', 'a run over two minutes is');
   // A payment recorded earlier that the address no longer lists, but mempool.space still knows: a lagging index.
   const paid = { txid: 'ab'.repeat(32), confirmations: 0, firstSeenAt: cp, emptyChecks: 2, emptySince: cp };
-  assert.deepEqual(lookNow(paid, 'known', cp + 60_000, cp).btc, { txid: 'ab'.repeat(32), confirmations: 0, firstSeenAt: cp });
+  assert.deepEqual(lookNow(paid, 'known', cp + 60_000, cp).btc, { txid: 'ab'.repeat(32), confirmations: 0, firstSeenAt: cp, lastSeenAt: cp + 60_000 });
   assert.deepEqual(lookNow({ txid: 'ab'.repeat(32) }, 'known', cp, cp), {}, 'nothing to undo');
   // An empty answer applied later than BTC_LOOK_FRESH_MS (a refused change, replayed) keeps only what it saw.
   const real = Date.now;
@@ -337,4 +338,49 @@ test('Bitcoin evidence needs a run of empty answers over minutes; a stale or lag
   assert.equal(btcUnpaid(unpaid), true);
   assert.ok(capOrders([unpaid, ...others], 1, T0 + 864e5).includes(unpaid));
   assert.equal(clearable(btc({ status: 'expired', btc: { txid: 'ab'.repeat(32), missing: true } }), T0 + 8 * 864e5), false);
+});
+
+test('an empty answer older than the latest sighting recorded counts for nothing; unchanged sightings write nothing', () => {
+  // Round 5, Low: a replayed empty answer, older than another tab's saved sighting, started a new run.
+  const seen = { payments: [{ txid: 'ab'.repeat(32), confirmations: 0 }], totalSats: 1_000_000n };
+  const empty = { payments: [], totalSats: 0n };
+  const cp = T0 + 10 * 3600_000;
+  const rec = lookNow(undefined, seen, T0 + 100_000, cp).btc;
+  assert.equal(rec.lastSeenAt, T0 + 100_000, 'a recorded sighting carries its time');
+  assert.deepEqual(lookNow(rec, seen, T0 + 120_000, cp), {}, 'the same sighting again: nothing to write');
+  assert.deepEqual(lookNow(rec, empty, T0 + 90_000, cp), {}, 'older than the sighting: ignored');
+  assert.equal(lookNow(rec, empty, T0 + 130_000, cp).btc.emptyChecks, 1, 'newer: counted');
+});
+
+test('looks back off when mempool.space fails, and don\u2019t race while storage can\u2019t finish a run', () => {
+  const btc = (over = {}) => order({ sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' }, ...over });
+  const o = btc();
+  const deciding = btcCheckpoint(o) + 1;
+  assert.equal(btcLookEveryMs(o, deciding), 20_000);
+  assert.equal(btcLookEveryMs(o, deciding, { errors: 3 }), 160_000);
+  assert.equal(btcLookEveryMs(o, deciding, { errors: 30 }), 10 * 60_000, 'capped');
+  assert.equal(btcLookEveryMs(o, deciding, { failing: true }), 10 * 60_000, 'the run can\u2019t complete while writes fail');
+  assert.equal(btcLookEveryMs(o, T0 + 60_000, { failing: true }), 20_000, 'while it can be paid, a payment must still be seen');
+});
+
+test('an EVM payment in doubt that Rift expired is neither "sent" nor "nothing taken", and stays until removed', () => {
+  // Round 5 (from the Bitcoin audit): after a39afb9 such an order read "Nothing was taken" and could be bulk-cleared.
+  const late = T0 + 8 * 864e5;
+  const o = order({ status: 'expired', payUnknown: true, depositTxHash: HASH, depositSentAt: T0 });
+  assert.equal(doubtButExpired(o, late), true);
+  assert.equal(paidButExpired(o, late), false);
+  assert.equal(clearable(o, late), false);
+  const others = Array.from({ length: 3 }, (_, i) => order({ id: String(i), status: 'delivered' }));
+  assert.ok(capOrders([o, ...others], 1, late).includes(o));
+});
+
+test('Pay waits a minute after "nothing was sent", and never while Rift reports a status this page doesn\u2019t know', () => {
+  // Round 5, Lows and wallet behaviour: a private relay shows a payment only once mined; an unknown status may mean paid.
+  const failed = order({ depositFailed: true, depositFailReason: 'pre_send', preSendAt: T0 + 1000, payAttemptAt: T0 });
+  assert.equal(canPay(failed, 'evm', T0 + 2000), false, 'just failed');
+  assert.equal(canPay(failed, 'evm', T0 + 1000 + PRE_SEND_COOLDOWN_MS + 1), true, 'a minute later');
+  assert.equal(canPay(order({ rawStatus: 'rebalancing' }), 'evm', T0 + 1000), false);
+  assert.equal(isAbandoned(order({ rawStatus: 'rebalancing' }), T0 + 3600_000), false, 'never "nothing was sent" then');
+  const action = { destination: '0x1', token: 'USDC:0x6d', amount: '10', time: 1, r: '0x1', s: '0x2', v: 27 };
+  assert.equal(canRetryUnknown(order({ sourceChain: 'hyperliquid', token: { symbol: 'USDC', decimals: 8, asset: 'hyperliquid.usdc' }, hlAction: action, payUnknown: true, rawStatus: 'x' }), T0 + 1000), false);
 });

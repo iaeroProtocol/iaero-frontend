@@ -301,7 +301,7 @@ export async function beginHyperPost(
     postedBefore = prev.hlPostedAt !== undefined;
     // Rift already has a payment for it ('paid'); or its pay window has closed (a signature can come back from a
     // forgotten wallet prompt): never posted then.
-    paid = holds && prev.status !== 'awaiting_deposit';
+    paid = holds && (prev.status !== 'awaiting_deposit' || !!prev.rawStatus);
     closed = holds && !paid && !payWindowOpen(prev, 'hypercore', Date.now());
     return holds && !closed && !paid ? { hlPostedAt: prev.hlPostedAt ?? Date.now() } : {};
   });

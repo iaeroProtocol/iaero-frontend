@@ -64,7 +64,7 @@ export function explainRiftError(e: unknown): string {
     case 'sanctions': return 'Rift declined this address after its sanctions screening.';
     case 'screening': return 'Rift’s address screening is briefly unavailable. Please try again in a minute.';
     case 'forbidden': return 'Rift refused this request (it may be blocking this network or browser). Nothing was sent; try again later or from another connection.';
-    case 'network': return 'Could not reach Rift. Check your connection and try again.';
+    case 'network': return 'Could not reach Rift (or it is limiting requests from this browser). Check your connection, wait a minute, and try again.';
     case 'bad_request': return `Rift rejected the request: ${e.message}`;
     default: return e.message;
   }

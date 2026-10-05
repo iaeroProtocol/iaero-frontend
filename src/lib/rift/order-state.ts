@@ -57,8 +57,14 @@ export function payWindowOpen(o: StoredOrder, kind: SourceKind, now: number): bo
 }
 
 /** Whether the app may ask the wallet to pay this order now. */
+/** After an attempt "failed before anything was sent" (a wallet's word, from its error), Pay waits this long: a payment
+ *  sent through a private relay shows only once mined, and the re-pay checks must be able to see it. */
+export const PRE_SEND_COOLDOWN_MS = 60_000;
+
 export function canPay(o: StoredOrder, kind: SourceKind, now: number): boolean {
-  if (kind === 'bitcoin' || !payWindowOpen(o, kind, now)) return false;
+  // Never while Rift reports a status this page doesn't know, nor just after a "nothing was sent" failure.
+  if (kind === 'bitcoin' || o.rawStatus || !payWindowOpen(o, kind, now)) return false;
+  if (o.preSendAt !== undefined && now - o.preSendAt < PRE_SEND_COOLDOWN_MS) return false;
   const s = payState(o, now);
   return s === 'none' || s === 'failed';
 }
@@ -67,14 +73,15 @@ export function canPay(o: StoredOrder, kind: SourceKind, now: number): boolean {
  *  signed transfer (Hyperliquid accepts one at most once, so it can't pay twice), or, when no transfer was ever saved
  *  (the page died at the prompt), by signing one: nothing can have been posted without it. */
 export const canRetryUnknown = (o: StoredOrder, now: number) =>
-  KIND_OF[o.sourceChain] === 'hypercore' && (!!o.hlAction || !o.hlPostedAt) && payWindowOpen(o, 'hypercore', now)
+  KIND_OF[o.sourceChain] === 'hypercore' && (!!o.hlAction || !o.hlPostedAt) && !o.rawStatus && payWindowOpen(o, 'hypercore', now)
   && payState(o, now) === 'unknown';
 
 /** An unpaid order past its pay window: nothing was sent, and it can only expire. Safe to remove. */
 export function isAbandoned(o: StoredOrder, now: number): boolean {
   const kind = KIND_OF[o.sourceChain];
-  // A Bitcoin payment was seen (an older version could keep only `missing` of it): never "nothing was sent".
-  if (o.status !== 'awaiting_deposit' || payWindowOpen(o, kind, now) || o.btc?.txid || o.btc?.missing) return false;
+  // A Bitcoin payment was seen (an older version could keep only `missing` of it), or Rift reports a status this page
+  // doesn't know: never "nothing was sent".
+  if (o.status !== 'awaiting_deposit' || o.rawStatus || payWindowOpen(o, kind, now) || o.btc?.txid || o.btc?.missing) return false;
   // Bitcoin is paid from any wallet, out of this page's sight: only a look at the address made well after the
   // window closed shows that nothing was sent.
   if (kind === 'bitcoin') return !btcUnchecked(o);
@@ -170,7 +177,7 @@ export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcL
   if (seen === 'known') {
     // The payment recorded is still there: a run of empty answers (or "missing") ends.
     if (!prev?.emptyChecks && !prev?.missing) return {};
-    const btc = { ...prev };
+    const btc = { ...prev, lastSeenAt: look.at };
     delete btc.emptyChecks; delete btc.emptySince; delete btc.missing;
     return { btc };
   }
@@ -183,18 +190,25 @@ export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcL
     const proven = emptyChecks >= BTC_MISSING_AFTER && look.at - emptySince >= BTC_EMPTY_SPAN_MS;
     return { btc: { ...prev, emptyChecks, emptySince, ...(proven ? { emptyAt: look.at } : {}) } };
   }
-  // An empty answer older than the run it would extend counts for nothing.
-  if (!seen.payments.length && prev?.emptySince !== undefined && look.at < prev.emptySince) return {};
+  // An empty answer older than the run it would extend, or than the latest sighting recorded, counts for nothing.
+  if (!seen.payments.length && ((prev?.emptySince !== undefined && look.at < prev.emptySince) || look.at < (prev?.lastSeenAt ?? 0))) return {};
   const btc = nextBtcRecord(prev, seen, look.at);
   if (btc === prev || (positiveOnly && !btcPositive(prev, btc))) return {};
-  return { btc };
+  if (!seen.payments.length) return { btc };
+  // A sighting is recorded only when it changes something, and then with its time (lastSeenAt).
+  const before = prev ? { ...prev } : undefined;
+  if (before) delete before.lastSeenAt;
+  return JSON.stringify(btc) === JSON.stringify(before) ? {} : { btc: { ...btc, lastSeenAt: look.at } };
 }
 
 /** How often an order card looks at a Bitcoin address: every 20 s while the order can still be paid, and while a run of
- *  looks past its checkpoint is deciding "nothing was sent" (about two minutes); otherwise every 10 minutes. */
-export const btcLookEveryMs = (o: StoredOrder, now: number) =>
-  (o.status === 'awaiting_deposit' && now < o.createdAt + BTC_PAY_WINDOW_MS + BTC_GRACE_MS) || (btcUnchecked(o) && now >= btcCheckpoint(o))
-    ? 20_000 : 10 * 60_000;
+ *  looks past its checkpoint is deciding "nothing was sent" (about two minutes; not while storage refuses writes, when
+ *  that run can't complete); otherwise every 10 minutes. Failed looks back off, doubling up to 10 minutes. */
+export function btcLookEveryMs(o: StoredOrder, now: number, { errors = 0, failing = false } = {}): number {
+  const deciding = btcUnchecked(o) && now >= btcCheckpoint(o) && !failing;
+  const base = (o.status === 'awaiting_deposit' && now < o.createdAt + BTC_PAY_WINDOW_MS + BTC_GRACE_MS) || deciding ? 20_000 : 10 * 60_000;
+  return Math.min(base * 2 ** Math.min(errors, 10), 10 * 60_000);
+}
 
 /** A Bitcoin order's address is still watched this long after its pay window closes before a look finding
  *  nothing counts: a payment sent at the last minute takes a while to show. */
@@ -224,6 +238,12 @@ export function btcNeedsLook(o: StoredOrder): boolean {
  *  clear it, but it is never dropped automatically: only their wallet can say the payment didn't go through. */
 export const missingButExpired = (o: StoredOrder) => o.status === 'expired' && !!o.btc?.missing;
 
+/** Rift expired an EVM or HyperCore order whose payment this browser could never settle (in doubt): Rift saw nothing
+ *  arrive, which most likely means nothing was taken, but only the wallet can say. Kept out of "Clear finished" and
+ *  the cap; the user may remove it. */
+export const doubtButExpired = (o: StoredOrder, now: number) =>
+  o.status === 'expired' && KIND_OF[o.sourceChain] !== 'bitcoin' && payState(o, now) === 'unknown';
+
 /** Rift closed the order as expired although this browser saw a payment go to it: it needs Rift's support (and its
  *  order ID), so it is never cleared like an order that simply ran out. */
 export const paidButExpired = (o: StoredOrder, now: number) =>
@@ -234,7 +254,7 @@ export const paidButExpired = (o: StoredOrder, now: number) =>
  *  the removal is applied (storage.ts removeOrders): another tab may have recorded a payment since. */
 export const clearable = (o: StoredOrder, now: number) =>
   (isFinalStatus(o.status) && !needsAttention(o.status) && !paidButExpired(o, now) && !missingButExpired(o)
-    && !(o.status === 'expired' && btcUnchecked(o)))
+    && !doubtButExpired(o, now) && !(o.status === 'expired' && btcUnchecked(o)))
   || isAbandoned(o, now);
 
 /** A Bitcoin order no payment was ever seen for, still open or expired: removed only at the user's request, after a
@@ -304,7 +324,7 @@ function tokenMatchesSource(chain: SourceChainKey, token: StoredOrder['token']):
 
 /** Optional fields that must have their type when present; a wrong one is dropped, not the order. */
 const OPTIONAL_NUMBERS = [
-  'payRequestedAt', 'payAttemptAt', 'payNonce', 'depositNonce', 'preSendNonce', 'hlNonce', 'depositSentAt', 'depositConfirmedAt', 'lastPolledAt',
+  'payRequestedAt', 'payAttemptAt', 'payNonce', 'depositNonce', 'preSendNonce', 'preSendAt', 'hlNonce', 'depositSentAt', 'depositConfirmedAt', 'lastPolledAt',
   'deliveredAtChain', 'marketUsdIn', 'marketIaeroUsd', 'gasDeskUsd', 'hlPostedAt', 'hiddenAt',
 ] as const;
 const OPTIONAL_UINTS = ['depositReceivedRaw', 'baseFromBlock', 'deliveryScannedTo'] as const;
@@ -352,6 +372,7 @@ export function sanitizeOrder(x: unknown): StoredOrder | null {
       if (btc.seenLate === true) b.seenLate = true;
       if (btc.confirmed === true) b.confirmed = true;
       if (isNum(btc.emptyAt)) b.emptyAt = btc.emptyAt;
+      if (isNum(btc.lastSeenAt)) b.lastSeenAt = btc.lastSeenAt;
       // A confirmed payment is never missing (btcConfirmed): an older version could mark it so.
       if (!btcConfirmed(b)) {
         if (btc.missing === true) b.missing = true;

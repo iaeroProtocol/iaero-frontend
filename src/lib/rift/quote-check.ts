@@ -27,7 +27,7 @@ export class NameLookupPending extends Error {}
  */
 export async function checkQuote(
   json: unknown, expect: Omit<QuoteExpectation, 'source'> & { fromAsset: string },
-  resolve: { rawAmount: bigint; kind: RiftCallKind },
+  resolve: { rawAmount: bigint; kind: RiftCallKind; mode?: 'fast' | 'optimal' },
 ): Promise<RiftQuote> {
   const check = (names: Readonly<Record<string, string>>) => parseQuote(json, { ...expect, source: { fromAsset: expect.fromAsset, names } });
   const asked = { from: expect.fromAsset, to: expect.destination };
@@ -46,7 +46,7 @@ export async function checkQuote(
       throw new NameLookupPending(e instanceof Error ? e.message : String(e));
     }
     const raw = await fetchQuote(
-      { from: expect.fromAsset, from_amount: resolve.rawAmount.toString(), quote_mode: 'fast', format: 'raw' }, undefined, resolve.kind,
+      { from: expect.fromAsset, from_amount: resolve.rawAmount.toString(), quote_mode: resolve.mode ?? 'optimal', format: 'raw' }, undefined, resolve.kind,
     );
     if (!raw || typeof raw !== 'object' || (raw as { from_amount?: unknown }).from_amount !== resolve.rawAmount.toString()) throw e;
     const pairs = namesToLearn(json, raw, asked);

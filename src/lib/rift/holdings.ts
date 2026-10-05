@@ -91,6 +91,8 @@ interface BlockscoutTokenBalance {
 
 /** A Blockscout field as text, or '' when it is anything else (a damaged row must not throw). */
 const text = (v: unknown) => (typeof v === 'string' ? v : '');
+/** A Blockscout amount in base units as text ('0' when it is anything else). */
+const amountText = (v: unknown) => (typeof v === 'string' ? v : typeof v === 'number' && Number.isSafeInteger(v) ? String(v) : '0');
 /** A Blockscout number given as text or a number, or NaN. */
 const numeric = (v: unknown) => (typeof v === 'string' || typeof v === 'number' ? Number(v) : NaN);
 /** A USD price worth using: finite, positive and below what any token is worth (a broken or hostile source can say
@@ -102,7 +104,7 @@ export const usdValue = (price: number, raw: string, decimals: number) => { cons
 /** A Blockscout token row's contract address, lowercase ('' when it has none). */
 export function tokenRowAddress(row: unknown): string {
   const t = (row as BlockscoutTokenBalance | null)?.token;
-  return String(t?.address_hash ?? t?.address ?? '').toLowerCase();
+  return (text(t?.address_hash) || text(t?.address)).toLowerCase();
 }
 
 /** A token list cut short by a failed page, completed from an older one: every fresh row, then the older
@@ -128,7 +130,7 @@ export function parseTokenBalances(chain: HoldingChain, json: unknown, exclude: 
     if (t.reputation && t.reputation !== 'ok') continue; // flagged as scam
     const decimals = parseDecimals(t.decimals);
     if (decimals === null) continue;
-    const balanceRaw = String(row.value ?? '0');
+    const balanceRaw = amountText(row.value);
     if (!/^\d+$/.test(balanceRaw) || balanceRaw === '0') continue;
     const asset = `${chain}.${address}`;
     if (exclude.includes(asset) || seen.has(address)) continue;
@@ -147,7 +149,7 @@ export function parseTokenBalances(chain: HoldingChain, json: unknown, exclude: 
 /** Native ETH from Blockscout's /addresses/{address}. */
 export function parseNative(chain: HoldingChain, json: unknown): Holding | null {
   const j = json as { coin_balance?: string | null; exchange_rate?: string | null } | null;
-  const balanceRaw = String(j?.coin_balance ?? '0');
+  const balanceRaw = amountText(j?.coin_balance);
   if (!/^\d+$/.test(balanceRaw) || balanceRaw === '0') return null;
   const priceUsd = usdPrice(j?.exchange_rate);
   return {
@@ -245,7 +247,7 @@ export function blockscoutCandidates(
     };
     if (c.priceUsd > 0) { priced.push(c); seen.add(address); }
     else {
-      const raw = String(row.value ?? '0');
+      const raw = amountText(row.value);
       if (/^\d+$/.test(raw) && raw !== '0') { unpriced.push({ c, held: rawToNumber(raw, decimals) }); seen.add(address); }
     }
   }

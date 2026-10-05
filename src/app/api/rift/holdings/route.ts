@@ -270,9 +270,15 @@ async function chainHoldings(chain: EvmHoldingChain, chainId: 1 | 42161 | 8453, 
   const list = await tokenList(chain, blockscout, owner, fresh, until);
   if (list && !settled(list)) report.warnings.push(`${chain}: token list incomplete; some tokens may be missing`);
   if (list?.truncated) report.notes.push(`${chain}: token list scan stopped at ${list.items.length} tokens`);
-  const listed = list ? blockscoutCandidates(list.items, [RIFT_DESTINATION], () => {
-    report.notes.push(`${chain}: only the first ${MAX_UNPRICED_CANDIDATES} unpriced tokens checked on-chain`);
-  }, address => RIFT_LISTED.has(`${chain}.${address}`) || MAJOR.has(`${chain}.${address}`)) : [];
+  let listed: TokenCandidate[] = [];
+  try {
+    listed = list ? blockscoutCandidates(list.items, [RIFT_DESTINATION], () => {
+      report.notes.push(`${chain}: only the first ${MAX_UNPRICED_CANDIDATES} unpriced tokens checked on-chain`);
+    }, address => RIFT_LISTED.has(`${chain}.${address}`) || MAJOR.has(`${chain}.${address}`)) : [];
+  } catch {
+    // A list this route can't read: our own tokens and ETH are still read on-chain.
+    report.warnings.push(`${chain}: token list unreadable, major tokens only`);
+  }
   const listedPrice = new Map(listed.map(c => [c.address, c]));
   // Major tokens keep Blockscout's price and icon when it lists them.
   const allCandidates = [

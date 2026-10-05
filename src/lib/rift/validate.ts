@@ -90,7 +90,11 @@ function parseRoute(v: unknown): RiftRouteStep[] {
   if (!Array.isArray(v) || v.length === 0) throw new Error('Rift quote has no route');
   return v.map((s, i) => {
     const o = obj(s, `route step ${i + 1}`);
-    const execution = o.execution && typeof o.execution === 'object' ? (o.execution as RiftRouteStep['execution']) : undefined;
+    // Only what it should be: a mode name and a chain id (a whole number), never an arbitrary object from Rift.
+    const ex = o.execution && typeof o.execution === 'object' ? (o.execution as { mode?: unknown; chain?: unknown }) : undefined;
+    const execution = ex && typeof ex.mode === 'string'
+      ? { mode: ex.mode, ...(typeof ex.chain === 'number' && Number.isSafeInteger(ex.chain) && ex.chain > 0 ? { chain: ex.chain } : {}) }
+      : undefined;
     return {
       venue: str(o, 'venue', 'route step'), execution,
       from: str(o, 'from', 'route step'), to: str(o, 'to', 'route step'),

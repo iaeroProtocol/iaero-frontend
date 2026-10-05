@@ -17,7 +17,7 @@
 import { useEffect, useRef } from 'react';
 import { getOrder, riftBudget } from './client';
 import { parseOrderUpdate } from './validate';
-import { applyStatusUpdate, markPolled, patchOrder, polledWithin, pollStamps, storageFailing } from './storage';
+import { applyStatusUpdate, loadOrders, markPolled, patchOrder, polledWithin, pollStamps, storageFailing } from './storage';
 import { lookAtBtcAddress } from './bitcoin';
 import {
   btcCheckpoint, btcLookPatch, btcNeedsLook, btcUnchecked, isFinalStatus, isOutOfDate, isTerminalStatus, paidButExpired,
@@ -132,7 +132,8 @@ export function useOrderWatcher(
           if (polledWithin(key, BTC_LOOK_MS)) continue;
           markPolled(key);
           try {
-            const seen = await lookAtBtcAddress(o.depositAddress, o.btc?.txid);
+            const latest = loadOrders().find(x => x.id === o.id) ?? o; // the payment recorded as of now
+            const seen = await lookAtBtcAddress(o.depositAddress, latest.btc?.txid);
             if (stop) break;
             const look = { at: Date.now(), failing: storageFailing(), checkpoint: btcCheckpoint(o) };
             await patchOrder(o.id, prev => btcLookPatch(prev.btc, seen, look));

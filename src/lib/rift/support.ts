@@ -141,7 +141,7 @@ export function useRiftSupport(holdings: Holding[], enabled = true): Record<stri
           let rawAmount = 0n;
           try { rawAmount = decimalToRaw(amount, h.decimals); } catch { /* not resolvable */ }
           try {
-            await checkQuote(json, { destination: RIFT_DESTINATION, fromChain: h.chain, fromAmount: amount, fromAsset: h.asset }, { rawAmount, kind: 'probe' });
+            await checkQuote(json, { destination: RIFT_DESTINATION, fromChain: h.chain, fromAmount: amount, fromAsset: h.asset }, { rawAmount, kind: 'probe', mode: 'fast' });
           } catch (e) {
             if (e instanceof RiftApiError) throw e;
             settle(asset, 'unsupported');
