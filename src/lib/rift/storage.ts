@@ -15,7 +15,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { canMoveTo, canPay, canRepostUnknown, capOrders, payWindowOpen, sanitizeOrder, sourceKindOf } from './order-state';
+import { canMoveTo, canPay, canRetryUnknown, capOrders, payWindowOpen, sanitizeOrder, sourceKindOf } from './order-state';
 import { ORDERS_KEY } from './keys';
 import type { OrderUpdate } from './validate';
 import type { StoredOrder } from './types';
@@ -143,7 +143,15 @@ export type WriteResult = 'saved' | 'unchanged' | 'failed';
 function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: boolean } = {}): Promise<WriteResult> {
   const run = (): WriteResult => {
     const stored = current();
-    const base = stored ?? memory ?? [];
+    if (!stored) {
+      // Storage can't be read: nothing is written over what it holds, unseen. The change waits for it.
+      if (keepOnFailure) unsaved.push(change);
+      writeFailed = true;
+      retryLater();
+      window.dispatchEvent(new Event(EVENT));
+      return 'failed';
+    }
+    const base = stored;
     const next = change(base);
     if (!next) {
       memory = base;
@@ -231,8 +239,8 @@ export async function claimPayment(
       if (i < 0) return null;
       const prev = list[i];
       const now = Date.now();
-      // `repost`: a HyperCore transfer whose outcome is unknown, posted again (order-state.ts canRepostUnknown).
-      const may = canPay(prev, sourceKindOf(prev.sourceChain), now) || (repost && canRepostUnknown(prev, now));
+      // `repost`: a HyperCore payment whose outcome is unknown, tried again (order-state.ts canRetryUnknown).
+      const may = canPay(prev, sourceKindOf(prev.sourceChain), now) || (repost && canRetryUnknown(prev, now));
       if (prev.toAddress.toLowerCase() !== owner.toLowerCase() || !may) return null;
       if (expect && !expect(prev)) return null;
       const attempt: StoredOrder = {
@@ -280,15 +288,18 @@ export async function patchPaymentAttempt(id: string, attemptId: string, patch: 
  *  current one with exactly this saved transfer. Records that it is being posted, and says whether it was posted
  *  before: a refusal of a transfer posted before does not show that nothing moved (the first post may have gone
  *  through). */
-export async function beginHyperPost(id: string, attemptId: string, action: { time: number; r: string }): Promise<{ postedBefore: boolean } | null> {
-  let holds = false, postedBefore = false;
+export async function beginHyperPost(
+  id: string, attemptId: string, action: { time: number; r: string },
+): Promise<{ postedBefore: boolean } | 'closed' | null> {
+  let holds = false, postedBefore = false, closed = false;
   const r = await patchOrder(id, prev => {
-    // Never once the order's pay window has closed (a signature can come back from a forgotten wallet prompt).
-    holds = prev.payAttemptId === attemptId && prev.hlAction?.time === action.time && prev.hlAction.r === action.r
-      && payWindowOpen(prev, 'hypercore', Date.now());
+    holds = prev.payAttemptId === attemptId && prev.hlAction?.time === action.time && prev.hlAction.r === action.r;
     postedBefore = prev.hlPostedAt !== undefined;
-    return holds ? { hlPostedAt: prev.hlPostedAt ?? Date.now() } : {};
+    // Never once the order's pay window has closed (a signature can come back from a forgotten wallet prompt).
+    closed = holds && !payWindowOpen(prev, 'hypercore', Date.now());
+    return holds && !closed ? { hlPostedAt: prev.hlPostedAt ?? Date.now() } : {};
   });
+  if (closed) return 'closed';
   return holds && r !== 'failed' ? { postedBefore } : null;
 }
 

@@ -94,6 +94,25 @@ interface MempoolTx {
 export interface BtcPayment { txid: string; sats: bigint; confirmations: number }
 export interface BtcDeposits { payments: BtcPayment[]; totalSats: bigint }
 
+/** A look at an order's Bitcoin address, as the order card and the background watcher take it (order-state.ts
+ *  btcLookPatch): its payments; or 'known' when it lists none although a payment was recorded, if mempool.space
+ *  still knows that transaction (its address index can lag behind its own transactions). Throws when it can't be
+ *  read, or can't say. */
+export async function lookAtBtcAddress(address: string, recordedTxid?: string): Promise<BtcDeposits | 'known'> {
+  const d = await findBtcDeposits(address);
+  if (d.payments.length || !recordedTxid) return d;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MEMPOOL_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${MEMPOOL}/tx/${encodeURIComponent(recordedTxid)}/status`, { signal: controller.signal });
+    if (res.status === 404) return d; // gone: dropped, or replaced by a transaction paying elsewhere
+    if (!res.ok) throw new Error(`mempool.space ${res.status}`);
+    return 'known';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Every transaction paying `address` (oldest first) with its confirmations, and their total. A bech32 address may
  *  be written in capitals (BIP-173); mempool.space writes it in lower case. */
 export async function findBtcDeposits(given: string, signal?: AbortSignal): Promise<BtcDeposits> {

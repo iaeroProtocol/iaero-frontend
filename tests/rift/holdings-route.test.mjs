@@ -43,15 +43,16 @@ function load(chain, rows = []) {
 
 /** A chain where token i holds 1000+i and has decimals 8+(i%10). `hostile` tokens break any batch they are in;
  *  `failFirst`: the first multicall rejects (out of time); `tokensFail`: every multicall fails; `down`: nothing answers. */
-function chain({ hostile = new Set(), failFirst = false, tokensFail = false, down = false } = {}) {
+function chain({ hostile = new Set(), failFirst = false, tokensFail = false, down = false, oursFail = false } = {}) {
   const log = [];
   return {
     log,
-    getBalance: async () => { if (down) throw new Error('down'); return 777n; },
+    getBalance: async () => { if (down || oursFail) throw new Error('down'); return 777n; },
     multicall: async ({ contracts }) => {
       log.push(contracts.length);
       if (failFirst && log.length === 1) throw new Error('out of time');
-      const breaks = tokensFail || down || contracts.some(c => hostile.has(c.address));
+      const ours = contracts.some(c => c.functionName === 'getEthBalance');
+      const breaks = tokensFail || down || (oursFail && ours) || contracts.some(c => hostile.has(c.address));
       return contracts.map(c => {
         if (breaks) return { status: 'failure', error: new Error('response too large') };
         if (c.functionName === 'getEthBalance') return { status: 'success', result: 777n };
@@ -141,4 +142,38 @@ test('a damaged Blockscout row never drops the chain', async () => {
   const out = await load(chain(), rows).chainHoldings('base', 8453, 'https://blockscout.invalid', owner, true, report, soon());
   assert.ok(out.some(h => h.symbol === 'ETH'));
   assert.ok(!report.warnings.some(w => /unavailable/.test(w)), report.warnings.join(' | '));
+});
+
+test('ETH whose batch failed while the tokens\u2019 answered comes from Blockscout, flagged', async () => {
+  // Round 3, Low: ETH dropped out of the picker when only the trusted batch (and the probe) failed.
+  const exports = {};
+  vm.runInNewContext(cjs, {
+    exports, Date, Promise, setTimeout, clearTimeout, Map, Set, Number, BigInt, Math, JSON, Error, Array, Object, Request, Response, URL, AbortController,
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ coin_balance: '555', exchange_rate: '2000' }) }),
+    require: n => ({
+      'next/server': { NextResponse: class {} },
+      viem: { createPublicClient: () => chain({ oursFail: true }), erc20Abi: 'ERC20', fallback: () => ({}), http: () => ({}) },
+      'viem/chains': { arbitrum: {}, base: {}, mainnet: {} },
+      '@/lib/rift/config': {
+        CURATED_TOKENS: MAJORS.map((a, i) => ({ chain: 'base', asset: `base.${a}`, address: a, symbol: `M${i}`, name: `M${i}`, decimals: 18 })),
+        RIFT_DESTINATION: 'base.0x81034fb34009115f215f5d5f564aac9ffa46a1dc',
+      },
+      '@/lib/rift/rift-tokens': { RIFT_LISTED: new Set() },
+      '@/lib/rift/server': { EVM_ADDRESS_RE: /^0x[0-9a-fA-F]{40}$/, badRequest: () => null },
+      '@/lib/rift/cost': { parseLlamaPrices: () => ({}) },
+      '@/lib/rift/holdings': holdings,
+      '@/lib/rift/hypercore': { HL_API: '', HYPERCORE_TOKENS: [], hyperCoreHoldings: () => [], parseSpotBalances: () => [], usdcForFee: () => 0 },
+      // An unlisted token, so the untrusted batch has something to answer.
+      '@/lib/rift/blockscout-pages': { collectTokenPages: async () => ({
+        items: [{ value: '5', token: { type: 'ERC-20', address_hash: addr(60), symbol: 'U', name: 'U', decimals: '8', exchange_rate: '1' } }],
+        complete: true, truncated: false,
+      }) },
+      '@/lib/rift/rate-limit': { RateLimiter: class { over() { return false; } }, rateKey: x => x, touch() {} },
+      '@/lib/public-rpcs': { rpcUrls: () => ['http://rpc'] },
+    })[n] ?? (() => { throw new Error(`unexpected import ${n}`); })(),
+  });
+  const report = { warnings: [], notes: [] };
+  const out = await exports.__chainHoldings('base', 8453, 'https://blockscout.invalid', owner, true, report, soon());
+  assert.equal([...out].find(h => h.symbol === 'ETH')?.balanceRaw, '555');
+  assert.ok(report.warnings.some(w => /ETH balance could not be checked on-chain/.test(w)), report.warnings.join(' | '));
 });

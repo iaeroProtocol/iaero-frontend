@@ -24,7 +24,7 @@ import {
 } from 'wagmi';
 import { arbitrum, base, mainnet } from 'wagmi/chains';
 import { useConnectModal } from '@rainbow-me/rainbowkit';
-import { erc20Abi, formatUnits, isAddress, parseSignature, type Address, type PublicClient } from 'viem';
+import { erc20Abi, formatUnits, isAddress, parseSignature, recoverTypedDataAddress, type Address, type PublicClient } from 'viem';
 import { AlertTriangle, ArrowLeftRight, Bell, Bitcoin, Info, Loader2, RefreshCw, Route as RouteIcon, ShieldCheck, Timer } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -39,7 +39,7 @@ import { CURATED_TOKENS, KNOWN_SYMBOLS, RIFT_DESTINATION, RIFT_SECURITY_URL, SOU
 import { classifyRiftError, createOrder, explainRiftError, fetchQuote, riftPauseLeft, riftPricing, RiftApiError } from '@/lib/rift/client';
 import { decimalToRaw, isContractCode, normalizeDecimal, parseOrder } from '@/lib/rift/validate';
 import { estimateRoute, formatRange } from '@/lib/rift/timing';
-import { isBtcAddress, normalizeBtcAddress } from '@/lib/rift/bitcoin';
+import { isBtcAddress, lookAtBtcAddress, normalizeBtcAddress } from '@/lib/rift/bitcoin';
 import { rawToNumber, type Holding } from '@/lib/rift/holdings';
 import { useRiftSupport } from '@/lib/rift/support';
 import { checkQuote, riftNames } from '@/lib/rift/quote-check';
@@ -54,13 +54,13 @@ import {
   gasDeskUsd, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
 import {
-  PAY_HEARTBEAT_MS, canPay, canRepostUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, payWindowOpen, sourceKindOf,
+  btcCheckpoint, btcLookPatch, btcUnpaid, canPay, canRetryUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, PAY_HEARTBEAT_MS, payWindowOpen, sourceKindOf,
 } from '@/lib/rift/order-state';
 import {
   beginHyperPost, claimPayment, loadOrders, orderStorageProblem, patchOrder, patchPaymentAttempt, removeOrders,
   storageFailing, unreadableOrderIds, upsertOrder, useStoredOrders,
 } from '@/lib/rift/storage';
-import { accountNonce, hyperDepositEvidence, postHyperTransfer, transferDeliversInFull } from '@/lib/rift/payment-io';
+import { accountNonce, evmDepositEvidence, hyperDepositEvidence, postHyperTransfer, transferDeliversInFull } from '@/lib/rift/payment-io';
 import { enableNotifications } from '@/lib/rift/watch';
 import type { RiftQuote, SourceToken, StoredOrder } from '@/lib/rift/types';
 
@@ -107,7 +107,7 @@ const fmt = (v: string | number | undefined, digits = 4) => {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: digits }) : '—';
 };
-const fmtUsd = (n: number) => n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: n >= 1000 ? 0 : 2 });
+const fmtUsd = (n: number) => (Number.isFinite(n) ? n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: n >= 1000 ? 0 : 2 }) : '—');
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const errText = (e: unknown) => {
   const x = e as { shortMessage?: string; message?: string };
@@ -130,7 +130,8 @@ const isNetworkError = (e: unknown) => errorNames(e).some(n => n === 'HttpReques
  *  "nonce too low" (viem also uses it for "already known", the same transaction already broadcast) and wallet
  *  disconnects (4900, 4901), which can come after the wallet sent it; those are treated as unknown. */
 const PRE_SEND = new Set([
-  'ChainMismatchError', 'ChainNotConfiguredError', 'ConnectorNotConnectedError', 'ConnectorAccountNotFoundError', 'InsufficientFundsError',
+  'ChainMismatchError', 'ChainNotConfiguredError', 'ConnectorChainMismatchError', 'ConnectorNotConnectedError', 'ConnectorAccountNotFoundError',
+  'InsufficientFundsError',
   'EstimateGasExecutionError', 'ExecutionRevertedError', 'IntrinsicGasTooLowError', 'IntrinsicGasTooHighError', 'FeeCapTooLowError',
   'FeeCapTooHighError', 'NonceTooHighError', 'NonceMaxValueError', 'SwitchChainError', 'UnsupportedProviderMethodError',
   'UnauthorizedProviderError',
@@ -372,7 +373,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   const quoteKey = `${token?.asset}|${quoteAmount}`;
   const quoteQuery = useQuery({
     queryKey: ['rift-quote', token?.asset, quoteAmount],
-    enabled: active && !!token && !!quoteAmount && !busy && spent !== quoteKey,
+    // Only once the amount has settled for the token shown: a token switch must not ask for the new token at an old amount.
+    enabled: active && !!token && !!quoteAmount && amountState.normalized === quoteAmount && !busy && spent !== quoteKey,
+    refetchOnWindowFocus: () => riftPauseLeft() === 0,
     queryFn: async ({ signal }) =>
       checkQuote(await fetchQuote({ from: token!.asset, from_amount: quoteAmount! }, signal), {
         destination: RIFT_DESTINATION, fromChain: chainKey, fromAmount: quoteAmount!, fromAsset: token!.asset,
@@ -500,7 +503,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       return null;
     }
     const now = Date.now();
-    if (!canPay(latest, sourceKindOf(latest.sourceChain), now) && !(repost && canRepostUnknown(latest, now))) {
+    if (!canPay(latest, sourceKindOf(latest.sourceChain), now) && !(repost && canRetryUnknown(latest, now))) {
       setError('This order can’t be paid now: it is already paid, its payment is being checked, or its price is out of date.');
       return null;
     }
@@ -592,6 +595,14 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
           ? `A transfer of ${fmt(o.fromAmount, 8)} ${o.token.symbol} would fail right now (your balance may have changed, or the token is blocking the transfer). Nothing was sent.`
           : `Could not check that ${o.token.symbol} arrives in full (${c.name} didn’t answer). Nothing was sent; try again in a moment.`);
     }
+    // A last attempt that ended "before anything was sent" is checked at the deposit address before paying again.
+    if (o.depositFailReason === 'pre_send') {
+      let ev: Awaited<ReturnType<typeof evmDepositEvidence>>;
+      try { ev = await evmDepositEvidence(client, o); } catch {
+        throw new Error(`Could not check ${c.name} for an earlier payment. Nothing was sent; try again in a moment.`);
+      }
+      if (ev !== 'none') throw new Error('Something may already have reached this order’s deposit address. Nothing was sent; use “Check payment” on the order card.');
+    }
     if (await priceCheck(o, quoteAt) !== 'ok') return;
     let payNonce: number;
     try { payNonce = await accountNonce(client, o.toAddress, 'pending'); } catch {
@@ -628,6 +639,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       // the account's pending nonce has not moved since the prompt.
       let maybeSent = false;
       if (!isUserRejection(e) && isPreSend(e)) {
+        // A moment for a broadcast elsewhere to reach the node.
+        await new Promise(res => setTimeout(res, 3000));
         try { maybeSent = await accountNonce(client, o.toAddress, 'pending') > payNonce; } catch { maybeSent = true; }
       }
       await recordPayFailure(id, claimed.payAttemptId!, e, 'was sent', maybeSent);
@@ -689,20 +702,25 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
           setError(msg); showToast(msg, 'info');
           return;
         }
-        o = payableNow(id);
+        o = payableNow(id, repost);
         if (!o) return;
         // Another tab may have signed a transfer for this order while the switch prompt was open.
         if (savedAction(o)) { changedElsewhere(); return; }
       }
       if (await priceCheck(o, quoteAt) !== 'ok') return;
-      const claimed = await claimPayment(id, addressRef.current!, { hlAction: undefined, hlPostedAt: undefined }, holds(o.hlAction));
+      // `repost` here: in doubt, but no transfer was ever saved, so nothing can have been posted (canRetryUnknown).
+      const claimed = await claimPayment(id, addressRef.current!, { hlAction: undefined, hlPostedAt: undefined }, holds(o.hlAction), { repost });
       if (!claimed) { changedElsewhere(); return; }
       o = claimed;
       const attemptId = claimed.payAttemptId!;
       const transfer = { destination: o.depositAddress, token: spotSendToken(t), amount: o.fromAmount, time: Date.now() };
       const stopWaiting = whileWalletOpen(id, attemptId, 'Sign the Hyperliquid transfer in your wallet…');
       try {
-        const sig = parseSignature(await signTypedDataAsync({ ...spotSendTypedData(transfer), account: o.toAddress as Address }));
+        const signature = await signTypedDataAsync({ ...spotSendTypedData(transfer), account: o.toAddress as Address });
+        // Hyperliquid debits the signer, and every check looks at the order's account: another signer is refused.
+        const signer = await recoverTypedDataAddress({ ...spotSendTypedData(transfer), signature });
+        if (signer.toLowerCase() !== o.toAddress.toLowerCase()) throw new Error('your wallet signed with another account than this order’s');
+        const sig = parseSignature(signature);
         action = { ...transfer, r: sig.r, s: sig.s, v: Number(sig.v ?? BigInt(27 + (sig.yParity ?? 0))) };
       } catch (e) {
         // Nothing can have moved without a signature.
@@ -755,6 +773,12 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     // before is read under the same lock: Hyperliquid accepts a signed transfer once, so refusing it again does not
     // show that nothing moved.
     const begun = await beginHyperPost(id, o.payAttemptId!, action);
+    if (begun === 'closed') {
+      // The window closed on the way (a price check, a ledger read): not posted now. A transfer posted before stays
+      // in doubt; one never posted is dropped, and nothing was sent.
+      await patchPaymentAttempt(id, o.payAttemptId!, o.hlPostedAt ? { payRequestedAt: undefined, payUnknown: true } : { payRequestedAt: undefined, hlAction: undefined });
+      throw new Error('This order’s pay window closed before the transfer was sent. Nothing was sent now; start a new order if you still want iAERO.');
+    }
     if (!begun) {
       throw new Error('This payment changed in another tab (or could not be saved) before it was sent. This tab sent nothing; check the order card.');
     }
@@ -1024,11 +1048,30 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   };
   /** An out-of-date order that was never paid (or is past saving), removed from this browser. Never one whose
    *  payment may still be on its way: its order ID is how it is tracked. */
-  const dismiss = (o: StoredOrder) => {
+  const dismiss = async (o: StoredOrder) => {
+    if (!(await btcStillUnpaid([o]))) return;
     // Checked again when the removal is applied, against the record as it is then.
     void removeOrders([o.id], clearable);
     if (activeId === o.id && clearable(loadOrders().find(x => x.id === o.id) ?? o, Date.now())) setActiveId(null);
   };
+  /** Before Bitcoin orders with no payment seen are removed at the user's request: one fresh look at each address. A
+   *  payment made from another wallet, or one another tab saw but could not save, must not go with the order. */
+  async function btcStillUnpaid(list: StoredOrder[]): Promise<boolean> {
+    for (const o of list.filter(btcUnpaid)) {
+      let seen: Awaited<ReturnType<typeof lookAtBtcAddress>>;
+      try { seen = await lookAtBtcAddress(o.depositAddress, o.btc?.txid); } catch {
+        setError('Couldn’t check an order’s Bitcoin address before removing it, so it stays. Try again in a moment.');
+        return false;
+      }
+      const look = { at: Date.now(), failing: storageFailing(), checkpoint: btcCheckpoint(o) };
+      await patchOrder(o.id, prev => btcLookPatch(prev.btc, seen, look));
+      if (seen === 'known' || seen.payments.length) {
+        setError('A payment to this order’s Bitcoin address was just found, so it stays, and is tracked here.');
+        return false;
+      }
+    }
+    return true;
+  }
   /** Removed from this browser whatever its state: a damaged record this page can't show. */
   const remove = (o: StoredOrder) => {
     void removeOrders([o.id], () => true);
@@ -1413,7 +1456,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
             <OrderTracker
               key={activeOrder.id}
               order={activeOrder} account={address} walletChainId={walletChainId}
-              onPay={(o, opts) => { void pay(o, opts); }} paying={payingId === activeOrder.id} onReorder={reorder} onDismiss={dismiss} onGoToStake={onGoToStake} showToast={showToast}
+              onPay={(o, opts) => { void pay(o, opts); }} paying={payingId === activeOrder.id} onReorder={reorder}
+              onDismiss={o => { void dismiss(o); }} onForget={remove} onGoToStake={onGoToStake} showToast={showToast}
             />
           </RiftErrorBoundary>
         ) : (
@@ -1439,11 +1483,12 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         <RiftErrorBoundary fallback={() => null}>
           <RecentOrders
             orders={orders} activeId={activeId} onSelect={setActiveId}
-            onClearFinished={() => {
-              const now = Date.now();
-              const done = orders.filter(o => clearable(o, now)).map(o => o.id);
-              void removeOrders(done, clearable);
-              if (activeId && done.includes(activeId)) setActiveId(null);
+            onClearFinished={async () => {
+              const done = orders.filter(o => clearable(o, Date.now()));
+              if (!(await btcStillUnpaid(done))) return;
+              const ids = done.map(o => o.id);
+              void removeOrders(ids, clearable);
+              if (activeId && ids.includes(activeId)) setActiveId(null);
             }}
           />
         </RiftErrorBoundary>

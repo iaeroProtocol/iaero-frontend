@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { btcToSats, findBtcDeposits, isBtcAddress, normalizeBtcAddress } from '../../src/lib/rift/bitcoin.ts';
+import { btcToSats, findBtcDeposits, isBtcAddress, lookAtBtcAddress, normalizeBtcAddress } from '../../src/lib/rift/bitcoin.ts';
 
 test('Bitcoin addresses are checked with their checksums', () => {
   // BIP-173 / BIP-350 / BIP-86 / Bitcoin wiki examples.
@@ -51,4 +51,23 @@ test('a confirmed payment counts at least one confirmation, and a capitalised be
   } finally {
     globalThis.fetch = real;
   }
+});
+
+test('an address that stops listing a recorded payment is checked against the transaction itself', async () => {
+  // Round 3: mempool.space's address index can lag behind its own transactions; one such answer must not count.
+  const address = 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq';
+  const TXID = 'ab'.repeat(32);
+  const real = globalThis.fetch;
+  const run = async status => {
+    globalThis.fetch = async url => (String(url).includes(`/tx/${TXID}/status`)
+      ? { ok: status === 200, status, json: async () => ({ confirmed: false }) }
+      : { ok: true, status: 200, json: async () => [] });
+    try { return await lookAtBtcAddress(address, TXID); } finally { globalThis.fetch = real; }
+  };
+  assert.equal(await run(200), 'known', 'still known: nothing new');
+  const gone = await run(404);
+  assert.equal(gone.payments.length, 0, 'gone: an empty answer');
+  await assert.rejects(run(503), /503/, 'can\u2019t say: no answer at all');
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => [] });
+  try { assert.equal((await lookAtBtcAddress(address)).payments.length, 0, 'nothing recorded: no second request'); } finally { globalThis.fetch = real; }
 });

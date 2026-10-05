@@ -61,7 +61,7 @@ export default function BitcoinPayment({ address, amountBtc, sendBy }: Props) {
       <ul className="list-disc space-y-1 pl-5 text-xs text-slate-400">
         <li>Send exactly this amount, in one payment, from a wallet you control. Exchange withdrawals can arrive split, batched or short
           after fees, which Rift treats as underpaid; any refund goes to the refund address you gave.</li>
-        <li>This page picks up your payment by itself; you can close it and come back.</li>
+        <li>This page picks up your payment by itself; you can close it and come back in this browser. Note the order ID first: a private window, or clearing site data, loses it.</li>
         <li>Send by {new Date(sendBy).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}: after that this order’s price is out of date, so start a new one instead.</li>
       </ul>
     </div>

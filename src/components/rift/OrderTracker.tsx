@@ -26,15 +26,15 @@ import { badgeStyle } from './status';
 import { classifyRiftError, getOrder, riftBudget } from '@/lib/rift/client';
 import { parseOrderUpdate } from '@/lib/rift/validate';
 import { applyStatusUpdate, markPolled, patchOrder, polledWithin, storageFailing } from '@/lib/rift/storage';
-import { btcToSats, findBtcDeposits } from '@/lib/rift/bitcoin';
+import { btcToSats, lookAtBtcAddress } from '@/lib/rift/bitcoin';
 import { hyperCoreToken } from '@/lib/rift/hypercore';
 import { accountNonce, evmDepositEvidence, hyperDepositEvidence } from '@/lib/rift/payment-io';
 import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, RIFT_SUPPORT_URL, SOURCE_CHAINS } from '@/lib/rift/config';
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
 import { costText, costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
 import {
-  BTC_MISSING_AFTER, btcCheckpoint, btcLookPatch, btcNeedsLook, btcUnchecked, canHide, isFinalStatus, isOutOfDate, isTerminalStatus,
-  paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput,
+  BTC_MISSING_AFTER, btcCheckpoint, btcLookEveryMs, btcLookPatch, btcNeedsLook, btcUnchecked, canHide, isFinalStatus, isOutOfDate,
+  isTerminalStatus, missingButExpired, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput,
 } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
@@ -74,6 +74,8 @@ interface Props {
   onReorder: (order: StoredOrder) => void;
   /** Remove an out-of-date order that was never paid. */
   onDismiss: (order: StoredOrder) => void;
+  /** Remove from this browser at the user's explicit request, whatever its state (they keep the ID). */
+  onForget: (order: StoredOrder) => void;
   onGoToStake?: () => void;
   showToast?: (message: string, type: 'success' | 'error' | 'info' | 'warning') => void;
 }
@@ -81,7 +83,7 @@ interface Props {
 /** "Send by" is shown this much before a Bitcoin order's pay window closes. */
 const BTC_SEND_MARGIN_MS = 5 * 60_000;
 
-export default function OrderTracker({ order, account, walletChainId, onPay, paying, onReorder, onDismiss, onGoToStake, showToast }: Props) {
+export default function OrderTracker({ order, account, walletChainId, onPay, paying, onReorder, onDismiss, onForget, onGoToStake, showToast }: Props) {
   const chain = SOURCE_CHAINS[order.sourceChain];
   const kind = chain.kind;
   const evmChainId = chain.chainId as EvmChainId | undefined;
@@ -223,6 +225,8 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
   const [btcErrors, setBtcErrors] = useState(0);
   const [btcUnseen, setBtcUnseen] = useState(false);
   const watchBtc = btcNeedsLook(order);
+  const orderRef = useRef(order);
+  orderRef.current = order;
   useEffect(() => {
     if (!watchBtc) return;
     let stop = false;
@@ -230,22 +234,27 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
     let errors = 0;
     let empties = 0; // empty answers in a row
     const tick = async () => {
-      try {
-        markPolled(`btc:${order.id}`); // the background watcher (watch.ts) leaves it to this card
-        const d = await findBtcDeposits(order.depositAddress);
-        errors = 0;
-        empties = d.payments.length ? 0 : empties + 1;
-        if (!stop) { setBtcErrors(0); setBtcUnseen(storageFailing() && empties >= BTC_MISSING_AFTER); }
-        if (!stop) {
-          // Taken here, not in the change (order-state.ts btcLookPatch): a change storage refused is applied later.
-          const look = { at: Date.now(), failing: storageFailing(), checkpoint: btcCheckpoint(order) };
-          await patchOrder(order.id, prev => btcLookPatch(prev.btc, d, look));
+      // Another tab (or the background watcher) just looked: this card tries again shortly (looks are shared,
+      // `btc:<id>` stamps), rather than a whole interval later.
+      const shared = polledWithin(`btc:${order.id}`, 15_000);
+      if (!shared) {
+        try {
+          markPolled(`btc:${order.id}`); // the background watcher (watch.ts) leaves it to this card too
+          const seen = await lookAtBtcAddress(order.depositAddress, orderRef.current.btc?.txid);
+          errors = 0;
+          empties = seen !== 'known' && !seen.payments.length ? empties + 1 : 0;
+          if (!stop) { setBtcErrors(0); setBtcUnseen(storageFailing() && empties >= BTC_MISSING_AFTER); }
+          if (!stop) {
+            // Taken here, not in the change (order-state.ts btcLookPatch): a change storage refused is applied later.
+            const look = { at: Date.now(), failing: storageFailing(), checkpoint: btcCheckpoint(orderRef.current) };
+            await patchOrder(order.id, prev => btcLookPatch(prev.btc, seen, look));
+          }
+        } catch {
+          errors++;
+          if (!stop) setBtcErrors(errors);
         }
-      } catch {
-        errors++;
-        if (!stop) setBtcErrors(errors);
       }
-      if (!stop) timer = setTimeout(tick, staleRef.current || order.status === 'expired' ? 10 * 60_000 : 20000);
+      if (!stop) timer = setTimeout(tick, shared ? 15_000 : btcLookEveryMs(orderRef.current, Date.now()));
     };
     tick();
     return () => { stop = true; if (timer) clearTimeout(timer); };
@@ -492,6 +501,16 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                 // Bitcoin is paid from any wallet: "nothing was taken" waits for a look at the address.
                 ? <div className="text-sm text-slate-300">Rift closed this order. Checking its Bitcoin address for a payment…</div>
                 : <div className="text-sm text-slate-300">No payment arrived before the deadline, so this order closed. Nothing was taken.</div>)}
+          {/* Kept until the user says otherwise: Rift support needs the ID, or this page can't check the address. */}
+          {phase === 'expired' && (paidButExpired(order, now) || missingButExpired(order) || (btcUnchecked(order) && btcErrors >= 3)) && (
+            <button
+              type="button"
+              onClick={() => { if (window.confirm(`Remove this order from this browser? Keep its ID first if you may need Rift’s support: ${order.id}`)) onForget(order); }}
+              className="text-xs text-slate-400 underline hover:text-slate-200"
+            >
+              Remove from this browser
+            </button>
+          )}
           {phase === 'frozen' && <div className="text-sm text-red-200">Rift put this order on hold (a compliance or safety check). Please {supportLink} with the order ID below. This page keeps checking it.</div>}
           {phase === 'underfunded' && (
             <div className="text-sm text-red-200">
@@ -660,7 +679,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
             The Bitcoin payment seen earlier isn’t showing on mempool.space right now. This browser can’t save at the moment, so the page keeps treating it as sent; check your wallet, and don’t send again.
           </div>
         )}
-        {kind === 'bitcoin' && btcErrors >= 3 && order.status === 'awaiting_deposit' && (
+        {kind === 'bitcoin' && btcErrors >= 3 && (order.status === 'awaiting_deposit' || order.status === 'expired') && (
           <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
             Can’t check the Bitcoin network right now. Don’t send again: Rift’s status here still updates when your payment arrives.
           </div>

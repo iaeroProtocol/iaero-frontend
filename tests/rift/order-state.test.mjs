@@ -3,11 +3,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PAY_WINDOW_MS, canMoveTo, canPay, capOrders, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowOpen, phaseInput,
-  BTC_MISSING_AFTER, BTC_GRACE_MS, btcCheckpoint, btcConfirmed, btcLookPatch, btcNeedsLook, btcSightingChanged, btcUnchecked, canRepostUnknown,
+  BTC_MISSING_AFTER, BTC_GRACE_MS, btcCheckpoint, btcConfirmed, btcLookPatch, btcNeedsLook, btcPositive, btcUnchecked, btcUnpaid, canRetryUnknown, BTC_EMPTY_SPAN_MS, BTC_LOOK_FRESH_MS,
   clearable, canHide, isOutOfDate, missingButExpired, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
 } from '../../src/lib/rift/order-state.ts';
 
 const T0 = 1_790_930_000_000;
+/** btcLookPatch for a look taken at `at` and applied straight away (it judges freshness by the clock). */
+const lookNow = (prev, seen, at, checkpoint, failing = false) => {
+  const real = Date.now;
+  Date.now = () => at;
+  try { return btcLookPatch(prev, seen, { at, failing, checkpoint }); } finally { Date.now = real; }
+};
 const HASH = `0x${'ab'.repeat(32)}`;
 const order = (over = {}) => ({
   id: '01a0fb7d-591d-76f3-81c0-c6cc086fa85f', quoteId: '01a0fb7d-244e-7411-9358-5bf1e939153a', createdAt: T0,
@@ -167,18 +173,18 @@ test('a Bitcoin payment seen once survives empty answers, and is marked missing 
   assert.equal(btc.firstSeenAt, T0);
   assert.equal(nextBtcRecord(undefined, empty, T0), undefined, 'nothing seen, nothing recorded');
   for (let i = 1; i < BTC_MISSING_AFTER; i++) {
-    btc = nextBtcRecord(btc, empty, T0 + i);
+    btc = nextBtcRecord(btc, empty, T0 + i * 60_000);
     assert.equal(btc.txid, 'ab'.repeat(32));
     assert.equal(btc.missing, undefined, `${i} empty answer(s) are not enough`);
   }
-  btc = nextBtcRecord(btc, empty, T0 + 10);
+  btc = nextBtcRecord(btc, empty, T0 + BTC_MISSING_AFTER * 60_000);
   assert.equal(btc.missing, true);
   assert.equal(btc.txid, 'ab'.repeat(32), 'still known: the order is never treated as unpaid');
   const o = order({ sourceChain: 'bitcoin', btc, token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' } });
   assert.equal(phaseInput(o, 'bitcoin').btcSeenAt, undefined, 'the QR code returns');
   assert.equal(isAbandoned(o, T0 + 2 * 3600_000), false, 'not removable while the payment may still confirm');
-  assert.equal(nextBtcRecord(btc, empty, T0 + 11), btc, 'nothing more is recorded once missing');
-  const back = nextBtcRecord(btc, seen, T0 + 20);
+  assert.equal(nextBtcRecord(btc, empty, T0 + 9 * 60_000), btc, 'nothing more is recorded once missing');
+  const back = nextBtcRecord(btc, seen, T0 + 10 * 60_000);
   assert.equal(back.missing, undefined);
   assert.equal(back.firstSeenAt, T0, 'first seen keeps its time');
   // An older version could leave only `{ missing: true }`: still a payment seen, never "nothing was sent".
@@ -203,20 +209,20 @@ test('while storage refuses writes, a Bitcoin look records what was seen, not it
   const seen = c => ({ payments: [{ txid: 'ab'.repeat(32), confirmations: c }], totalSats: 1_000_000n });
   const empty = { payments: [], totalSats: 0n };
   const first = nextBtcRecord(undefined, seen(0), T0);
-  assert.equal(btcSightingChanged(undefined, first), true, 'first seen');
-  assert.equal(btcSightingChanged(first, nextBtcRecord(first, seen(0), T0 + 1)), false);
+  assert.equal(btcPositive(undefined, first), true, 'first seen');
+  assert.equal(btcPositive(first, nextBtcRecord(first, seen(0), T0 + 1)), false);
   const one = nextBtcRecord(first, seen(1), T0 + 2);
-  assert.equal(btcSightingChanged(first, one), true, 'first confirmation');
-  assert.equal(btcSightingChanged(one, nextBtcRecord(one, seen(2), T0 + 3)), false, 'more confirmations: a counter');
-  assert.equal(btcSightingChanged(first, nextBtcRecord(first, empty, T0 + 4)), false, 'one empty answer: a counter');
-  assert.equal(btcSightingChanged({ ...one, emptyChecks: 2 }, nextBtcRecord({ ...one, emptyChecks: 2 }, seen(1), T0 + 4)), true,
+  assert.equal(btcPositive(first, one), true, 'first confirmation');
+  assert.equal(btcPositive(one, nextBtcRecord(one, seen(2), T0 + 3)), false, 'more confirmations: a counter');
+  assert.equal(btcPositive(first, nextBtcRecord(first, empty, T0 + 4)), false, 'one empty answer: a counter');
+  assert.equal(btcPositive({ ...one, emptyChecks: 2 }, nextBtcRecord({ ...one, emptyChecks: 2 }, seen(1), T0 + 4)), true,
     'seen again after empty answers: recorded, so the stored count can\u2019t outlive it');
   // While storage refuses writes, "missing" is never recorded: another tab may be seeing the payment.
-  const high = { ...first, emptyChecks: 2 };
-  const look = failing => ({ at: T0 + 5, failing, checkpoint: T0 + 10 * 3600_000 });
-  assert.deepEqual(btcLookPatch(high, empty, look(true)), {}, 'not while failing');
-  assert.equal(btcLookPatch(high, empty, look(false)).btc.missing, true, 'recorded once storage works');
-  assert.equal(btcLookPatch(first, seen(1), look(true)).btc.confirmed, true, 'a payment seen is recorded while failing');
+  const high = { ...first, emptyChecks: 2, emptySince: T0 };
+  const at = T0 + BTC_EMPTY_SPAN_MS + 1, cp = T0 + 10 * 3600_000;
+  assert.deepEqual(lookNow(high, empty, at, cp, true), {}, 'not while failing');
+  assert.equal(lookNow(high, empty, at, cp).btc.missing, true, 'recorded once storage works');
+  assert.equal(lookNow(first, seen(1), at, cp, true).btc.confirmed, true, 'a payment seen is recorded while failing');
 });
 
 test('Bitcoin "nothing was sent" waits for a look at the address past its checkpoint', () => {
@@ -229,11 +235,14 @@ test('Bitcoin "nothing was sent" waits for a look at the address past its checkp
   assert.equal(isAbandoned(o, cutoff + 60_000), false, 'just past the window: not yet');
   assert.equal(isAbandoned(o, T0 + 5 * 3600_000), false, 'hours later, but nobody looked');
   const empty = { payments: [], totalSats: 0n };
-  assert.deepEqual(btcLookPatch(o.btc, empty, { at: cutoff + 60_000, failing: false, checkpoint: btcCheckpoint(o) }), {}, 'a look before the checkpoint is not evidence');
-  assert.deepEqual(btcLookPatch(o.btc, empty, { at: cutoff + BTC_GRACE_MS + 1, failing: true, checkpoint: btcCheckpoint(o) }), {}, 'nor while storage fails');
-  const looked = btc({ btc: btcLookPatch(o.btc, empty, { at: cutoff + BTC_GRACE_MS + 1, failing: false, checkpoint: btcCheckpoint(o) }).btc });
-  assert.equal(isAbandoned(looked, cutoff + BTC_GRACE_MS + 2), true);
-  assert.deepEqual(btcLookPatch(looked.btc, empty, { at: cutoff + BTC_GRACE_MS + 9, failing: false, checkpoint: btcCheckpoint(looked) }), {}, 'recorded once');
+  const cp = btcCheckpoint(o);
+  assert.deepEqual(lookNow(o.btc, empty, cutoff + 60_000, cp), {}, 'a look before the checkpoint is not evidence');
+  assert.deepEqual(lookNow(o.btc, empty, cp + 1, cp, true), {}, 'nor while storage fails');
+  let rec = o.btc;
+  for (const dt of [1, 60_000, BTC_EMPTY_SPAN_MS + 1]) rec = lookNow(rec, empty, cp + dt, cp).btc;
+  const looked = btc({ btc: rec });
+  assert.equal(isAbandoned(looked, cp + BTC_EMPTY_SPAN_MS + 2), true, 'a run of looks over two minutes');
+  assert.deepEqual(lookNow(looked.btc, empty, cp + BTC_EMPTY_SPAN_MS + 9, cp), {}, 'recorded once');
   // Expired by Rift: cleared, and "Nothing was taken", only after a look since then.
   const expired = btc({ status: 'expired', statusTimes: { awaiting_deposit: T0, expired: T0 + 7 * 864e5 } });
   assert.equal(btcUnchecked(expired), true);
@@ -251,11 +260,12 @@ test('Bitcoin "nothing was sent" waits for a look at the address past its checkp
 test('a HyperCore order in doubt may re-post its saved transfer, only while its window is open', () => {
   const action = { destination: '0x1', token: 'USDC:0x6d', amount: '10', time: 1, r: '0x1', s: '0x2', v: 27 };
   const hl = over => order({ sourceChain: 'hyperliquid', token: { symbol: 'USDC', decimals: 8, asset: 'hyperliquid.usdc' }, ...over });
-  assert.equal(canRepostUnknown(hl({ hlAction: action, payUnknown: true }), T0 + 1000), true);
-  assert.equal(canRepostUnknown(hl({ payUnknown: true }), T0 + 1000), false, 'nothing saved to re-post');
-  assert.equal(canRepostUnknown(hl({ hlAction: action }), T0 + 1000), false, 'not in doubt');
-  assert.equal(canRepostUnknown(hl({ hlAction: action, payUnknown: true }), T0 + 11 * 60_000), false, 'window closed');
-  assert.equal(canRepostUnknown(order({ hlAction: action, payUnknown: true }), T0 + 1000), false, 'not HyperCore');
+  assert.equal(canRetryUnknown(hl({ hlAction: action, payUnknown: true }), T0 + 1000), true);
+  assert.equal(canRetryUnknown(hl({ payUnknown: true }), T0 + 1000), true, 'nothing ever saved: signing anew is safe');
+  assert.equal(canRetryUnknown(hl({ payUnknown: true, hlPostedAt: T0 }), T0 + 1000), false, 'posted, but the transfer is gone: never');
+  assert.equal(canRetryUnknown(hl({ hlAction: action }), T0 + 1000), false, 'not in doubt');
+  assert.equal(canRetryUnknown(hl({ hlAction: action, payUnknown: true }), T0 + 11 * 60_000), false, 'window closed');
+  assert.equal(canRetryUnknown(order({ hlAction: action, payUnknown: true }), T0 + 1000), false, 'not HyperCore');
 });
 
 test('an expired order whose Bitcoin payment went missing can be cleared, but is never dropped automatically', () => {
@@ -289,4 +299,42 @@ test('a confirmed Bitcoin payment is never "missing", whatever the API answers',
   assert.equal(legacy.btc.missing, undefined);
   assert.equal(legacy.btc.emptyChecks, undefined);
   assert.equal(phaseInput(legacy, 'bitcoin').btcSeenAt, T0, 'no QR code');
+});
+
+test('Bitcoin evidence needs a run of empty answers over minutes; a stale or lagging answer counts for nothing', () => {
+  // Round 3, Medium: one empty answer past the checkpoint proved "nothing was sent"; and several tabs, or an old
+  // answer applied late, could make "missing" come in seconds.
+  const btc = (over = {}) => order({ sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' }, ...over });
+  const empty = { payments: [], totalSats: 0n };
+  const o = btc();
+  const cp = btcCheckpoint(o);
+  let rec = lookNow(undefined, empty, cp + 1, cp).btc;
+  assert.equal(rec.emptyAt, undefined, 'one empty answer is not evidence');
+  rec = lookNow(rec, empty, cp + 20_000, cp).btc;
+  rec = lookNow(rec, empty, cp + 40_000, cp).btc;
+  assert.equal(rec.emptyAt, undefined, 'three in 40 s are not either');
+  rec = lookNow(rec, empty, cp + BTC_EMPTY_SPAN_MS + 1, cp).btc;
+  assert.equal(typeof rec.emptyAt, 'number', 'a run over two minutes is');
+  // A payment recorded earlier that the address no longer lists, but mempool.space still knows: a lagging index.
+  const paid = { txid: 'ab'.repeat(32), confirmations: 0, firstSeenAt: cp, emptyChecks: 2, emptySince: cp };
+  assert.deepEqual(lookNow(paid, 'known', cp + 60_000, cp).btc, { txid: 'ab'.repeat(32), confirmations: 0, firstSeenAt: cp });
+  assert.deepEqual(lookNow({ txid: 'ab'.repeat(32) }, 'known', cp, cp), {}, 'nothing to undo');
+  // An empty answer applied later than BTC_LOOK_FRESH_MS (a refused change, replayed) keeps only what it saw.
+  const real = Date.now;
+  Date.now = () => cp + 10 * 60_000;
+  try {
+    assert.deepEqual(btcLookPatch(paid, empty, { at: cp + 10 * 60_000 - BTC_LOOK_FRESH_MS - 1, failing: false, checkpoint: cp }), {});
+    assert.equal(btcLookPatch(undefined, { payments: [{ txid: 'ab'.repeat(32), confirmations: 0 }], totalSats: 1n }, { at: cp - 3600_000, failing: false, checkpoint: cp }).btc.txid,
+      'ab'.repeat(32), 'a payment it saw is kept whenever it is applied');
+  } finally {
+    Date.now = real;
+  }
+  // An empty answer older than the run it would extend counts for nothing.
+  assert.deepEqual(lookNow({ ...paid, emptySince: cp + 5 * 60_000 }, empty, cp + 4 * 60_000, cp), {});
+  // Unpaid Bitcoin orders are never dropped by the cap; an expired one whose payment went missing is not bulk-cleared.
+  const unpaid = btc({ createdAt: T0 - 864e5, btc: { emptyAt: T0 } });
+  const others = Array.from({ length: 3 }, (_, i) => order({ id: String(i), status: 'delivered' }));
+  assert.equal(btcUnpaid(unpaid), true);
+  assert.ok(capOrders([unpaid, ...others], 1, T0 + 864e5).includes(unpaid));
+  assert.equal(clearable(btc({ status: 'expired', btc: { txid: 'ab'.repeat(32), missing: true } }), T0 + 8 * 864e5), false);
 });

@@ -93,6 +93,11 @@ interface BlockscoutTokenBalance {
 const text = (v: unknown) => (typeof v === 'string' ? v : '');
 /** A Blockscout number given as text or a number, or NaN. */
 const numeric = (v: unknown) => (typeof v === 'string' || typeof v === 'number' ? Number(v) : NaN);
+/** A USD price worth using: finite, positive and below what any token is worth (a broken or hostile source can say
+ *  anything, and an infinite value would break the page). 0: unpriced. */
+const usdPrice = (v: unknown) => { const n = numeric(v); return Number.isFinite(n) && n > 0 && n < 1e9 ? n : 0; };
+/** A holding's USD value, or 0 when it can't be a real one (an absurd balance: more than all the money there is). */
+const usdValue = (price: number, raw: string, decimals: number) => { const v = price * rawToNumber(raw, decimals); return Number.isFinite(v) && v < 1e15 ? v : 0; };
 
 /** A Blockscout token row's contract address, lowercase ('' when it has none). */
 export function tokenRowAddress(row: unknown): string {
@@ -128,13 +133,12 @@ export function parseTokenBalances(chain: HoldingChain, json: unknown, exclude: 
     const asset = `${chain}.${address}`;
     if (exclude.includes(asset) || seen.has(address)) continue;
     seen.add(address);
-    const quotedPrice = numeric(t.exchange_rate);
-    const priceUsd = Number.isFinite(quotedPrice) && quotedPrice > 0 ? quotedPrice : 0;
+    const priceUsd = usdPrice(t.exchange_rate);
     const symbol = text(t.symbol).trim() || `${address.slice(0, 6)}…`;
     out.push({
       chain, asset, symbol: symbol.slice(0, 16), name: (text(t.name) || symbol).slice(0, 48), decimals,
       address: address as `0x${string}`, balanceRaw, priceUsd,
-      valueUsd: priceUsd * rawToNumber(balanceRaw, decimals), icon: text(t.icon_url) || undefined,
+      valueUsd: usdValue(priceUsd, balanceRaw, decimals), icon: text(t.icon_url) || undefined,
     });
   }
   return out;
@@ -145,11 +149,10 @@ export function parseNative(chain: HoldingChain, json: unknown): Holding | null 
   const j = json as { coin_balance?: string | null; exchange_rate?: string | null } | null;
   const balanceRaw = String(j?.coin_balance ?? '0');
   if (!/^\d+$/.test(balanceRaw) || balanceRaw === '0') return null;
-  const quotedPrice = Number(j?.exchange_rate ?? 0);
-  const priceUsd = Number.isFinite(quotedPrice) && quotedPrice > 0 ? quotedPrice : 0;
+  const priceUsd = usdPrice(j?.exchange_rate);
   return {
     chain, asset: `${chain}.eth`, symbol: 'ETH', name: 'Ether', decimals: 18, balanceRaw, priceUsd,
-    valueUsd: priceUsd * rawToNumber(balanceRaw, 18),
+    valueUsd: usdValue(priceUsd, balanceRaw, 18),
   };
 }
 
@@ -159,12 +162,14 @@ export function applyLlamaPrices(holdings: Holding[], prices: Record<string, num
   return holdings.map(h => {
     if (h.priceUsd > 0 || !h.address) return h;
     const price = prices[`${llamaChainOf(h.chain)}:${h.address}`];
-    return typeof price === 'number' && price > 0 ? { ...h, priceUsd: price, valueUsd: price * rawToNumber(h.balanceRaw, h.decimals) } : h;
+    const p = usdPrice(price);
+    return p > 0 ? { ...h, priceUsd: p, valueUsd: usdValue(p, h.balanceRaw, h.decimals) } : h;
   });
 }
 
 /** Holdings worth listing, largest USD value first; those whose price is missing come after, unvalued. */
-export const rankHoldings = (holdings: Holding[]) => [
+export const rankHoldings = (all: Holding[]) => rankFinite(all.filter(h => Number.isFinite(h.valueUsd) && Number.isFinite(h.priceUsd)));
+const rankFinite = (holdings: Holding[]) => [
   ...holdings.filter(h => !h.priceMissing && h.valueUsd >= MIN_VALUE_USD).sort((a, b) => b.valueUsd - a.valueUsd),
   ...holdings.filter(h => h.priceMissing && h.balanceRaw !== '0').sort((a, b) => a.symbol.localeCompare(b.symbol)),
 ];
@@ -176,7 +181,7 @@ export const PROBE_USD = 100;
 export function probeAmount(h: Pick<Holding, 'balanceRaw' | 'decimals' | 'priceUsd'>): string {
   const balance = BigInt(h.balanceRaw);
   let raw = balance;
-  if (h.priceUsd > 0) {
+  if (Number.isFinite(h.priceUsd) && h.priceUsd > 0) {
     // $100 worth, in base units, with 18 decimals of price precision (a $1e-11 token must not round to $1e-8).
     const scaled = BigInt(Math.round(h.priceUsd * 1e18));
     if (scaled > 0n) {
@@ -212,7 +217,11 @@ export const MAX_UNPRICED_CANDIDATES = 60;
  * Blockscout shows (it can be stale either way), plus unpriced ones Blockscout shows a balance for (the
  * long tail of airdropped spam, most of which nothing prices), largest first, capped.
  */
-export function blockscoutCandidates(json: unknown, exclude: string[] = [], onTruncate?: () => void): TokenCandidate[] {
+export function blockscoutCandidates(
+  json: unknown, exclude: string[] = [], onTruncate?: () => void,
+  /** Unpriced tokens to read before the others (on Rift's list or ours): airdropped spam must not crowd them out. */
+  prefer: (address: string) => boolean = () => false,
+): TokenCandidate[] {
   // `/addresses/{a}/tokens` pages ({ items }, sorted by USD value); the older `/token-balances` is an array.
   if (json && !Array.isArray(json) && Array.isArray((json as { items?: unknown }).items)) json = (json as { items: unknown[] }).items;
   if (!Array.isArray(json)) return [];
@@ -229,10 +238,9 @@ export function blockscoutCandidates(json: unknown, exclude: string[] = [], onTr
     if (decimals === null) continue;
     if (seen.has(address)) continue; // a balance changing during pagination can appear on two pages
     const symbol = (text(t.symbol).trim() || `${address.slice(0, 6)}…`).slice(0, 16);
-    const quotedPrice = numeric(t.exchange_rate);
     const c: TokenCandidate = {
       address: address as `0x${string}`, symbol, name: (text(t.name) || symbol).slice(0, 48), decimals,
-      priceUsd: Number.isFinite(quotedPrice) && quotedPrice > 0 ? quotedPrice : 0,
+      priceUsd: usdPrice(t.exchange_rate),
       icon: text(t.icon_url) || undefined,
     };
     if (c.priceUsd > 0) { priced.push(c); seen.add(address); }
@@ -241,7 +249,7 @@ export function blockscoutCandidates(json: unknown, exclude: string[] = [], onTr
       if (/^\d+$/.test(raw) && raw !== '0') { unpriced.push({ c, held: rawToNumber(raw, decimals) }); seen.add(address); }
     }
   }
-  unpriced.sort((a, b) => b.held - a.held);
+  unpriced.sort((a, b) => Number(prefer(b.c.address)) - Number(prefer(a.c.address)) || b.held - a.held);
   if (unpriced.length > MAX_UNPRICED_CANDIDATES) onTruncate?.();
   return [...priced, ...unpriced.slice(0, MAX_UNPRICED_CANDIDATES).map(u => u.c)];
 }
@@ -262,7 +270,7 @@ export function candidatesToHoldings(chain: HoldingChain, candidates: TokenCandi
     out.push({
       chain, asset: `${chain}.${c.address.toLowerCase()}`, symbol: c.symbol, name: c.name, decimals: c.decimals,
       address: c.address.toLowerCase() as `0x${string}`, balanceRaw, priceUsd: c.priceUsd,
-      valueUsd: c.priceUsd * rawToNumber(balanceRaw, c.decimals), icon: c.icon,
+      valueUsd: usdValue(c.priceUsd, balanceRaw, c.decimals), icon: c.icon,
     });
   });
   return out;
@@ -272,5 +280,5 @@ export function candidatesToHoldings(chain: HoldingChain, candidates: TokenCandi
 export function nativeHolding(chain: HoldingChain, balance: bigint, priceUsd: number): Holding | null {
   if (balance <= 0n) return null;
   const balanceRaw = balance.toString();
-  return { chain, asset: `${chain}.eth`, symbol: 'ETH', name: 'Ether', decimals: 18, balanceRaw, priceUsd, valueUsd: priceUsd * rawToNumber(balanceRaw, 18) };
+  return { chain, asset: `${chain}.eth`, symbol: 'ETH', name: 'Ether', decimals: 18, balanceRaw, priceUsd, valueUsd: usdValue(priceUsd, balanceRaw, 18) };
 }

@@ -16,10 +16,10 @@ const btcOrder = (over = {}) => ({
   ...order(), sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' }, fromAmount: '0.001', fromAmountRaw: '100000',
   depositAddress: BTC_DEPOSIT, route: [{ venue: 'garden', from: 'bitcoin.btc', to: 'base.cbbtc' }], ...over,
 });
-/** Bitcoin looks as the order card takes them (OrderTracker.tsx 2b). */
-const trackerLook = (t, id) => d => {
+/** Bitcoin looks as the order card takes them (OrderTracker.tsx 2b); `at`: when (now by default). */
+const trackerLook = (t, id) => (d, at = Date.now()) => {
   const o = t.loadOrders().find(x => x.id === id);
-  const look = { at: Date.now(), failing: t.storageFailing(), checkpoint: orderState.btcCheckpoint(o) };
+  const look = { at, failing: t.storageFailing(), checkpoint: orderState.btcCheckpoint(o) };
   return t.patchOrder(id, prev => orderState.btcLookPatch(prev.btc, d, look));
 };
 const order = () => {
@@ -38,9 +38,10 @@ function harness(saved, { locksAvailable = true, lockRejects = false, lockError 
   const listeners = [];
   const timers = [];
   let storageBlocked = false;
+  const refusedKeys = new Set();
   const localStorage = {
     getItem: k => data.get(k) ?? null,
-    setItem: (k, v) => { if (storageBlocked) throw new Error('quota'); data.set(k, v); },
+    setItem: (k, v) => { if (storageBlocked || refusedKeys.has(k)) throw new Error('quota'); data.set(k, v); },
     removeItem: k => { data.delete(k); },
   };
   let tail = Promise.resolve();
@@ -75,7 +76,7 @@ function harness(saved, { locksAvailable = true, lockRejects = false, lockError 
     tab, read: () => JSON.parse(data.get(key))[0], all: () => JSON.parse(data.get(key)),
     onEvent: listener => listeners.push(listener),
     block: () => { storageBlocked = true; }, unblock: () => { storageBlocked = false; },
-    timers, setRaw: v => data.set(key, v), get: k => data.get(k),
+    timers, setRaw: v => data.set(key, v), get: k => data.get(k), refuseKey: k => refusedKeys.add(k),
     /** Fire the timers set so far (the page's 15 s retry), then let their writes finish. */
     runTimers: async () => { for (const fn of timers.splice(0)) fn(); await new Promise(r => setImmediate(r)); },
   };
@@ -293,15 +294,15 @@ test('a Bitcoin payment first seen while storage refuses writes survives later e
   const t = Date.now();
   h.block();
   assert.equal(await observe(seen, t), 'failed');
-  assert.equal(await observe(empty, t + 20_000), 'failed');
+  assert.equal(await observe(empty, t + 40_000), 'failed');
   assert.equal(a.loadOrders()[0].btc.txid, TXID);
   assert.equal(a.loadOrders()[0].btc.missing, undefined, 'one empty answer is not enough');
-  for (let i = 2; i <= 6; i++) await observe(empty, t + i * 20_000);
+  for (let i = 2; i <= 6; i++) await observe(empty, t + i * 40_000);
   const btc = a.loadOrders()[0].btc;
   assert.equal(btc.txid, TXID, 'the payment is never forgotten');
   assert.equal(btc.missing, true);
-  assert.equal(btc.emptyChecks, orderState.BTC_MISSING_AFTER, 'nothing more is counted once it is missing');
-  assert.ok(a.unsavedChanges() <= 1 + orderState.BTC_MISSING_AFTER, `bounded: ${a.unsavedChanges()}`);
+  assert.ok(btc.emptyChecks >= orderState.BTC_MISSING_AFTER);
+  assert.ok(a.unsavedChanges() <= 6, `bounded: ${a.unsavedChanges()}`);
   assert.equal(orderState.isAbandoned({ ...a.loadOrders()[0], createdAt: t - 2 * 3600_000 }, t + 3600_000), false);
   h.unblock();
   assert.equal(await a.patchOrder(x.id, { notify: true }), 'saved');
@@ -367,8 +368,11 @@ test('while storage refuses writes, Bitcoin looks record what was seen and not t
   assert.equal(a.loadOrders()[0].btc.missing, undefined, 'never "missing" while storage refuses writes');
   h.unblock();
   await a.patchOrder(x.id, {});
-  for (let i = 0; i < 3; i++) await look(empty);
-  assert.equal(h.read().btc.missing, true, 'three empty answers in a row, once storage works');
+  const now = Date.now();
+  for (const dt of [0, 30_000, 60_000]) await look(empty, now + dt);
+  assert.equal(h.read().btc.missing, undefined, 'three quick empty answers are not enough (several tabs, one lagging backend)');
+  await look(empty, now + orderState.BTC_EMPTY_SPAN_MS + 1);
+  assert.equal(h.read().btc.missing, true, 'empty answers in a row over two minutes, once storage works');
   assert.equal(h.read().btc.txid, TXID);
   // Confirmations climbing during an outage: the first confirmation is recorded, the count is not.
   const y = h.tab();
@@ -497,7 +501,24 @@ test('a HyperCore transfer in doubt is re-posted only through a claim, and never
   assert.equal(h.read().payUnknown, false);
   assert.ok(await t.beginHyperPost(x.id, claimed.payAttemptId, action));
   const late = harness({ ...x, createdAt: Date.now() - 11 * 60_000, payUnknown: false, payAttemptId: claimed.payAttemptId });
-  assert.equal(await late.tab().beginHyperPost(x.id, claimed.payAttemptId, action), null, 'not once the window has closed');
+  assert.equal(await late.tab().beginHyperPost(x.id, claimed.payAttemptId, action), 'closed', 'not once the window has closed, and says so');
+  assert.equal(late.read().hlPostedAt, x.hlPostedAt, 'nothing recorded as posted');
+  // In doubt with no transfer ever saved (the page died at the prompt): a new signature, under a repost claim.
+  const lost = harness({ ...x, hlAction: undefined, hlPostedAt: undefined });
+  const lt = lost.tab();
+  assert.equal(await lt.claimPayment(x.id, owner, { hlAction: undefined }), null, 'not an ordinary claim');
+  assert.ok(await lt.claimPayment(x.id, owner, { hlAction: undefined }, o => !o.hlAction, { repost: true }), 'a repost claim may sign anew');
+});
+
+test('nothing is written while storage can\u2019t be read, even a value that can\u2019t be put aside', async () => {
+  // Round 3, Low: a non-list value too big to copy aside was written over by the next save.
+  const h = harness([]);
+  h.setRaw('not json at all');
+  h.refuseKey('iaero.rift.orders.v1.unreadable'); // too big to copy aside, while a small list still fits
+  const full = h.tab();
+  assert.equal(await full.upsertOrder(order(), { keepOnFailure: false }), 'failed');
+  assert.equal(h.get('iaero.rift.orders.v1'), 'not json at all', 'never written over unseen');
+  assert.equal(full.storageFailing(), true);
 });
 
 test('poll stamps hold while storage refuses writes', () => {

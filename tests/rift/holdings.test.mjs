@@ -178,3 +178,17 @@ test('a Blockscout row with a field of the wrong type is skipped or read safely,
   }
   assert.equal(parseTokenBalances('base', [row({ exchange_rate: ['9'] })])[0].priceUsd, 0, 'an array is not a price');
 });
+
+test('unpriced tokens on Rift\u2019s list come before airdropped spam; absurd values never reach the page', () => {
+  // Round 3, Lows: 60+ spam airdrops crowded out a real, unpriced Rift-listed token; an infinite USD value crashed
+  // the whole section.
+  const row = (i, value, rate = null) => ({ value, token: { type: 'ERC-20', address_hash: `0x${String(i).padStart(40, '0')}`, symbol: `T${i}`, name: `T${i}`, decimals: '18', exchange_rate: rate } });
+  const spam = Array.from({ length: 70 }, (_, i) => row(i + 100, '9'.repeat(30)));
+  const real = row(7, '1000000000000000000000');
+  const listed = blockscoutCandidates([...spam, real], [], undefined, a => a === `0x${'7'.padStart(40, '0')}`);
+  assert.ok(listed.some(c => c.address === `0x${'7'.padStart(40, '0')}`), 'the listed token is read');
+  assert.equal(parseTokenBalances('base', [row(1, '1', '1e305')])[0].priceUsd, 0, 'an absurd price is no price');
+  assert.equal(parseTokenBalances('base', [row(2, '9'.repeat(320), '1')])[0].valueUsd, 0, 'an absurd balance is worth nothing shown');
+  const ranked = rankHoldings([{ chain: 'base', asset: 'base.x', symbol: 'X', name: 'X', decimals: 18, balanceRaw: '1', priceUsd: 1, valueUsd: Infinity }]);
+  assert.equal(ranked.length, 0);
+});

@@ -272,7 +272,7 @@ async function chainHoldings(chain: EvmHoldingChain, chainId: 1 | 42161 | 8453, 
   if (list?.truncated) report.notes.push(`${chain}: token list scan stopped at ${list.items.length} tokens`);
   const listed = list ? blockscoutCandidates(list.items, [RIFT_DESTINATION], () => {
     report.notes.push(`${chain}: only the first ${MAX_UNPRICED_CANDIDATES} unpriced tokens checked on-chain`);
-  }) : [];
+  }, address => RIFT_LISTED.has(`${chain}.${address}`) || MAJOR.has(`${chain}.${address}`)) : [];
   const listedPrice = new Map(listed.map(c => [c.address, c]));
   // Major tokens keep Blockscout's price and icon when it lists them.
   const allCandidates = [
@@ -304,6 +304,11 @@ async function chainHoldings(chain: EvmHoldingChain, chainId: 1 | 42161 | 8453, 
   }
   const out = [...candidatesToHoldings(chain, read.tokens, read.balances), ...filled];
   if (read.native !== null) { const n = nativeHolding(chain, read.native, 0); if (n) out.push(n); }
+  else {
+    // ETH couldn't be read on-chain (its batch failed, the tokens' didn't): Blockscout's own number, flagged.
+    try { const n = parseNative(chain, await getJson(`${blockscout}/api/v2/addresses/${owner}`, { until })); if (n) out.push(n); } catch { /* none */ }
+    report.warnings.push(`${chain}: the ETH balance could not be checked on-chain and may be out of date`);
+  }
   return out;
 }
 

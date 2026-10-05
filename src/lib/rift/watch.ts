@@ -18,7 +18,7 @@ import { useEffect, useRef } from 'react';
 import { getOrder, riftBudget } from './client';
 import { parseOrderUpdate } from './validate';
 import { applyStatusUpdate, markPolled, patchOrder, polledWithin, pollStamps, storageFailing } from './storage';
-import { findBtcDeposits } from './bitcoin';
+import { lookAtBtcAddress } from './bitcoin';
 import {
   btcCheckpoint, btcLookPatch, btcNeedsLook, btcUnchecked, isFinalStatus, isOutOfDate, isTerminalStatus, paidButExpired,
   pendingByLeastRecentPoll,
@@ -132,11 +132,11 @@ export function useOrderWatcher(
           if (polledWithin(key, BTC_LOOK_MS)) continue;
           markPolled(key);
           try {
-            const d = await findBtcDeposits(o.depositAddress);
+            const seen = await lookAtBtcAddress(o.depositAddress, o.btc?.txid);
             if (stop) break;
             const look = { at: Date.now(), failing: storageFailing(), checkpoint: btcCheckpoint(o) };
-            await patchOrder(o.id, prev => btcLookPatch(prev.btc, d, look));
-          } catch { /* mempool.space unreachable: next round */ }
+            await patchOrder(o.id, prev => btcLookPatch(prev.btc, seen, look));
+          } catch { /* mempool.space unreachable, or can't say: next round */ }
         }
       } finally {
         running = false;
