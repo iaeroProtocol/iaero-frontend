@@ -111,3 +111,11 @@ test('a long step says "usually done by now, up to N more", and nothing goes neg
   const skewed = computeProgress({ ...base, depositSentAt: t0 + 60_000, now: t0, status: 'awaiting_deposit', depositConfirmedAt: undefined, fundedAt: undefined });
   assert.ok(skewed.elapsedSec >= 0 && skewed.fraction >= 0, 'a clock behind the saved times');
 });
+
+test('a venue named like an object property is just an unknown venue', () => {
+  // Round 4, Low: VENUE_TIMING["constructor"] is Object.prototype's, and destructuring it crashed the whole section.
+  for (const venue of ['constructor', '__proto__', 'toString', 'valueOf', 'hasOwnProperty']) {
+    const est = estimateRoute('base', [{ venue, from: `base.${'0x' + '1'.repeat(40)}`, to: 'base.0x81034fb34009115f215f5d5f564aac9ffa46a1dc' }], {});
+    assert.ok(est.steps.length > 0, venue);
+  }
+});

@@ -304,7 +304,7 @@ function tokenMatchesSource(chain: SourceChainKey, token: StoredOrder['token']):
 
 /** Optional fields that must have their type when present; a wrong one is dropped, not the order. */
 const OPTIONAL_NUMBERS = [
-  'payRequestedAt', 'payAttemptAt', 'payNonce', 'depositNonce', 'depositSentAt', 'depositConfirmedAt', 'lastPolledAt',
+  'payRequestedAt', 'payAttemptAt', 'payNonce', 'depositNonce', 'preSendNonce', 'hlNonce', 'depositSentAt', 'depositConfirmedAt', 'lastPolledAt',
   'deliveredAtChain', 'marketUsdIn', 'marketIaeroUsd', 'gasDeskUsd', 'hlPostedAt', 'hiddenAt',
 ] as const;
 const OPTIONAL_UINTS = ['depositReceivedRaw', 'baseFromBlock', 'deliveryScannedTo'] as const;

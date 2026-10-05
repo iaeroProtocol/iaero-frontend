@@ -31,7 +31,7 @@ import { EVM_ADDRESS_RE, badRequest } from '@/lib/rift/server';
 import { parseLlamaPrices } from '@/lib/rift/cost';
 import {
   HOLDING_CHAINS, MAX_UNPRICED_CANDIDATES, applyLlamaPrices, blockscoutCandidates, candidatesToHoldings, mergeTokenRows, nativeHolding,
-  parseNative, parseTokenBalances, rankHoldings, rawToNumber, splitRead, validDecimals, type EvmHoldingChain, type Holding,
+  parseNative, parseTokenBalances, rankHoldings, splitRead, usdPrice, usdValue, validDecimals, type EvmHoldingChain, type Holding,
   type TokenCandidate,
 } from '@/lib/rift/holdings';
 import { HL_API, HYPERCORE_TOKENS, hyperCoreHoldings, parseSpotBalances, usdcForFee } from '@/lib/rift/hypercore';
@@ -149,7 +149,7 @@ const CURATED_DECIMALS = new Map(CURATED_TOKENS.filter(t => t.address).map(t => 
 const blockscoutTokens = (chain: EvmHoldingChain, items: unknown[]): Holding[] =>
   parseTokenBalances(chain, items, [RIFT_DESTINATION]).map(h => {
     const d = CURATED_DECIMALS.get(h.asset);
-    return d === undefined || d === h.decimals ? h : { ...h, decimals: d, valueUsd: h.priceUsd * rawToNumber(h.balanceRaw, d) };
+    return d === undefined || d === h.decimals ? h : { ...h, decimals: d, valueUsd: usdValue(h.priceUsd, h.balanceRaw, d) };
   });
 
 const DECIMALS = [{ type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint8' }] }] as const;
@@ -327,8 +327,7 @@ function lookupOrder(holdings: Holding[]): Holding[] {
 async function blockscoutEthUsd(until: number): Promise<number | undefined> {
   try {
     const stats = await getJson('https://base.blockscout.com/api/v2/stats', { until }) as { coin_price?: unknown };
-    const p = Number(stats?.coin_price);
-    return p > 0 ? p : undefined;
+    return usdPrice(stats?.coin_price) || undefined;
   } catch {
     return undefined;
   }
@@ -390,8 +389,8 @@ export async function GET(request: NextRequest) {
     holdsEth ? blockscoutEthUsd(deadline) : undefined,
   ]);
   if (prices) holdings = applyLlamaPrices(holdings, prices, llamaChain);
-  const ethUsd = prices?.['coingecko:ethereum'] || blockscoutEth;
-  if (ethUsd) holdings = holdings.map(h => (!h.address ? { ...h, priceUsd: ethUsd, valueUsd: ethUsd * rawToNumber(h.balanceRaw, h.decimals) } : h));
+  const ethUsd = usdPrice(prices?.['coingecko:ethereum']) || blockscoutEth;
+  if (ethUsd) holdings = holdings.map(h => (!h.address ? { ...h, priceUsd: ethUsd, valueUsd: usdValue(ethUsd, h.balanceRaw, h.decimals) } : h));
   holdings = [...holdings, ...hyperCoreHoldings(hyperBalances, prices ?? {})];
   // Tokens known to be real (ETH, major tokens, Rift's list) stay listed without a value when no price is to be
   // had; the unknown, unpriced long tail (mostly airdropped spam) is not shown.

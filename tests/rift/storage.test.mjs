@@ -521,6 +521,53 @@ test('nothing is written while storage can\u2019t be read, even a value that can
   assert.equal(full.storageFailing(), true);
 });
 
+test('while storage can\u2019t be read, a change shows on the page and only real changes wait', async () => {
+  // Round 4, Low: changes were carried without being shown (a Bitcoin payment seen kept the QR code up), and every
+  // poll and retry piled up.
+  const x = order();
+  const h = harness(x);
+  const t = h.tab();
+  t.loadOrders(); // this page's view
+  h.setRaw('garbled');
+  h.refuseKey('iaero.rift.orders.v1.unreadable');
+  assert.equal(await t.patchOrder(x.id, { notify: true }), 'failed');
+  assert.equal(t.loadOrders()[0]?.notify, true, 'shown on this page');
+  for (let i = 0; i < 20; i++) { await t.patchOrder(x.id, { notify: true }); await h.runTimers(); }
+  assert.equal(t.unsavedChanges(), 1, 'no-ops and retries are not carried');
+  assert.equal(h.get('iaero.rift.orders.v1'), 'garbled', 'and nothing is written over it');
+});
+
+test('Rift expiring an order settles nothing about a payment in doubt', async () => {
+  // Round 4, Medium: "expired" cleared payUnknown, and a hash that never landed then read as "a payment was sent".
+  const x = { ...order(), payUnknown: true, depositTxHash: HASH, depositSentAt: Date.now() - 600_000, statusTimes: { awaiting_deposit: Date.now() - 1000 } };
+  const h = harness(x);
+  const t = h.tab();
+  await t.applyStatusUpdate(x.id, { status: 'expired', rawStatus: 'expired', amountOut: null });
+  assert.equal(h.read().payUnknown, true, 'still in doubt');
+  assert.equal(orderState.paidButExpired(h.read(), Date.now()), false, 'not "a payment was sent"');
+  const funded = harness({ ...x });
+  await funded.tab().applyStatusUpdate(x.id, { status: 'funded', rawStatus: 'funded', amountOut: null });
+  assert.equal(funded.read().payUnknown, false, 'a deposit Rift saw settles it');
+});
+
+test('every HyperCore transfer signed for an order uses one nonce, fixed at its first claim', async () => {
+  // Round 4, suspected: a refused first post let a new signature follow; with one nonce, at most one can execute.
+  const x = { ...order(), sourceChain: 'hyperliquid', token: { symbol: 'USDC', decimals: 8, asset: 'hyperliquid.usdc' }, fromAmountRaw: '100000000' };
+  const h = harness(x);
+  const t = h.tab();
+  const first = await t.claimPayment(x.id, owner, { hlAction: undefined });
+  assert.equal(typeof first.hlNonce, 'number');
+  await t.patchPaymentAttempt(x.id, first.payAttemptId, { payRequestedAt: undefined, depositFailed: true, depositFailReason: 'cancelled' });
+  const second = await t.claimPayment(x.id, owner, { hlAction: undefined });
+  assert.equal(second.hlNonce, first.hlNonce, 'kept');
+  // A transfer Rift already has a payment for is never posted ('paid'), nor one past its window ('closed').
+  const action = { destination: x.depositAddress, token: 'USDC:0x6d', amount: '1', time: second.hlNonce, r: '0x1', s: '0x2', v: 27 };
+  await t.patchPaymentAttempt(x.id, second.payAttemptId, { hlAction: action });
+  await t.applyStatusUpdate(x.id, { status: 'funded', rawStatus: 'funded', amountOut: null });
+  assert.equal(await t.beginHyperPost(x.id, second.payAttemptId, action), 'paid');
+  assert.equal(h.read().hlPostedAt, undefined);
+});
+
 test('poll stamps hold while storage refuses writes', () => {
   const h = harness(order());
   const a = h.tab();

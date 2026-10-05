@@ -2,8 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  HYPERCORE_TOKENS, exchangeOutcome, hyperCoreHoldings, hyperCoreToken, parseSpotBalances, spotSendRequest, spotSendToken,
-  spotSendTypedData,
+  HYPERCORE_TOKENS, exchangeOutcome, hyperCoreHoldings, hyperCoreToken, parseSpotBalances, spotSendRequest, spotSendToken, spotSendTypedData,
 } from '../../src/lib/rift/hypercore.ts';
 
 test('HyperCore spot balances: only the tokens Rift routes, minus what orders hold', () => {
@@ -73,4 +72,15 @@ test('portfolio margin: borrowed USDC is not a holding; Hyperliquid caps what ca
   assert.deepEqual(rows.map(r => [r.token.symbol, r.availableRaw]), [['HYPE', 30050000000n], ['UBTC', 3208182284n]], 'HYPE capped at what can leave');
   assert.equal(usdcForFee(json), 45123.29019999, 'the fee can come from margin');
   assert.equal(usdcForFee({ balances: [{ coin: 'USDC', token: 0, total: '0.5', hold: '0' }] }), 0.5);
+});
+
+test('HyperCore prices and limits that make no sense are ignored', () => {
+  // Round 4, Lows: a price of 1e300 (or Infinity) listed HyperCore at absurd values or dropped it; a negative
+  // "available after maintenance" was ignored rather than read as nothing available.
+  const hype = HYPERCORE_TOKENS.find(t => t.symbol === 'HYPE');
+  const [h] = hyperCoreHoldings([{ token: hype, availableRaw: 10n ** 9n }], { [hype.llamaId]: 1e300 });
+  assert.equal(h.priceUsd, 0);
+  assert.equal(h.valueUsd, 0);
+  const capped = parseSpotBalances({ balances: [{ coin: 'HYPE', token: 150, total: '10', hold: '0' }], tokenToAvailableAfterMaintenance: [[150, '-5']] });
+  assert.equal(capped.length, 0, 'nothing can leave');
 });

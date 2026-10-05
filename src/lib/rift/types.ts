@@ -100,6 +100,11 @@ export interface StoredOrder {
   /** The payment transaction's nonce once seen on-chain: if the account's nonce passes it without this hash
    *  being mined, the payment was replaced (a speed-up or a cancel), even after a reload. */
   depositNonce?: number;
+  /** The lowest pending nonce of an attempt that ended "failed before anything was sent": a transaction from the
+   *  account since then may have been that payment after all, so the order is not paid again from here. */
+  preSendNonce?: number;
+  /** HyperCore: the one nonce (`time`) every transfer signed for this order uses, so at most one can ever execute. */
+  hlNonce?: number;
   depositSentAt?: number;
   depositConfirmedAt?: number;
   /** depositSentAt is an estimate (the payment was found by a check, or seen late), not when it was sent. */

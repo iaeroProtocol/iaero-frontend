@@ -95,9 +95,9 @@ const text = (v: unknown) => (typeof v === 'string' ? v : '');
 const numeric = (v: unknown) => (typeof v === 'string' || typeof v === 'number' ? Number(v) : NaN);
 /** A USD price worth using: finite, positive and below what any token is worth (a broken or hostile source can say
  *  anything, and an infinite value would break the page). 0: unpriced. */
-const usdPrice = (v: unknown) => { const n = numeric(v); return Number.isFinite(n) && n > 0 && n < 1e9 ? n : 0; };
+export const usdPrice = (v: unknown) => { const n = numeric(v); return Number.isFinite(n) && n > 0 && n < 1e9 ? n : 0; };
 /** A holding's USD value, or 0 when it can't be a real one (an absurd balance: more than all the money there is). */
-const usdValue = (price: number, raw: string, decimals: number) => { const v = price * rawToNumber(raw, decimals); return Number.isFinite(v) && v < 1e15 ? v : 0; };
+export const usdValue = (price: number, raw: string, decimals: number) => { const v = price * rawToNumber(raw, decimals); return Number.isFinite(v) && v < 1e15 ? v : 0; };
 
 /** A Blockscout token row's contract address, lowercase ('' when it has none). */
 export function tokenRowAddress(row: unknown): string {

@@ -144,8 +144,10 @@ function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: bool
   const run = (): WriteResult => {
     const stored = current();
     if (!stored) {
-      // Storage can't be read: nothing is written over what it holds, unseen. The change waits for it.
-      if (keepOnFailure) unsaved.push(change);
+      // Storage can't be read: nothing is written over what it holds, unseen. A change that changes something is
+      // shown on this page (over its last view) and waits, carried, for storage.
+      const seen = change(memory ?? []);
+      if (seen && keepOnFailure) { unsaved.push(change); memory = seen; }
       writeFailed = true;
       retryLater();
       window.dispatchEvent(new Event(EVENT));
@@ -249,6 +251,8 @@ export async function claimPayment(
         depositFailed: false, depositFailReason: undefined, depositTxHash: undefined, depositNonce: undefined,
         depositSentAt: undefined, depositConfirmedAt: undefined, depositReceivedRaw: undefined, startEstimated: undefined,
         pastTxHashes: prev.depositTxHash ? [...(prev.pastTxHashes ?? []), prev.depositTxHash].slice(-5) : prev.pastTxHashes,
+        // HyperCore: one nonce for every transfer signed for this order, fixed at its first claim (under this lock).
+        ...(sourceKindOf(prev.sourceChain) === 'hypercore' ? { hlNonce: prev.hlNonce ?? prev.hlAction?.time ?? Date.now() } : {}),
         ...extra,
       };
       const next = list.slice();
@@ -290,15 +294,18 @@ export async function patchPaymentAttempt(id: string, attemptId: string, patch: 
  *  through). */
 export async function beginHyperPost(
   id: string, attemptId: string, action: { time: number; r: string },
-): Promise<{ postedBefore: boolean } | 'closed' | null> {
-  let holds = false, postedBefore = false, closed = false;
+): Promise<{ postedBefore: boolean } | 'closed' | 'paid' | null> {
+  let holds = false, postedBefore = false, closed = false, paid = false;
   const r = await patchOrder(id, prev => {
     holds = prev.payAttemptId === attemptId && prev.hlAction?.time === action.time && prev.hlAction.r === action.r;
     postedBefore = prev.hlPostedAt !== undefined;
-    // Never once the order's pay window has closed (a signature can come back from a forgotten wallet prompt).
-    closed = holds && !payWindowOpen(prev, 'hypercore', Date.now());
-    return holds && !closed ? { hlPostedAt: prev.hlPostedAt ?? Date.now() } : {};
+    // Rift already has a payment for it ('paid'); or its pay window has closed (a signature can come back from a
+    // forgotten wallet prompt): never posted then.
+    paid = holds && prev.status !== 'awaiting_deposit';
+    closed = holds && !paid && !payWindowOpen(prev, 'hypercore', Date.now());
+    return holds && !closed && !paid ? { hlPostedAt: prev.hlPostedAt ?? Date.now() } : {};
   });
+  if (paid) return 'paid';
   if (closed) return 'closed';
   return holds && r !== 'failed' ? { postedBefore } : null;
 }
@@ -329,8 +336,9 @@ export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()):
       statusTimes: isNew ? { ...prev.statusTimes, [u.status]: now } : prev.statusTimes,
       statusLate: late ? { ...prev.statusLate, [u.status]: true } : prev.statusLate,
       lastPolledAt: isNew ? now : stamp,
-      // Rift has seen a deposit: whether the last payment attempt went out is no longer in doubt.
-      ...(u.status !== 'awaiting_deposit' ? { payUnknown: false, payRequestedAt: undefined } : {}),
+      // Rift has seen a deposit: whether the last payment attempt went out is no longer in doubt. Not on "expired":
+      // Rift saw none, which settles nothing about a payment in doubt (it must not read as "a payment was sent").
+      ...(u.status !== 'awaiting_deposit' && u.status !== 'expired' ? { payUnknown: false, payRequestedAt: undefined } : {}),
     };
   });
 }
@@ -398,3 +406,6 @@ export function useStoredOrders(): StoredOrder[] {
   }, [refresh]);
   return orders;
 }
+
+/** Try now to save what this page carries (storage working again: a refresh must not drop it). */
+export const saveCarriedNow = () => mutate(() => null);

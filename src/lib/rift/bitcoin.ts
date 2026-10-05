@@ -96,15 +96,16 @@ export interface BtcDeposits { payments: BtcPayment[]; totalSats: bigint }
 
 /** A look at an order's Bitcoin address, as the order card and the background watcher take it (order-state.ts
  *  btcLookPatch): its payments; or 'known' when it lists none although a payment was recorded, if mempool.space
- *  still knows that transaction (its address index can lag behind its own transactions). Throws when it can't be
- *  read, or can't say. */
+ *  still knows that transaction (its address index can lag behind its own transactions). `/tx/<id>` answers 404
+ *  for a transaction it doesn't know (`/tx/<id>/status` answers 200 for anything). Throws when it can't be read,
+ *  or can't say. */
 export async function lookAtBtcAddress(address: string, recordedTxid?: string): Promise<BtcDeposits | 'known'> {
   const d = await findBtcDeposits(address);
   if (d.payments.length || !recordedTxid) return d;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), MEMPOOL_TIMEOUT_MS);
   try {
-    const res = await fetch(`${MEMPOOL}/tx/${encodeURIComponent(recordedTxid)}/status`, { signal: controller.signal });
+    const res = await fetch(`${MEMPOOL}/tx/${encodeURIComponent(recordedTxid)}`, { signal: controller.signal });
     if (res.status === 404) return d; // gone: dropped, or replaced by a transaction paying elsewhere
     if (!res.ok) throw new Error(`mempool.space ${res.status}`);
     return 'known';

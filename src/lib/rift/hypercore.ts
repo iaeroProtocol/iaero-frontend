@@ -78,8 +78,9 @@ export function parseSpotBalances(json: unknown): { token: HyperCoreToken; avail
     let available = total - hold;
     const limit = limits?.get(token.index);
     if (limit !== undefined) {
-      const cap = decimalToUnits(limit, token.decimals);
-      if (cap !== null && cap < available) available = cap;
+      // A limit that isn't a plain amount (negative, malformed) allows nothing to leave.
+      const cap = decimalToUnits(limit, token.decimals) ?? 0n;
+      if (cap < available) available = cap;
     }
     if (available > 0n) out.push({ token, availableRaw: available });
   }
@@ -101,11 +102,13 @@ export function usdcForFee(json: unknown): number {
  *  balance whose price is missing is still listed, unvalued. */
 export function hyperCoreHoldings(balances: { token: HyperCoreToken; availableRaw: bigint }[], prices: Record<string, number>): Holding[] {
   return balances.map(({ token, availableRaw }) => {
-    const price = prices[token.llamaId];
-    const priceUsd = typeof price === 'number' && price > 0 ? price : 0;
+    const p = prices[token.llamaId];
+    // Finite, positive and below what any token is worth (as holdings.ts usdPrice): a broken source can say anything.
+    const priceUsd = typeof p === 'number' && Number.isFinite(p) && p > 0 && p < 1e9 ? p : 0;
+    const value = priceUsd * unitsToNumber(availableRaw, token.decimals);
     return {
       chain: 'hyperliquid' as const, asset: token.asset, symbol: token.symbol, name: token.name, decimals: token.decimals,
-      balanceRaw: availableRaw.toString(), priceUsd, valueUsd: priceUsd * unitsToNumber(availableRaw, token.decimals),
+      balanceRaw: availableRaw.toString(), priceUsd, valueUsd: Number.isFinite(value) && value < 1e15 ? value : 0,
       ...(priceUsd ? {} : { priceMissing: true }),
     };
   });

@@ -26,6 +26,11 @@ export interface RouteEstimate {
 
 export interface RouteLike { venue: string; from: string; to: string }
 
+/** `rec[key]` if `rec` defines it itself: names from Rift's answers ("constructor", "__proto__") are never looked up
+ *  on Object.prototype. */
+const own = <T>(rec: Readonly<Record<string, T>>, key: string): T | undefined =>
+  (Object.prototype.hasOwnProperty.call(rec, key) ? rec[key] : undefined);
+
 const CHAIN_NAMES: Record<string, string> = {
   ethereum: 'Ethereum', arbitrum: 'Arbitrum', base: 'Base', bitcoin: 'Bitcoin',
   hyperliquid: 'Hyperliquid', ink: 'Ink', robinhood: 'Robinhood',
@@ -33,11 +38,11 @@ const CHAIN_NAMES: Record<string, string> = {
 
 const chainOf = (id: string) => (id.includes('.') ? id.slice(0, id.indexOf('.')).toLowerCase() : '');
 export const chainName = (chainKey: string) =>
-  CHAIN_NAMES[chainKey] ?? (chainKey ? chainKey[0].toUpperCase() + chainKey.slice(1) : 'unknown chain');
+  own(CHAIN_NAMES, chainKey) ?? (chainKey ? chainKey[0].toUpperCase() + chainKey.slice(1) : 'unknown chain');
 
 /** `base.usdc` -> USDC; `base.0x8103...` -> a known symbol or a short address. */
 export function symbolOf(asset: string, known: Record<string, string> = {}): string {
-  const hit = known[asset] ?? known[asset.toLowerCase()];
+  const hit = own(known, asset) ?? own(known, asset.toLowerCase());
   if (hit) return hit;
   const id = asset.includes('.') ? asset.slice(asset.indexOf('.') + 1) : asset;
   if (/^0x[0-9a-fA-F]{40}$/.test(id)) return `${id.slice(0, 6)}…${id.slice(-4)}`;
@@ -84,7 +89,7 @@ const VENUE_NAMES: Record<string, string> = {
   transit: 'Transit', lifi_fast: 'LI.FI', lifi_standard: 'LI.FI', kyberswap: 'KyberSwap', velora: 'Velora',
   okx: 'OKX', flytrade: 'Fly', aave: 'Aave', morpho: 'Morpho', nordstern: 'Nordstern', uniswap: 'Uniswap',
 };
-export const venueName = (venue: string) => VENUE_NAMES[venue] ?? venue;
+export const venueName = (venue: string) => own(VENUE_NAMES, venue) ?? venue;
 
 export function describeStep(step: RouteLike, known: Record<string, string> = {}): { kind: 'bridge' | 'swap'; label: string; detail: string } {
   const from = chainOf(step.from), to = chainOf(step.to);
@@ -108,7 +113,7 @@ export function estimateRoute(sourceChain: string, route: RouteLike[], known: Re
   }];
   route.forEach((s, i) => {
     const d = describeStep(s, known);
-    const [t, w] = VENUE_TIMING[s.venue] ?? (d.kind === 'swap' ? SWAP_TIMING : UNKNOWN_BRIDGE_TIMING);
+    const [t, w] = own(VENUE_TIMING, s.venue) ?? (d.kind === 'swap' ? SWAP_TIMING : UNKNOWN_BRIDGE_TIMING);
     steps.push({ key: `step-${i}`, kind: d.kind, label: d.label, detail: d.detail, typicalSec: t, slowSec: w });
   });
   steps.push({

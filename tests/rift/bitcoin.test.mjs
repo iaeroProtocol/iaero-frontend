@@ -59,8 +59,10 @@ test('an address that stops listing a recorded payment is checked against the tr
   const TXID = 'ab'.repeat(32);
   const real = globalThis.fetch;
   const run = async status => {
-    globalThis.fetch = async url => (String(url).includes(`/tx/${TXID}/status`)
-      ? { ok: status === 200, status, json: async () => ({ confirmed: false }) }
+    // As mempool.space answers: /tx/<id> is 404 for a transaction it doesn't know, while /tx/<id>/status is 200
+    // {"confirmed":false} for anything (round 4: the look must not rely on it).
+    globalThis.fetch = async url => (String(url).endsWith(`/tx/${TXID}/status`) ? { ok: true, status: 200, json: async () => ({ confirmed: false }) }
+      : String(url).endsWith(`/tx/${TXID}`) ? { ok: status === 200, status, json: async () => ({ txid: TXID, status: { confirmed: false } }) }
       : { ok: true, status: 200, json: async () => [] });
     try { return await lookAtBtcAddress(address, TXID); } finally { globalThis.fetch = real; }
   };
