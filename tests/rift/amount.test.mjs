@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { localeDecimalSep, parseAmountInput } from '../../src/lib/rift/amount.ts';
+import { localeDecimalSep, parseAmountInput, toInputText } from '../../src/lib/rift/amount.ts';
 
 test('amounts are read the way they were meant', () => {
   const v = (t, d = 18) => parseAmountInput(t, d).value;
@@ -51,4 +51,14 @@ test('nothing is rewritten silently', () => {
   assert.equal(e('0.1234567', 6), 'At most 6 decimal places');
   assert.equal(e('1.5', 0), 'Whole numbers only');
   assert.equal(parseAmountInput('0.123456', 6).value, '0.123456');
+});
+
+test('amounts the page writes itself read back as the same number in every locale', () => {
+  for (const sep of ['.', ',']) {
+    for (const [decimal, decimals] of [['12.345', 6], ['250.125', 18], ['0.5', 18], ['1234.5678', 8], ['1000', 6], ['0.000001', 6]]) {
+      assert.equal(parseAmountInput(toInputText(decimal, sep), decimals, sep).value, decimal, `${decimal} with "${sep}"`);
+    }
+  }
+  assert.equal(toInputText('12.345', ','), '12,345');
+  assert.equal(toInputText('12.345', '.'), '12.345');
 });

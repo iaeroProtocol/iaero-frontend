@@ -112,6 +112,12 @@ export interface StoredOrder {
   /** HyperCore: the signed transfer of the latest attempt. A retry re-posts this same transfer, which
    *  Hyperliquid accepts at most once (its nonce), instead of signing a second one. */
   hlAction?: { destination: string; token: string; amount: string; time: number; r: string; s: string; v: number };
+  /** HyperCore: when that signed transfer was first posted. A refusal when it is posted again may only mean the
+   *  first post went through, so it is not read as "nothing was sent". */
+  hlPostedAt?: number;
+  /** The user hid this order once its pay window had closed and a check found no payment. It stays tracked, at
+   *  the idle rate, and comes back if Rift reports a payment. */
+  hiddenAt?: number;
   /** Bitcoin payments to the deposit address, observed on mempool.space. `missing`: seen before, no longer
    *  found (dropped or replaced); `seenLate`: first seen already confirmed, so firstSeenAt is not the send time. */
   btc?: { txid?: string; confirmations?: number; firstSeenAt?: number; totalSats?: string; payments?: number; missing?: boolean; seenLate?: boolean };

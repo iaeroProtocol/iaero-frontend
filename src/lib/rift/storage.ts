@@ -6,7 +6,8 @@
 //   182 of 600 updates). Changes therefore apply asynchronously; await the returned promise when the next step
 //   reads the result.
 // - A copy is also kept in memory: if storage is full or blocked, the order stays tracked on this page and
-//   the page says so, instead of the order disappearing.
+//   the page says so, instead of the order disappearing. A write always starts from what storage holds now,
+//   never from that copy, so a tab whose save failed cannot undo another tab's payment record.
 // - Saved records are checked one by one (order-state.ts). Ones this version cannot read (written by a newer
 //   version, or damaged) are kept as they are, not erased by the next write.
 
@@ -28,6 +29,7 @@ const MAX_FOREIGN = 10;
 const POLL_STAMP_MS = 30_000;
 /** A status first seen after a gap this long was not watched live: its time is not when it happened. */
 const LATE_AFTER_MS = 150_000;
+const PROBE_KEY = 'iaero.rift.probe';
 
 let memory: StoredOrder[] | null = null;
 let foreign: unknown[] = [];
@@ -51,7 +53,7 @@ function readStorage(): StoredOrder[] | null {
 }
 
 export function loadOrders(): StoredOrder[] {
-  // After a failed write, this page's copy is newer than what storage holds.
+  // After a failed write, this page shows its own copy, which has what storage could not take.
   if (writeFailed && memory) return memory;
   const stored = readStorage();
   if (stored) memory = stored;
@@ -60,6 +62,29 @@ export function loadOrders(): StoredOrder[] {
 
 /** True while this browser is not saving orders (storage full or blocked). */
 export const storageFailing = () => writeFailed;
+
+/** Why this browser cannot pay orders safely, or null. Payments need Web Locks (tabs agree on who opens the
+ *  wallet) and storage that takes writes (the claim is saved before the wallet is asked). */
+export function paymentStorageProblem(): string | null {
+  if (typeof navigator === 'undefined' || !navigator.locks?.request) {
+    return 'This browser can’t coordinate payments between tabs (it has no Web Locks). Use an up-to-date browser.';
+  }
+  if (writeFailed) return 'This browser isn’t saving orders right now (its storage is full or blocked). Refresh after fixing it.';
+  try {
+    window.localStorage.setItem(PROBE_KEY, '1');
+    window.localStorage.removeItem(PROBE_KEY);
+  } catch {
+    return 'This browser’s storage is full or blocked, so orders can’t be tracked safely. Allow site storage and refresh.';
+  }
+  return null;
+}
+
+/** Ids of saved records this version cannot show (written by a newer version, or damaged). */
+export function unreadableOrderIds(): string[] {
+  return foreign
+    .map(x => (x && typeof x === 'object' ? (x as { id?: unknown }).id : undefined))
+    .filter((id): id is string => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id));
+}
 
 function saveOrders(list: StoredOrder[]): boolean {
   const capped = capOrders(list, MAX_ORDERS, Date.now());
@@ -74,23 +99,30 @@ function saveOrders(list: StoredOrder[]): boolean {
   return !writeFailed;
 }
 
-/** Read, change and save the list under the cross-tab lock. `change` returns null for "nothing to save". */
-function mutate(change: (list: StoredOrder[]) => StoredOrder[] | null): Promise<void> {
-  const run = () => {
-    const next = change(loadOrders());
-    if (next) saveOrders(next);
+/** What a change came to: written, nothing to write, or not written (storage refused it, or the lock could
+ *  not be had). */
+export type WriteResult = 'saved' | 'unchanged' | 'failed';
+
+/** Read, change and save the list under the cross-tab lock. `change` returns null for "nothing to save".
+ *  The change is applied to what storage holds now; this page's copy is used only when storage can't be read. */
+function mutate(change: (list: StoredOrder[]) => StoredOrder[] | null): Promise<WriteResult> {
+  const run = (): WriteResult => {
+    const stored = readStorage();
+    const next = change(stored ?? memory ?? []);
+    if (!next) {
+      if (stored && !writeFailed) memory = stored;
+      return 'unchanged';
+    }
+    return saveOrders(next) ? 'saved' : 'failed';
   };
   const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
-  if (!locks?.request) { run(); return Promise.resolve(); }
-  return locks.request(LOCK, run).then(() => undefined, () => {
-    // Writing without the lock could overwrite a payment claim made in another tab.
-    writeFailed = true;
-    window.dispatchEvent(new Event(EVENT));
-  });
+  if (!locks?.request) return Promise.resolve(run());
+  // Without the lock nothing is written: an unlocked write could undo a payment claim made in another tab.
+  return locks.request(LOCK, run).then(r => r, (): WriteResult => 'failed');
 }
 
 /** A new order first. An order already stored under the same id keeps what this browser learned about it. */
-export function upsertOrder(order: StoredOrder): Promise<void> {
+export function upsertOrder(order: StoredOrder): Promise<WriteResult> {
   return mutate(list => {
     const prev = list.find(o => o.id === order.id);
     return [prev ? { ...order, ...prev } : order, ...list.filter(o => o.id !== order.id)];
@@ -99,7 +131,7 @@ export function upsertOrder(order: StoredOrder): Promise<void> {
 
 /** Change one order. Nothing is written when nothing changes, and statuses only move forward (a late poll
  *  from another tab can land after a newer one): order-state.ts canMoveTo. */
-export function patchOrder(id: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>)): Promise<void> {
+export function patchOrder(id: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>)): Promise<WriteResult> {
   return mutate(list => {
     const i = list.findIndex(o => o.id === id);
     if (i < 0) return null;
@@ -152,13 +184,35 @@ export async function claimPayment(id: string, owner: string, extra: Partial<Sto
   }
 }
 
+/** What became of a change to one payment attempt: also `superseded` (another tab started a newer attempt)
+ *  and `missing` (the order is no longer in this browser). */
+export type AttemptWrite = WriteResult | 'superseded' | 'missing';
+
 /** A late wallet response or heartbeat must not change a newer attempt from another tab. */
-export function patchPaymentAttempt(id: string, attemptId: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>)): Promise<void> {
-  return patchOrder(id, prev => prev.payAttemptId === attemptId ? (typeof patch === 'function' ? patch(prev) : patch) : {});
+export async function patchPaymentAttempt(id: string, attemptId: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>)): Promise<AttemptWrite> {
+  let found = 'missing' as 'current' | 'superseded' | 'missing';
+  const r = await patchOrder(id, prev => {
+    if (prev.payAttemptId !== attemptId) { found = 'superseded'; return {}; }
+    found = 'current';
+    return typeof patch === 'function' ? patch(prev) : patch;
+  });
+  return r === 'failed' || found === 'current' ? r : found;
+}
+
+/** Just before a HyperCore transfer is posted, under the lock: whether this attempt is still the order's
+ *  current one with exactly this saved transfer. Records that it is being posted, so a later refusal of the same
+ *  transfer is not taken to mean that nothing moved (the first post may have gone through). */
+export async function beginHyperPost(id: string, attemptId: string, action: { time: number; r: string }): Promise<boolean> {
+  let current = false;
+  const r = await patchOrder(id, prev => {
+    current = prev.payAttemptId === attemptId && prev.hlAction?.time === action.time && prev.hlAction.r === action.r;
+    return current ? { hlPostedAt: prev.hlPostedAt ?? Date.now() } : {};
+  });
+  return current && r !== 'failed';
 }
 
 /** Record a status poll: the status, when it was first seen (and whether that was live), the amount out. */
-export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()): Promise<void> {
+export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()): Promise<WriteResult> {
   markPolled(id, now);
   return patchOrder(id, prev => {
     const stamp = !prev.lastPolledAt || now - prev.lastPolledAt > POLL_STAMP_MS ? now : prev.lastPolledAt;
@@ -181,7 +235,7 @@ export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()):
   });
 }
 
-export function removeOrders(ids: string[]): Promise<void> {
+export function removeOrders(ids: string[]): Promise<WriteResult> {
   return mutate(list => (list.some(o => ids.includes(o.id)) ? list.filter(o => !ids.includes(o.id)) : null));
 }
 

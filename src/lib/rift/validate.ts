@@ -20,9 +20,13 @@ export const SOURCE_ASSET_RE = /^(ethereum\.eth|arbitrum\.eth|base\.eth|bitcoin\
 export const AMOUNT_RE = /^(?=.*[1-9])\d{1,24}(\.\d{1,18})?$/;
 export const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
-/** The destination must be the actual iAERO contract. A formatted ticker alone is not proof of its address. */
-export const isIaeroOnBase = (asset: string, destination: string) =>
-  asset.toLowerCase() === destination.toLowerCase();
+/** The destination must be the actual iAERO contract: by address, or by a name known to stand for that address
+ *  (`names`: Rift's published list, and names learned from Rift's raw answers, names.ts). A ticker alone is not
+ *  proof of the contract. */
+export const isIaeroOnBase = (asset: string, destination: string, names: Readonly<Record<string, string>> = {}) => {
+  const a = asset.toLowerCase(), d = destination.toLowerCase();
+  return a === d || (chainOf(a) === 'base' && chainOf(d) === 'base' && names[a] === d.slice(d.indexOf('.') + 1));
+};
 
 const obj = (v: unknown, what: string): Record<string, unknown> => {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(`Rift returned an invalid ${what}`);
@@ -106,11 +110,13 @@ export function parseQuote(json: unknown, expect: QuoteExpectation): RiftQuote {
     delivery: o.delivery && typeof o.delivery === 'object' ? (o.delivery as RiftQuote['delivery']) : undefined,
   };
   if (!isUuid(q.id)) throw new Error('Rift quote id is not a UUID');
-  if (!isIaeroOnBase(q.to, expect.destination)) throw new Error('Rift quote does not deliver iAERO');
+  if (!isIaeroOnBase(q.to, expect.destination, expect.source?.names)) throw new Error('Rift quote does not deliver iAERO');
   if (chainOf(q.from) !== expect.fromChain) throw new Error('Rift quote is for a different source chain');
   if (expect.source && !sameSourceAsset(q.from, expect.source.fromAsset, expect.source.names)) throw new Error('Rift quote is for a different token');
   if (!sameAmount(q.from_amount, expect.fromAmount)) throw new Error('Rift quote is for a different amount');
-  if (!Number.isFinite(Number(q.estimated_amount_out)) || !(Number(q.estimated_amount_out) > 0)) throw new Error('Rift quote has no output');
+  // A plain decimal, as an order saves it (order-state.ts): "1.2e-7" or "+61.9" would be dropped when read back.
+  if (!/^\d+(\.\d+)?$/.test(q.estimated_amount_out) || !Number.isFinite(Number(q.estimated_amount_out))
+    || !(Number(q.estimated_amount_out) > 0)) throw new Error('Rift quote has no output');
   if (Number.isNaN(Date.parse(q.expires_at))) throw new Error('Rift quote has no valid expiry');
   return q;
 }
@@ -145,7 +151,7 @@ export function parseOrder(json: unknown, expect: OrderExpectation): RiftOrder {
   };
   if (!isUuid(order.id)) throw new Error('Rift order id is not a UUID');
   if (order.quote_id !== expect.quoteId) throw new Error('Rift order is for a different quote');
-  if (!isIaeroOnBase(order.to, expect.destination)) throw new Error('Rift order does not deliver iAERO');
+  if (!isIaeroOnBase(order.to, expect.destination, expect.source?.names)) throw new Error('Rift order does not deliver iAERO');
   if (order.to_address.toLowerCase() !== expect.toAddress.toLowerCase()) throw new Error('Rift order delivers to a different wallet');
   if (chainOf(order.from) !== expect.fromChain) throw new Error('Rift order is for a different source chain');
   if (expect.source && !sameSourceAsset(order.from, expect.source.fromAsset, expect.source.names)) throw new Error('Rift order is for a different token');

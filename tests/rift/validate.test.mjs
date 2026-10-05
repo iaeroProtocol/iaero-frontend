@@ -52,8 +52,17 @@ test('a real quote passes; a quote for another destination, chain or amount is r
   assert.throws(() => parseQuote({ ...quote(), id: 'nope' }, { destination: DEST, fromChain: 'ethereum', fromAmount: '0.1' }), /UUID/);
   // Rift may echo a token by ticker even when it was requested by address: only the chain is compared.
   assert.ok(parseQuote({ ...quote(), from: 'ethereum.usdc' }, { destination: DEST, fromChain: 'ethereum', fromAmount: '0.10' }));
-  // A ticker alone cannot prove which contract Rift would deliver.
+  // A ticker alone cannot prove which contract Rift would deliver; a name known to stand for its address can.
   assert.throws(() => parseQuote({ ...quote(), to: 'base.iAERO' }, { destination: DEST, fromChain: 'ethereum', fromAmount: '0.1' }), /does not deliver iAERO/);
+  const names = { 'base.iaero': DEST.slice(5) };
+  assert.ok(parseQuote({ ...quote(), to: 'base.iAERO' }, { destination: DEST, fromChain: 'ethereum', fromAmount: '0.1', source: { fromAsset: 'ethereum.eth', names } }));
+  assert.throws(() => parseQuote({ ...quote(), to: 'base.iaero' }, {
+    destination: DEST, fromChain: 'ethereum', fromAmount: '0.1', source: { fromAsset: 'ethereum.eth', names: { 'base.iaero': '0x2222222222222222222222222222222222222222' } },
+  }), /does not deliver iAERO/, 'a name standing for another contract');
+  // The estimate is saved with the order, which only keeps plain decimals.
+  for (const out of ['1.2e-7', '+61.9', '61.', '0']) {
+    assert.throws(() => parseQuote({ ...quote(), estimated_amount_out: out }, { destination: DEST, fromChain: 'ethereum', fromAmount: '0.1' }), /no output/, out);
+  }
 });
 
 test('an order is accepted only if it delivers iAERO to this wallet, for this quote and amount', () => {

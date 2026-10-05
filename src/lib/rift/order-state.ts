@@ -63,13 +63,20 @@ export function canPay(o: StoredOrder, kind: SourceKind, now: number): boolean {
   return s === 'none' || s === 'failed';
 }
 
-/** An unpaid order past its pay window: nothing was sent, and it can only expire. */
+/** An unpaid order past its pay window: nothing was sent, and it can only expire. Also one the user hid after
+ *  a check found no payment: its outcome was never proven, but it is treated as out of date (and still polled). */
 export function isAbandoned(o: StoredOrder, now: number): boolean {
   const kind = KIND_OF[o.sourceChain];
   if (o.status !== 'awaiting_deposit' || payWindowOpen(o, kind, now) || o.btc?.txid) return false;
   const s = payState(o, now);
-  return s === 'none' || s === 'failed';
+  return s === 'none' || s === 'failed' || (s === 'unknown' && !!o.hiddenAt);
 }
+
+/** Whether an order whose payment is in doubt may be hidden: its pay window has closed and nothing is waiting on
+ *  a wallet. (The card offers it only after a check found no payment.) */
+export const canHide = (o: StoredOrder, now: number) =>
+  o.status === 'awaiting_deposit' && KIND_OF[o.sourceChain] !== 'bitcoin' && !payWindowOpen(o, KIND_OF[o.sourceChain], now)
+  && payState(o, now) === 'unknown';
 
 /** The payment facts the progress phases are computed from (timing.ts phaseOf), the same everywhere. */
 export function phaseInput(o: StoredOrder, kind: SourceKind) {
@@ -146,7 +153,7 @@ function tokenMatchesSource(chain: SourceChainKey, token: StoredOrder['token']):
 /** Optional fields that must have their type when present; a wrong one is dropped, not the order. */
 const OPTIONAL_NUMBERS = [
   'payRequestedAt', 'payAttemptAt', 'payNonce', 'depositNonce', 'depositSentAt', 'depositConfirmedAt', 'lastPolledAt',
-  'deliveredAtChain', 'marketUsdIn', 'marketIaeroUsd', 'gasDeskUsd',
+  'deliveredAtChain', 'marketUsdIn', 'marketIaeroUsd', 'gasDeskUsd', 'hlPostedAt', 'hiddenAt',
 ] as const;
 const OPTIONAL_UINTS = ['depositReceivedRaw', 'baseFromBlock', 'deliveryScannedTo'] as const;
 const OPTIONAL_DECIMALS = ['expectedOut', 'amountOut'] as const;

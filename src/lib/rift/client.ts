@@ -7,9 +7,10 @@
 // validated (validate.ts) before the app acts on it.
 //
 // Rift allows a browser about 10 calls a minute (measured, not documented). Every call is logged, across tabs,
-// so background calls give way: status polls go only while fewer than 8 calls were made in the last minute,
-// route checks while fewer than 5 and at most one per 15 s, and after a 429 both stop for a minute. Calls the
-// user is waiting on (quotes, orders, "Check payment") always go.
+// so background calls give way: background status polls go only while fewer than 8 calls were made in the
+// last minute, the order card's own polls while fewer than 6 (so a fast-polling card leaves the background some
+// room), route checks while fewer than 5 and at most one per 15 s, and after a 429 all stop for a minute.
+// Calls the user is waiting on (quotes, orders, "Check payment") always go.
 
 import { RIFT_DESTINATION, RIFT_INTEGRATOR_ID } from './config';
 import { RiftApiError, classifyRiftError } from './errors';
@@ -23,11 +24,12 @@ const TIMEOUT_MS = 25_000;
 
 // --- The shared call budget ---
 
-/** Who is calling: the user (always goes), a status poll, or a route check (lowest). */
-export type RiftCallKind = 'user' | 'poll' | 'probe';
+/** Who is calling: the user (always goes), a background status poll, the order card's poll, or a route check
+ *  (lowest). */
+export type RiftCallKind = 'user' | 'poll' | 'track' | 'probe';
 const BUDGET_KEY = 'iaero.rift.calls.v1';
 const WINDOW_MS = 60_000;
-const LIMIT: Record<Exclude<RiftCallKind, 'user'>, number> = { poll: 8, probe: 5 };
+const LIMIT: Record<Exclude<RiftCallKind, 'user'>, number> = { poll: 8, track: 6, probe: 5 };
 const PROBE_SPACING_MS = 15_000;
 const PAUSE_AFTER_429_MS = 60_000;
 
@@ -98,18 +100,21 @@ async function call(path: string, init: { method?: 'GET' | 'POST'; body?: unknow
   return data;
 }
 
-/** A quote for `from_amount` of `from`, always into iAERO on Base. */
+/** A quote for `from_amount` of `from`, always into iAERO on Base. `raw` answers in base units with canonical
+ *  ids (`evm:42161.0x…`) and takes `from_amount` in base units; it is used only to learn token names (names.ts). */
 export async function fetchQuote(
-  body: { from: string; from_amount: string; quote_mode?: 'fast' | 'optimal' }, signal?: AbortSignal, kind: RiftCallKind = 'user',
+  body: { from: string; from_amount: string; quote_mode?: 'fast' | 'optimal'; format?: 'formatted' | 'raw' }, signal?: AbortSignal,
+  kind: RiftCallKind = 'user',
 ) {
   const from = body.from.trim();
+  const format = body.format ?? 'formatted';
   if (!SOURCE_ASSET_RE.test(from) || from.toLowerCase() === RIFT_DESTINATION) throw new RiftApiError(400, 'unsupported source asset');
-  if (!AMOUNT_RE.test(body.from_amount)) throw new RiftApiError(400, 'invalid amount');
+  if (!(format === 'raw' ? /^[1-9]\d{0,39}$/ : AMOUNT_RE).test(body.from_amount)) throw new RiftApiError(400, 'invalid amount');
   return call('/quote', {
     method: 'POST', signal, kind,
     body: {
       from, to: RIFT_DESTINATION, from_amount: body.from_amount, return_full_route: true,
-      quote_mode: body.quote_mode ?? 'optimal', format: 'formatted', integrator_id: RIFT_INTEGRATOR_ID,
+      quote_mode: body.quote_mode ?? 'optimal', format, integrator_id: RIFT_INTEGRATOR_ID,
     },
   });
 }

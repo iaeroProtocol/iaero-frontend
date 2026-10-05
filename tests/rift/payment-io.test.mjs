@@ -37,3 +37,10 @@ test('a short transfer or unsupported simulation cannot approve payment', async 
   assert.equal(await exports.transferDeliversInFull({ simulateCalls: async () => result(0n, 99n) }, TOKEN, OWNER, 100n, DEPOSIT), false);
   assert.equal(await exports.transferDeliversInFull({ simulateCalls: async () => { throw new Error('unsupported'); } }, TOKEN, OWNER, 100n, DEPOSIT), null);
 });
+
+test('a transfer that would fail is told apart from one that cannot be checked', async () => {
+  const failing = { results: [{ status: 'success', result: 0n }, { status: 'failure', error: new Error('reverted') }, { status: 'success', result: 0n }] };
+  assert.equal(await exports.transferDeliversInFull({ simulateCalls: async () => failing }, TOKEN, OWNER, 100n, DEPOSIT), 'reverts');
+  const returnsFalse = { results: [{ status: 'success', result: 0n }, { status: 'success', result: false }, { status: 'success', result: 0n }] };
+  assert.equal(await exports.transferDeliversInFull({ simulateCalls: async () => returnsFalse }, TOKEN, OWNER, 100n, DEPOSIT), 'reverts');
+});

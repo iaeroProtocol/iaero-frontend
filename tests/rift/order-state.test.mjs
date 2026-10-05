@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PAY_WINDOW_MS, canMoveTo, canPay, capOrders, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowOpen, phaseInput,
-  pendingByLeastRecentPoll, sanitizeOrder,
+  canHide, pendingByLeastRecentPoll, sanitizeOrder,
 } from '../../src/lib/rift/order-state.ts';
 
 const T0 = 1_790_930_000_000;
@@ -141,4 +141,17 @@ test('capping never drops an order in flight or one needing support; abandoned o
   assert.deepEqual(capOrders(list, 4, T0 + 1000).map(o => o.id), ['a', 'b', 'c', 'e']);
   assert.deepEqual(capOrders(list, 2, T0 + 1000).map(o => o.id), ['b', 'c', 'e'], 'over the cap rather than losing one in flight');
   assert.deepEqual(capOrders(list, 3, T0 + PAY_WINDOW_MS + 10).map(o => o.id), ['a', 'b', 'c'], 'e was never paid and its window closed');
+});
+
+test('an order in doubt can be hidden only after its window, and then counts as out of date', () => {
+  const late = T0 + PAY_WINDOW_MS + 1;
+  const unknown = order({ payUnknown: true });
+  assert.equal(canHide(unknown, T0 + 1000), false, 'still inside its window');
+  assert.equal(canHide(unknown, late), true);
+  assert.equal(canHide(order({ payRequestedAt: late - 1000 }), late), false, 'a wallet prompt is open');
+  assert.equal(canHide(order({ sourceChain: 'bitcoin', payUnknown: true }), late), false);
+  assert.equal(isAbandoned(unknown, late), false, 'not out of date until hidden');
+  assert.equal(isAbandoned(order({ payUnknown: true, hiddenAt: late }), late), true);
+  assert.equal(isAbandoned(order({ payUnknown: true, hiddenAt: late, status: 'funded' }), late), false, 'a payment turned up');
+  assert.equal(sanitizeOrder(order({ hiddenAt: 'yes', hlPostedAt: 'no' })).hiddenAt, undefined);
 });

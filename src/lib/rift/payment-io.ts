@@ -22,16 +22,19 @@ async function hlPost(path: '/info' | '/exchange', body: unknown): Promise<Respo
   }
 }
 
-/** The deposit address on an EVM chain: the paid token's balance, its nonce and its code. Throws if the chain
- *  cannot be read. */
-export async function evmDepositEvidence(client: PublicClient, o: Pick<StoredOrder, 'depositAddress' | 'token' | 'fromAmountRaw'>): Promise<Evidence> {
+/** The deposit address on an EVM chain: the paid token's balance, its nonce and its code, at `blockNumber` when
+ *  given (to compare with another read at the same block). Throws if the chain cannot be read. */
+export async function evmDepositEvidence(
+  client: PublicClient, o: Pick<StoredOrder, 'depositAddress' | 'token' | 'fromAmountRaw'>, blockNumber?: bigint,
+): Promise<Evidence> {
   const vault = o.depositAddress as Address;
+  const at = blockNumber === undefined ? { blockTag: 'latest' as const } : { blockNumber };
   const [balance, nonce, code] = await Promise.all([
     o.token.address
-      ? client.readContract({ address: o.token.address as Address, abi: erc20Abi, functionName: 'balanceOf', args: [vault] })
-      : client.getBalance({ address: vault }),
-    client.getTransactionCount({ address: vault, blockTag: 'latest' }),
-    client.getCode({ address: vault }),
+      ? client.readContract({ address: o.token.address as Address, abi: erc20Abi, functionName: 'balanceOf', args: [vault], ...at })
+      : client.getBalance({ address: vault, ...at }),
+    client.getTransactionCount({ address: vault, ...at }),
+    client.getCode({ address: vault, ...at }),
   ]);
   return judgeEvmDeposit({ balance, need: BigInt(o.fromAmountRaw), nonce, code });
 }
@@ -68,10 +71,13 @@ function randomAddress(): Address {
 /**
  * Would a transfer of `amount` deliver all of it? Simulated with eth_simulateV1 (nothing is signed or sent) to a
  * fresh address before an order exists, or the actual deposit address immediately before paying:
- * fee-on-transfer and rebasing tokens deliver less, which would leave the order underfunded. null when it can't be told (the node does not
- * simulate, or the transfer itself would fail, which the wallet then reports).
+ * fee-on-transfer and rebasing tokens deliver less, which would leave the order underfunded.
+ * 'reverts': the transfer itself would fail now (the balance moved, or the token blocks it); null: it can't be
+ * told (the node does not simulate, or did not answer).
  */
-export async function transferDeliversInFull(client: PublicClient, token: Address, owner: Address, amount: bigint, recipient?: Address): Promise<boolean | null> {
+export async function transferDeliversInFull(
+  client: PublicClient, token: Address, owner: Address, amount: bigint, recipient?: Address,
+): Promise<boolean | 'reverts' | null> {
   const probe = recipient ?? randomAddress();
   try {
     const { results } = await client.simulateCalls({
@@ -83,13 +89,18 @@ export async function transferDeliversInFull(client: PublicClient, token: Addres
       ],
     });
     const [before, sent, after] = results;
-    if (before.status !== 'success' || sent.status !== 'success' || after.status !== 'success') return null;
+    // A token that reports failure by returning false instead of reverting fails all the same.
+    if (sent.status !== 'success' || sent.result === false) return 'reverts';
+    if (before.status !== 'success' || after.status !== 'success') return null;
     return (after.result as bigint) - (before.result as bigint) >= amount;
   } catch {
     return null;
   }
 }
 
-/** The account's nonce: 'pending' counts transactions the node has seen but not mined. */
-export const accountNonce = (client: PublicClient, address: string, blockTag: 'pending' | 'latest') =>
-  client.getTransactionCount({ address: address as Address, blockTag });
+/** The account's nonce: 'pending' counts transactions the node has seen but not mined; a block number reads it
+ *  at that block. */
+export const accountNonce = (client: PublicClient, address: string, at: 'pending' | 'latest' | bigint) =>
+  typeof at === 'bigint'
+    ? client.getTransactionCount({ address: address as Address, blockNumber: at })
+    : client.getTransactionCount({ address: address as Address, blockTag: at });

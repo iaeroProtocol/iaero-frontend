@@ -32,7 +32,7 @@ import { accountNonce, evmDepositEvidence, hyperDepositEvidence } from '@/lib/ri
 import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, RIFT_SUPPORT_URL, SOURCE_CHAINS } from '@/lib/rift/config';
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
 import { costText, costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
-import { isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowMs, payWindowOpen, phaseInput } from '@/lib/rift/order-state';
+import { canHide, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowMs, payWindowOpen, phaseInput } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
 // The QR library loads only for Bitcoin payments.
@@ -114,9 +114,9 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
       const regular = order.status === 'frozen' ? 60_000 : staleRef.current ? 10 * 60_000
         : order.status === 'funded' || order.status === 'executing' ? 8000 : btcConfirming ? 30000 : paid ? 10000 : 20000;
       const every = Math.max(regular, document.hidden ? 60_000 : 0);
-      if (!polledWithin(order.id, every - 1000) && riftBudget('poll')) {
+      if (!polledWithin(order.id, every - 1000) && riftBudget('track')) {
         try {
-          const u = parseOrderUpdate(await getOrder(order.id, undefined, 'poll'), order.id);
+          const u = parseOrderUpdate(await getOrder(order.id, undefined, 'track'), order.id);
           if (stop) return;
           failures = 0;
           setPollFailures(0);
@@ -180,13 +180,16 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
             }
           }
           if (nonce !== undefined && round % 2 === 1) {
-            const mined = await accountNonce(sourcePublic, payer, 'latest');
+            // The account's nonce and the deposit address are read at one block: a node lagging behind the one
+            // that answered the nonce must not make a sped-up payment look replaced (and payable again).
+            const head = await sourcePublic.getBlockNumber();
+            const mined = await accountNonce(sourcePublic, payer, head);
             if (stop) return;
             if (mined > nonce) {
               const again = await receipt();
               if (stop) return;
               if (again) { await settle(again); return; }
-              const ev = await evmDepositEvidence(sourcePublic, order);
+              const ev = await evmDepositEvidence(sourcePublic, order, head);
               if (stop) return;
               if (ev === 'none') await ifCurrent({ depositFailed: true, depositFailReason: 'replaced' });
               // Sped up: the payment went out under a hash this page does not know.
@@ -308,6 +311,8 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
     payUnknown: false, payRequestedAt: undefined, depositFailed: false, depositFailReason: undefined, depositConfirmedAt: Date.now(),
     depositSentAt: prev.depositSentAt ?? prev.payAttemptAt ?? Date.now(), startEstimated: prev.startEstimated || !prev.depositSentAt,
   }));
+  /** Out of the way once its window has closed and a check found nothing; still tracked, at the idle rate. */
+  const hide = () => { void patchOrder(order.id, prev => (canHide(prev, Date.now()) ? { hiddenAt: Date.now() } : {})); };
   async function checkPayment(thenPay = false) {
     if (thenPay && !settlementAck) return;
     setChecking(true);
@@ -509,6 +514,11 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
             )}
             {wrongAccount ? (
               <div>This order delivers iAERO to <span className="font-mono">{short(order.toAddress)}</span>. Connect that wallet to pay it.</div>
+            ) : ps === 'unknown' && order.hiddenAt ? (
+              <>
+                <div>You hid this order after a check found no payment. It is still tracked: if a payment turns up, it continues here.</div>
+                {staleActions}
+              </>
             ) : ps === 'unknown' ? (
               <>
                 <div className="flex gap-2">
@@ -517,8 +527,11 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                 </div>
                 <div aria-live="polite" className="space-y-1 text-xs">
                   {checkSaid === 'nothing' && (windowOpen
-                    ? <div className="text-slate-300">Nothing has reached the deposit address.{kind === 'evm' ? ' An RPC check cannot prove a wallet request was never broadcast. Keep checking your wallet and this order before sending anything else.' : ' You can retry the same signed Hyperliquid transfer without sending it twice.'}</div>
-                    : <div className="text-slate-300">Nothing has reached the deposit address. Don’t pay this order now: its price is out of date. If your wallet shows the payment as pending, this order completes when it arrives; otherwise start a new order.</div>)}
+                    ? <div className="text-slate-300">Nothing has reached the deposit address.{kind === 'evm'
+                      ? ' An RPC check cannot prove a wallet request was never broadcast. Keep checking your wallet and this order before sending anything else.'
+                      : order.hlAction ? ' You can retry the same signed Hyperliquid transfer: it can’t go through twice.'
+                      : ' No signed transfer was saved, so nothing could have been sent. You can pay again.'}</div>
+                    : <div className="text-slate-300">Nothing has reached the deposit address. Don’t pay this order now: its price is out of date. If your wallet shows the payment as pending, this order completes when it arrives; otherwise start a new order. You can hide this order: it stays tracked in the background.</div>)}
                   {checkSaid === 'reverted' && <div className="text-slate-300">The payment transaction reverted. Nothing reached Rift; you can try again while the price is current.</div>}
                   {checkSaid === 'partial' && <div className="text-amber-200">Part of the amount has reached the deposit address. Don’t pay again: if the rest doesn’t follow, Rift treats the order as underpaid, and you can {supportLink} with the order ID.</div>}
                   {checkSaid === 'pending' && <div className="text-amber-200">A transaction was sent from your account after the payment was requested. If it is this payment, it shows up here once it confirms. Don’t pay again.</div>}
@@ -532,10 +545,22 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                     <Button onClick={() => checkPayment(true)} disabled={!settlementAck || paying || checking} className="bg-gradient-to-r from-indigo-600 to-purple-600">Pay again</Button>
                   )}
                   {checkSaid === 'nothing' && !windowOpen && (
-                    <Button onClick={() => onReorder(order)} className="bg-gradient-to-r from-indigo-600 to-purple-600">New order at today’s price</Button>
+                    <>
+                      <Button onClick={() => onReorder(order)} className="bg-gradient-to-r from-indigo-600 to-purple-600">New order at today’s price</Button>
+                      {canHide(order, now) && (
+                        <Button variant="outline" onClick={hide} className="border-slate-600 text-slate-200">Hide this order</Button>
+                      )}
+                    </>
                   )}
                 </div>
               </>
+            ) : ps === 'requesting' ? (
+              // A wallet prompt is open (here or in another tab), even if the pay window closes meanwhile: nothing
+              // about this order is settled until the wallet answers.
+              <div className="flex items-center gap-2">
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                Waiting for your wallet{paying ? '' : ' (in another tab)'} to confirm or reject this payment…
+              </div>
             ) : !windowOpen ? (
               <>
                 <div>This order wasn’t paid within {Math.round(payWindowMs(kind) / 60_000)} minutes, so its price is out of date. Nothing was sent.</div>
@@ -553,8 +578,8 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                   )}
                   Send <span className="font-medium text-white">{fmt(order.fromAmount, 8)} {order.token.symbol}</span> on {chain.name} to start.
                 </div>
-                <Button onClick={() => onPay(order)} disabled={!settlementAck || paying || ps === 'requesting'} className="h-auto min-h-10 w-full whitespace-normal bg-gradient-to-r from-indigo-600 to-purple-600 py-2.5 hover:from-indigo-700 hover:to-purple-700">
-                  {paying || ps === 'requesting' ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Waiting for your wallet…</> : `Pay ${fmt(order.fromAmount, 8)} ${order.token.symbol}`}
+                <Button onClick={() => onPay(order)} disabled={!settlementAck || paying} className="h-auto min-h-10 w-full whitespace-normal bg-gradient-to-r from-indigo-600 to-purple-600 py-2.5 hover:from-indigo-700 hover:to-purple-700">
+                  {paying ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Waiting for your wallet…</> : `Pay ${fmt(order.fromAmount, 8)} ${order.token.symbol}`}
                 </Button>
               </>
             )}

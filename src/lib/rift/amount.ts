@@ -68,6 +68,11 @@ export function parseAmountInput(text: string, decimals: number, decimalSep: '.'
   return { value: frac ? `${int}.${frac}` : int, ...(ambiguous ? { ambiguous } : {}) };
 }
 
+/** A plain decimal ("12.345") written the way the user's locale writes it, for the amount box: what the page
+ *  puts there itself (MAX, a repeated order) must read back as the same number ("12.345" is twelve thousand
+ *  three hundred and forty-five where the decimal separator is a comma). */
+export const toInputText = (decimal: string, decimalSep: '.' | ',') => (decimalSep === ',' ? decimal.replace('.', ',') : decimal);
+
 /** The browser's decimal separator. */
 export function localeDecimalSep(locale?: string): '.' | ',' {
   try {

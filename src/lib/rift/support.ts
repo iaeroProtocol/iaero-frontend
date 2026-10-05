@@ -18,10 +18,12 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { classifyRiftError, fetchQuote, riftBudget, riftPricing } from './client';
-import { CURATED_TOKENS } from './config';
+import { classifyRiftError, fetchQuote, riftBudget, riftPricing, RiftApiError } from './client';
+import { CURATED_TOKENS, RIFT_DESTINATION } from './config';
 import { RIFT_LISTED } from './rift-tokens';
 import { probeAmount, PROBE_USD, type Holding } from './holdings';
+import { checkQuote } from './quote-check';
+import { decimalToRaw } from './validate';
 
 export type Support = 'supported' | 'unsupported' | 'checking';
 
@@ -123,7 +125,20 @@ export function useRiftSupport(holdings: Holding[], enabled = true): Record<stri
         const h = holdingsRef.current.find(x => x.asset === asset);
         if (!h) continue;
         try {
-          await fetchQuote({ from: h.asset, from_amount: probeAmount(h), quote_mode: 'fast' }, undefined, 'probe');
+          const amount = probeAmount(h);
+          const json = await fetchQuote({ from: h.asset, from_amount: amount, quote_mode: 'fast' }, undefined, 'probe');
+          // The answer must check out as this token (by address, or by a name that can be resolved to it):
+          // otherwise every real quote for it would be refused.
+          let rawAmount = 0n;
+          try { rawAmount = decimalToRaw(amount, h.decimals); } catch { /* not resolvable */ }
+          try {
+            await checkQuote(json, { destination: RIFT_DESTINATION, fromChain: h.chain, fromAmount: amount, fromAsset: h.asset }, { rawAmount, kind: 'probe' });
+          } catch (e) {
+            if (e instanceof RiftApiError) throw e;
+            remember(asset.toLowerCase(), { ok: false, at: Date.now(), ttl: NO_ROUTE_TTL_MS, usd: checkedUsd(h) });
+            settle(asset, 'unsupported');
+            continue;
+          }
           remember(asset.toLowerCase(), { ok: true, at: Date.now(), ttl: OK_TTL_MS, usd: checkedUsd(h) });
           settle(asset, 'supported');
         } catch (e) {
