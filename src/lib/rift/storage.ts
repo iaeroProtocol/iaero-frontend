@@ -6,8 +6,9 @@
 //   182 of 600 updates). Changes therefore apply asynchronously; await the returned promise when the next step
 //   reads the result.
 // - A copy is also kept in memory: if storage is full or blocked, the order stays tracked on this page and
-//   the page says so, instead of the order disappearing. A write always starts from what storage holds now,
-//   never from that copy, so a tab whose save failed cannot undo another tab's payment record.
+//   the page says so, instead of the order disappearing. Changes that could not be saved are applied again on top
+//   of what storage holds now, on every read and write, until a save succeeds: a write never starts from an old
+//   copy, so a tab whose save failed cannot undo another tab's payment record.
 // - Saved records are checked one by one (order-state.ts). Ones this version cannot read (written by a newer
 //   version, or damaged) are kept as they are, not erased by the next write.
 
@@ -31,9 +32,14 @@ const POLL_STAMP_MS = 30_000;
 const LATE_AFTER_MS = 150_000;
 const PROBE_KEY = 'iaero.rift.probe';
 
+type Change = (list: StoredOrder[]) => StoredOrder[] | null;
+const MAX_UNSAVED = 50;
+
 let memory: StoredOrder[] | null = null;
 let foreign: unknown[] = [];
 let writeFailed = false;
+/** Changes this page could not save, in order (storage full or blocked). */
+let unsaved: Change[] = [];
 
 function readStorage(): StoredOrder[] | null {
   try {
@@ -52,11 +58,18 @@ function readStorage(): StoredOrder[] | null {
   }
 }
 
-export function loadOrders(): StoredOrder[] {
-  // After a failed write, this page shows its own copy, which has what storage could not take.
-  if (writeFailed && memory) return memory;
+/** What storage holds, with this page's unsaved changes applied again; null if storage can't be read. */
+function current(): StoredOrder[] | null {
   const stored = readStorage();
-  if (stored) memory = stored;
+  if (!stored) return null;
+  let list = stored;
+  for (const c of unsaved) list = c(list) ?? list;
+  return list;
+}
+
+export function loadOrders(): StoredOrder[] {
+  const list = current();
+  if (list) memory = list;
   return memory ?? [];
 }
 
@@ -104,16 +117,16 @@ function saveOrders(list: StoredOrder[]): boolean {
 export type WriteResult = 'saved' | 'unchanged' | 'failed';
 
 /** Read, change and save the list under the cross-tab lock. `change` returns null for "nothing to save".
- *  The change is applied to what storage holds now; this page's copy is used only when storage can't be read. */
-function mutate(change: (list: StoredOrder[]) => StoredOrder[] | null): Promise<WriteResult> {
+ *  The change is applied to what storage holds now (with this page's unsaved changes); this page's copy is used
+ *  only when storage can't be read. */
+function mutate(change: Change): Promise<WriteResult> {
   const run = (): WriteResult => {
-    const stored = readStorage();
-    const next = change(stored ?? memory ?? []);
-    if (!next) {
-      if (stored && !writeFailed) memory = stored;
-      return 'unchanged';
-    }
-    return saveOrders(next) ? 'saved' : 'failed';
+    const base = current() ?? memory ?? [];
+    const next = change(base);
+    if (!next) { memory = base; return 'unchanged'; }
+    if (saveOrders(next)) { unsaved = []; return 'saved'; }
+    unsaved = [...unsaved, change].slice(-MAX_UNSAVED);
+    return 'failed';
   };
   const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
   if (!locks?.request) return Promise.resolve(run());
@@ -147,8 +160,11 @@ export function patchOrder(id: string, patch: Partial<StoredOrder> | ((o: Stored
 }
 
 /** Claim a payment under the cross-tab Web Lock before opening a wallet prompt. A payment requires durable
- *  storage: if Web Locks or localStorage are unavailable, two tabs cannot safely agree who owns the prompt. */
-export async function claimPayment(id: string, owner: string, extra: Partial<StoredOrder> = {}): Promise<StoredOrder | null> {
+ *  storage: if Web Locks or localStorage are unavailable, two tabs cannot safely agree who owns the prompt.
+ *  `expect`: what the stored order must still be like (compare-and-set), or there is no claim. */
+export async function claimPayment(
+  id: string, owner: string, extra: Partial<StoredOrder> = {}, expect?: (stored: StoredOrder) => boolean,
+): Promise<StoredOrder | null> {
   const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
   if (!locks?.request) throw new Error('This browser cannot safely coordinate payments across tabs. Use a browser with Web Locks support.');
   try {
@@ -161,6 +177,7 @@ export async function claimPayment(id: string, owner: string, extra: Partial<Sto
       if (i < 0) return null;
       const prev = list[i];
       if (prev.toAddress.toLowerCase() !== owner.toLowerCase() || !canPay(prev, sourceKindOf(prev.sourceChain), Date.now())) return null;
+      if (expect && !expect(prev)) return null;
       const attempt: StoredOrder = {
         ...prev,
         payRequestedAt: Date.now(), payAttemptAt: Date.now(), payAttemptId: crypto.randomUUID(), payUnknown: false,
@@ -199,16 +216,18 @@ export async function patchPaymentAttempt(id: string, attemptId: string, patch: 
   return r === 'failed' || found === 'current' ? r : found;
 }
 
-/** Just before a HyperCore transfer is posted, under the lock: whether this attempt is still the order's
- *  current one with exactly this saved transfer. Records that it is being posted, so a later refusal of the same
- *  transfer is not taken to mean that nothing moved (the first post may have gone through). */
-export async function beginHyperPost(id: string, attemptId: string, action: { time: number; r: string }): Promise<boolean> {
-  let current = false;
+/** Just before a HyperCore transfer is posted, under the lock: null unless this attempt is still the order's
+ *  current one with exactly this saved transfer. Records that it is being posted, and says whether it was posted
+ *  before: a refusal of a transfer posted before does not show that nothing moved (the first post may have gone
+ *  through). */
+export async function beginHyperPost(id: string, attemptId: string, action: { time: number; r: string }): Promise<{ postedBefore: boolean } | null> {
+  let holds = false, postedBefore = false;
   const r = await patchOrder(id, prev => {
-    current = prev.payAttemptId === attemptId && prev.hlAction?.time === action.time && prev.hlAction.r === action.r;
-    return current ? { hlPostedAt: prev.hlPostedAt ?? Date.now() } : {};
+    holds = prev.payAttemptId === attemptId && prev.hlAction?.time === action.time && prev.hlAction.r === action.r;
+    postedBefore = prev.hlPostedAt !== undefined;
+    return holds ? { hlPostedAt: prev.hlPostedAt ?? Date.now() } : {};
   });
-  return current && r !== 'failed';
+  return holds && r !== 'failed' ? { postedBefore } : null;
 }
 
 /** Record a status poll: the status, when it was first seen (and whether that was live), the amount out. */

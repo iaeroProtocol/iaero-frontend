@@ -15,7 +15,7 @@ import { useEffect, useRef } from 'react';
 import { getOrder, riftBudget } from './client';
 import { parseOrderUpdate } from './validate';
 import { applyStatusUpdate, markPolled, patchOrder, polledWithin, pollStamps } from './storage';
-import { isAbandoned, isFinalStatus, isTerminalStatus, pendingByLeastRecentPoll } from './order-state';
+import { isFinalStatus, isOutOfDate, isTerminalStatus, pendingByLeastRecentPoll } from './order-state';
 import type { RiftOrderStatus, StoredOrder } from './types';
 
 const POLL_MS = 60_000;
@@ -83,7 +83,7 @@ export function useOrderWatcher(
         for (const o of due) {
           const now = Date.now();
           if (stop) break;
-          const idle = o.status === 'frozen' || isAbandoned(o, now);
+          const idle = o.status === 'frozen' || isOutOfDate(o, now);
           if (polledWithin(o.id, idle ? IDLE_POLL_MS : POLL_MS - 5000, now)) continue;
           if (!riftBudget('poll', now)) break;
           try {

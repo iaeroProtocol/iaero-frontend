@@ -32,7 +32,7 @@ import { accountNonce, evmDepositEvidence, hyperDepositEvidence } from '@/lib/ri
 import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, RIFT_SUPPORT_URL, SOURCE_CHAINS } from '@/lib/rift/config';
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
 import { costText, costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
-import { canHide, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowMs, payWindowOpen, phaseInput } from '@/lib/rift/order-state';
+import { canHide, isFinalStatus, isOutOfDate, isTerminalStatus, payState, payWindowMs, payWindowOpen, phaseInput } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
 // The QR library loads only for Bitcoin payments.
@@ -85,7 +85,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
 
   // A clock while the order is open: every second while it moves or can be paid, every 15 s otherwise.
   const [now, setNow] = useState(() => Date.now());
-  const stale = isAbandoned(order, now);
+  const stale = isOutOfDate(order, now);
   useEffect(() => {
     if (terminal) return;
     const t = setInterval(() => setNow(Date.now()), stale ? 15_000 : 1000);
@@ -182,7 +182,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
           if (nonce !== undefined && round % 2 === 1) {
             // The account's nonce and the deposit address are read at one block: a node lagging behind the one
             // that answered the nonce must not make a sped-up payment look replaced (and payable again).
-            const head = await sourcePublic.getBlockNumber();
+            const head = (await sourcePublic.getBlockNumber()) - 1n; // one behind: a load-balanced node likely has it
             const mined = await accountNonce(sourcePublic, payer, head);
             if (stop) return;
             if (mined > nonce) {
@@ -517,7 +517,8 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
             ) : ps === 'unknown' && order.hiddenAt ? (
               <>
                 <div>You hid this order after a check found no payment. It is still tracked: if a payment turns up, it continues here.</div>
-                {staleActions}
+                {/* No Dismiss: its payment was never proven absent, so the order stays until Rift settles or expires it. */}
+                <Button onClick={() => onReorder(order)} className="bg-gradient-to-r from-indigo-600 to-purple-600">New order at today’s price</Button>
               </>
             ) : ps === 'unknown' ? (
               <>

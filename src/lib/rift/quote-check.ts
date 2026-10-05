@@ -28,7 +28,9 @@ export async function checkQuote(
     return check();
   } catch (e) {
     if (!unknownNames(json, riftNames()).length || resolve.rawAmount <= 0n) throw e;
-    if (resolve.kind !== 'user' && !riftBudget(resolve.kind)) throw e;
+    // A route check's name lookup comes straight after its quote, so it is held to the poll limit, not the
+    // probes' 15 s spacing (which would never let it go).
+    if (resolve.kind !== 'user' && !riftBudget(resolve.kind === 'probe' ? 'poll' : resolve.kind)) throw e;
     const raw = await fetchQuote(
       { from: expect.fromAsset, from_amount: resolve.rawAmount.toString(), quote_mode: 'fast', format: 'raw' }, undefined, resolve.kind,
     );

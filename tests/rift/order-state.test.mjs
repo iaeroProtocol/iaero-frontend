@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PAY_WINDOW_MS, canMoveTo, canPay, capOrders, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowOpen, phaseInput,
-  canHide, pendingByLeastRecentPoll, sanitizeOrder,
+  canHide, isOutOfDate, pendingByLeastRecentPoll, sanitizeOrder,
 } from '../../src/lib/rift/order-state.ts';
 
 const T0 = 1_790_930_000_000;
@@ -143,15 +143,18 @@ test('capping never drops an order in flight or one needing support; abandoned o
   assert.deepEqual(capOrders(list, 3, T0 + PAY_WINDOW_MS + 10).map(o => o.id), ['a', 'b', 'c'], 'e was never paid and its window closed');
 });
 
-test('an order in doubt can be hidden only after its window, and then counts as out of date', () => {
+test('an order in doubt can be hidden only after its window; hidden, it is out of date but never removable', () => {
   const late = T0 + PAY_WINDOW_MS + 1;
   const unknown = order({ payUnknown: true });
   assert.equal(canHide(unknown, T0 + 1000), false, 'still inside its window');
   assert.equal(canHide(unknown, late), true);
   assert.equal(canHide(order({ payRequestedAt: late - 1000 }), late), false, 'a wallet prompt is open');
   assert.equal(canHide(order({ sourceChain: 'bitcoin', payUnknown: true }), late), false);
-  assert.equal(isAbandoned(unknown, late), false, 'not out of date until hidden');
-  assert.equal(isAbandoned(order({ payUnknown: true, hiddenAt: late }), late), true);
-  assert.equal(isAbandoned(order({ payUnknown: true, hiddenAt: late, status: 'funded' }), late), false, 'a payment turned up');
+  assert.equal(isOutOfDate(unknown, late), false, 'not out of date until hidden');
+  const hidden = order({ payUnknown: true, hiddenAt: late });
+  assert.equal(isOutOfDate(hidden, late), true);
+  assert.equal(isAbandoned(hidden, late), false, 'its payment may still arrive: never removed by Dismiss, Clear or the cap');
+  assert.equal(capOrders([hidden, ...Array.from({ length: 3 }, (_, i) => order({ id: String(i), status: 'delivered' }))], 1, late).some(o => o === hidden), true);
+  assert.equal(isOutOfDate(order({ payUnknown: true, hiddenAt: late, status: 'funded' }), late), false, 'a payment turned up');
   assert.equal(sanitizeOrder(order({ hiddenAt: 'yes', hlPostedAt: 'no' })).hiddenAt, undefined);
 });

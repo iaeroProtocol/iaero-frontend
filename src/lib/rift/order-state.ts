@@ -63,13 +63,19 @@ export function canPay(o: StoredOrder, kind: SourceKind, now: number): boolean {
   return s === 'none' || s === 'failed';
 }
 
-/** An unpaid order past its pay window: nothing was sent, and it can only expire. Also one the user hid after
- *  a check found no payment: its outcome was never proven, but it is treated as out of date (and still polled). */
+/** An unpaid order past its pay window: nothing was sent, and it can only expire. Safe to remove. */
 export function isAbandoned(o: StoredOrder, now: number): boolean {
   const kind = KIND_OF[o.sourceChain];
   if (o.status !== 'awaiting_deposit' || payWindowOpen(o, kind, now) || o.btc?.txid) return false;
   const s = payState(o, now);
-  return s === 'none' || s === 'failed' || (s === 'unknown' && !!o.hiddenAt);
+  return s === 'none' || s === 'failed';
+}
+
+/** Shown and polled as out of date: abandoned, or hidden by the user after a check found no payment. A hidden
+ *  order's payment was never proven absent, so it is not abandoned: it is never removed while it can still arrive. */
+export function isOutOfDate(o: StoredOrder, now: number): boolean {
+  return isAbandoned(o, now)
+    || (!!o.hiddenAt && o.status === 'awaiting_deposit' && !payWindowOpen(o, KIND_OF[o.sourceChain], now));
 }
 
 /** Whether an order whose payment is in doubt may be hidden: its pay window has closed and nothing is waiting on

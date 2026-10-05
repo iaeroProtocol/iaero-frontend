@@ -91,6 +91,8 @@ async function getJson(url: string, { body, until = Infinity, timeout = SOURCE_T
 
 /** `p`, or a rejection once `until` passes (for calls that take no abort signal). */
 function beforeDeadline<T>(p: Promise<T>, until: number): Promise<T> {
+  // A late failure of the abandoned call must not surface as an unhandled rejection (viem errors carry the URL).
+  p.catch(() => {});
   const left = until - Date.now();
   if (!(left > 0)) return Promise.reject(new Error('out of time'));
   let timer: ReturnType<typeof setTimeout> | undefined;

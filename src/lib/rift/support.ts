@@ -22,7 +22,8 @@ import { classifyRiftError, fetchQuote, riftBudget, riftPricing, RiftApiError } 
 import { CURATED_TOKENS, RIFT_DESTINATION } from './config';
 import { RIFT_LISTED } from './rift-tokens';
 import { probeAmount, PROBE_USD, type Holding } from './holdings';
-import { checkQuote } from './quote-check';
+import { checkQuote, riftNames } from './quote-check';
+import { unknownNames } from './names';
 import { decimalToRaw } from './validate';
 
 export type Support = 'supported' | 'unsupported' | 'checking';
@@ -135,8 +136,14 @@ export function useRiftSupport(holdings: Holding[], enabled = true): Record<stri
             await checkQuote(json, { destination: RIFT_DESTINATION, fromChain: h.chain, fromAmount: amount, fromAsset: h.asset }, { rawAmount, kind: 'probe' });
           } catch (e) {
             if (e instanceof RiftApiError) throw e;
-            remember(asset.toLowerCase(), { ok: false, at: Date.now(), ttl: NO_ROUTE_TTL_MS, usd: checkedUsd(h) });
             settle(asset, 'unsupported');
+            if (unknownNames(json, riftNames()).length) {
+              // A token name not resolved yet (no room in the budget for the lookup): asked again later, not cached.
+              retryAt.set(asset, Date.now() + RETRY_LATER_MS);
+              queue.push(asset);
+            } else {
+              remember(asset.toLowerCase(), { ok: false, at: Date.now(), ttl: NO_ROUTE_TTL_MS, usd: checkedUsd(h) });
+            }
             continue;
           }
           remember(asset.toLowerCase(), { ok: true, at: Date.now(), ttl: OK_TTL_MS, usd: checkedUsd(h) });

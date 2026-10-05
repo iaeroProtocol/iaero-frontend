@@ -136,11 +136,12 @@ test('a signed HyperCore transfer is posted only by the attempt that saved it', 
   const claimed = await a.claimPayment(x.id, owner);
   const action = { destination: x.depositAddress, token: 'USDC:0x6d', amount: '1', time: 1000, r: '0x1', s: '0x2', v: 27 };
   assert.equal(await a.patchPaymentAttempt(x.id, claimed.payAttemptId, { hlAction: action }), 'saved');
-  assert.equal(await a.beginHyperPost(x.id, randomUUID(), action), false, 'another attempt');
-  assert.equal(await a.beginHyperPost(x.id, claimed.payAttemptId, { ...action, r: '0x9' }), false, 'another signature');
+  assert.equal(await a.beginHyperPost(x.id, randomUUID(), action), null, 'another attempt');
+  assert.equal(await a.beginHyperPost(x.id, claimed.payAttemptId, { ...action, r: '0x9' }), null, 'another signature');
   assert.equal(h.read().hlPostedAt, undefined);
-  assert.equal(await a.beginHyperPost(x.id, claimed.payAttemptId, action), true);
-  assert.ok(h.read().hlPostedAt > 0, 'a later refusal of this transfer is not read as nothing sent');
+  assert.equal((await a.beginHyperPost(x.id, claimed.payAttemptId, action))?.postedBefore, false);
+  assert.ok(h.read().hlPostedAt > 0);
+  assert.equal((await a.beginHyperPost(x.id, claimed.payAttemptId, action))?.postedBefore, true, 'a refusal of it now is not read as nothing sent');
 });
 
 test('payments are refused up front without Web Locks or working storage; unreadable records are listed', () => {
@@ -153,4 +154,37 @@ test('payments are refused up front without Web Locks or working storage; unread
   const mixed = harness([order(), { id: foreignId, from: 'a newer version' }]).tab();
   mixed.loadOrders();
   assert.deepEqual([...mixed.unreadableOrderIds()], [foreignId]);
+});
+
+test('a claim is compare-and-set: another tab\u2019s saved transfer is never replaced by a second signature', async () => {
+  const x = order();
+  const h = harness([x]);
+  const a = h.tab();
+  const posted = { destination: x.depositAddress, token: 'USDC:0x6d', amount: '1', time: 1000, r: '0x1', s: '0x2', v: 27 };
+  const saw = undefined; // this tab looked before another tab saved `posted`
+  await a.patchOrder(x.id, { hlAction: posted, hlPostedAt: 1000 });
+  const holds = seen => s => s.hlAction?.time === seen?.time && s.hlAction?.r === seen?.r;
+  assert.equal(await a.claimPayment(x.id, owner, { hlAction: undefined, hlPostedAt: undefined }, holds(saw)), null);
+  assert.equal(h.read().hlAction?.r, '0x1', 'the saved transfer is kept');
+  assert.ok(await a.claimPayment(x.id, owner, { hlAction: posted }, holds(posted)), 'retrying the same transfer is allowed');
+});
+
+test('changes a full storage refused are kept on this page and applied on top of other tabs\u2019 records', async () => {
+  const x = order(), y = order();
+  const h = harness([x, y]);
+  const a = h.tab(), b = h.tab();
+  h.block();
+  assert.equal(await a.patchOrder(y.id, { notify: true }), 'failed');
+  h.unblock();
+  await b.patchOrder(x.id, { notify: true });
+  const view = a.loadOrders();
+  assert.equal(view.find(o => o.id === y.id).notify, true, 'this page still shows its unsaved change');
+  assert.equal(view.find(o => o.id === x.id).notify, true, '...and the other tab\u2019s');
+  h.block();
+  await a.applyStatusUpdate(y.id, { status: 'awaiting_deposit', rawStatus: 'awaiting_deposit', amountOut: null });
+  assert.equal(a.loadOrders().find(o => o.id === y.id).notify, true, 'not lost at the next unrelated write');
+  h.unblock();
+  assert.equal(await a.patchOrder(x.id, { lastPolledAt: 1 }), 'saved');
+  assert.equal(h.all().find(o => o.id === y.id).notify, true, 'saved once storage takes writes again');
+  assert.equal(a.storageFailing(), false);
 });

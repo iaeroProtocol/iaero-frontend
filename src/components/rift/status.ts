@@ -13,5 +13,5 @@ export const PHASE_STYLE: Record<Phase, { label: string; className: string }> = 
   underfunded: { label: 'Underpaid', className: 'border-red-500/30 bg-red-500/10 text-red-300' },
 };
 
-/** An unpaid order past its pay window (order-state.ts isAbandoned): it will only expire. */
+/** An unpaid order past its pay window, or one the user hid (order-state.ts isOutOfDate). */
 export const STALE_STYLE = { label: 'Out of date', className: 'border-slate-500/30 bg-slate-500/10 text-slate-300' };

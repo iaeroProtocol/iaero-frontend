@@ -67,7 +67,9 @@ export function learnedNames(): Record<string, string> {
   return { ...out, ...memo };
 }
 
+/** Adds names not known yet; a name once learned is not re-pointed. */
 export function rememberNames(pairs: Record<string, string>) {
-  memo = { ...memo, ...pairs };
+  const known = learnedNames();
+  memo = { ...memo, ...Object.fromEntries(Object.entries(pairs).filter(([k]) => known[k] === undefined)) };
   try { window.localStorage.setItem(KEY, JSON.stringify(learnedNames())); } catch { /* this page only */ }
 }

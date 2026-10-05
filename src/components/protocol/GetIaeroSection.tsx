@@ -53,7 +53,7 @@ import {
   DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, assessCost, costNeedsTick, costText, formatPct, gasDeskChains,
   gasDeskUsd, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
-import { PAY_HEARTBEAT_MS, canPay, isAbandoned, isTerminalStatus, needsAttention, sourceKindOf } from '@/lib/rift/order-state';
+import { PAY_HEARTBEAT_MS, canPay, isOutOfDate, isTerminalStatus, needsAttention, sourceKindOf } from '@/lib/rift/order-state';
 import {
   beginHyperPost, claimPayment, loadOrders, patchOrder, patchPaymentAttempt, paymentStorageProblem, removeOrders, storageFailing,
   unreadableOrderIds, upsertOrder, useStoredOrders,
@@ -438,7 +438,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     // one past its pay window, then one that needs attention, then the latest.
     if (activeId && orders.some(o => o.id === activeId)) return;
     const now = Date.now();
-    const pick = orders.find(o => !isTerminalStatus(o.status) && !isAbandoned(o, now)) ?? orders.find(o => needsAttention(o.status)) ?? orders[0];
+    const pick = orders.find(o => !isTerminalStatus(o.status) && !isOutOfDate(o, now)) ?? orders.find(o => needsAttention(o.status)) ?? orders[0];
     setActiveId(pick ? pick.id : null);
   }, [orders, activeId]);
   const activeOrder = orders.find(o => o.id === activeId) ?? null;
@@ -608,15 +608,30 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     if (!o) return;
     const t = hyperCoreToken(o.token.asset);
     if (!t) return;
-    const sentNow = (at: number, attemptId?: string) => attemptId
-      ? patchPaymentAttempt(id, attemptId, { depositSentAt: at, depositConfirmedAt: Date.now(), payRequestedAt: undefined, payUnknown: false })
-      : patchOrder(id, prev => prev.hlAction?.time === at ? { depositSentAt: at, depositConfirmedAt: Date.now(), payRequestedAt: undefined, payUnknown: false } : {});
+    /** The transfer went through: recorded for this tab's attempt, or (one found in the ledger) for whichever
+     *  attempt holds it. An order removed from this browser meanwhile is put back, with its payment. */
+    const sentNow = async (at: number, attemptId?: string) => {
+      const sent = { depositSentAt: at, depositConfirmedAt: Date.now(), payRequestedAt: undefined, payUnknown: false };
+      let r = attemptId
+        ? await patchPaymentAttempt(id, attemptId, sent)
+        : await patchOrder(id, prev => (prev.hlAction?.time === at ? sent : {}));
+      if (r === 'missing' && o) r = await upsertOrder({ ...o, ...sent });
+      if (r === 'failed') setError(`Your Hyperliquid transfer went through, but this browser could not record it for order ${id}. Keep this page open and don’t pay again.`);
+    };
     const ledger = async () => (await hyperDepositEvidence(o!, t.symbol)).evidence;
+    /** The order's saved signed transfer, if it is for exactly this order. */
+    const savedAction = (x: StoredOrder) => {
+      const a = x.hlAction;
+      return a && a.destination.toLowerCase() === x.depositAddress.toLowerCase() && a.amount === x.fromAmount && a.token === spotSendToken(t) ? a : undefined;
+    };
+    /** For a claim: the stored signed transfer must still be the one this tab saw (another tab may have signed, or
+     *  posted, one since; it must never be replaced by a second signature). */
+    const holds = (seen: StoredOrder['hlAction']) => (x: StoredOrder) => x.hlAction?.time === seen?.time && x.hlAction?.r === seen?.r;
+    const changedElsewhere = () => {
+      if (payableNow(id)) setError('This order’s payment changed in another tab. Check the order card before paying again.');
+    };
 
-    let action = o.hlAction;
-    if (action && (action.destination.toLowerCase() !== o.depositAddress.toLowerCase() || action.amount !== o.fromAmount || action.token !== spotSendToken(t))) action = undefined;
-    // Posted before: Hyperliquid accepts a signed transfer once, so refusing it again does not show that nothing moved.
-    const postedBefore = !!action && !!o.hlPostedAt;
+    let action = savedAction(o);
     if (action) {
       try {
         if (await ledger() !== 'none') { await sentNow(action.time); showToast('Your Hyperliquid transfer had gone through. Tracking your order…', 'success'); return; }
@@ -632,10 +647,12 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         }
         o = payableNow(id);
         if (!o) return;
+        // Another tab may have signed a transfer for this order while the switch prompt was open.
+        if (savedAction(o)) { changedElsewhere(); return; }
       }
       if (await priceCheck(o, quoteAt) !== 'ok') return;
-      const claimed = await claimPayment(id, addressRef.current!, { hlAction: undefined, hlPostedAt: undefined });
-      if (!claimed) { payableNow(id); return; }
+      const claimed = await claimPayment(id, addressRef.current!, { hlAction: undefined, hlPostedAt: undefined }, holds(o.hlAction));
+      if (!claimed) { changedElsewhere(); return; }
       o = claimed;
       const attemptId = claimed.payAttemptId!;
       const transfer = { destination: o.depositAddress, token: spotSendToken(t), amount: o.fromAmount, time: Date.now() };
@@ -674,8 +691,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       }
     } else {
       if (await priceCheck(o, quoteAt) !== 'ok') return;
-      const claimed = await claimPayment(id, addressRef.current!, { hlAction: action });
-      if (!claimed) { payableNow(id); return; }
+      const claimed = await claimPayment(id, addressRef.current!, { hlAction: action }, holds(action));
+      if (!claimed) { changedElsewhere(); return; }
       o = claimed;
       // A transfer signed earlier, whose outcome was not known: if the ledger shows it, it went through.
       try {
@@ -683,8 +700,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       } catch { /* re-posting is safe either way */ }
     }
 
-    // Only the order's current attempt, holding exactly this signed transfer, may post it.
-    if (!(await beginHyperPost(id, o.payAttemptId!, action))) {
+    // Only the order's current attempt, holding exactly this signed transfer, may post it. Whether it was posted
+    // before is read under the same lock: Hyperliquid accepts a signed transfer once, so refusing it again does not
+    // show that nothing moved.
+    const begun = await beginHyperPost(id, o.payAttemptId!, action);
+    if (!begun) {
       throw new Error('This payment changed in another tab (or could not be saved) before it was sent. This tab sent nothing; check the order card.');
     }
     setBusy('Sending on Hyperliquid…');
@@ -703,7 +723,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     if (found === 'arrived' || found === 'partial') {
       await sentNow(action.time, o.payAttemptId);
       showToast('Transfer sent on Hyperliquid. Tracking your order…', 'success');
-    } else if (outcome.kind === 'refused' && found === 'none' && !postedBefore) {
+    } else if (outcome.kind === 'refused' && found === 'none' && !begun.postedBefore) {
       // Hyperliquid refused its first post and nothing moved: the next attempt signs a new transfer.
       await patchPaymentAttempt(id, o.payAttemptId!, { payRequestedAt: undefined, hlAction: undefined, hlPostedAt: undefined });
       const msg = `Hyperliquid refused the transfer: ${outcome.error}`;
@@ -725,8 +745,10 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       // Bitcoin is paid from another wallet; this one only receives, on Base. A smart-contract wallet that exists
       // on Ethereum or Arbitrum but not on Base could not use the iAERO delivered there.
       if (!basePublic) throw new Error('Could not reach the network to check your wallet. Nothing was sent; try again in a moment.');
+      // Ethereum or Arbitrum not answering skips that chain's check rather than blocking the order.
       const [onBase, onEth, onArb] = await Promise.all([
-        basePublic.getCode({ address: owner }), ethPublic?.getCode({ address: owner }), arbPublic?.getCode({ address: owner }),
+        basePublic.getCode({ address: owner }),
+        ethPublic?.getCode({ address: owner }).catch(() => undefined), arbPublic?.getCode({ address: owner }).catch(() => undefined),
       ]);
       if (isContractCode(onBase)) return null;
       const elsewhere = isContractCode(onEth) ? mainnet.id : isContractCode(onArb) ? arbitrum.id : null;
@@ -791,11 +813,12 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         setBusy('Checking the token…');
         if (!sourcePublic) throw new Error(`Could not reach ${chain.name} to check this token. Nothing was sent; try again in a moment.`);
         const delivers = await transferDeliversInFull(sourcePublic as PublicClient, token.address as Address, owner, amountState.raw);
-        if (delivers === null) {
-          throw new Error(`Could not verify that ${token.symbol} arrives in full. Nothing was sent; try again with a supported network RPC or another token.`);
-        }
-        if (!delivers) {
-          throw new Error(`${token.symbol} arrives short of the amount sent (it takes a fee or rebases on transfer), so Rift would receive less than the order needs. Nothing was sent; this token can’t be used here.`);
+        if (delivers !== true) {
+          throw new Error(delivers === false
+            ? `${token.symbol} arrives short of the amount sent (it takes a fee or rebases on transfer), so Rift would receive less than the order needs. Nothing was sent; this token can’t be used here.`
+            : delivers === 'reverts'
+              ? `A transfer of this amount of ${token.symbol} would fail right now (your balance may have changed, or the token is blocking the transfer). Nothing was sent.`
+              : `Could not check that ${token.symbol} arrives in full (${chain.name} didn’t answer). Nothing was sent; try again in a moment.`);
         }
       }
 
@@ -892,7 +915,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         marketUsdIn: px.inputUsd ? Number(fromAmount) * px.inputUsd + hlFeeUsd : undefined, marketIaeroUsd: px.iaeroUsd,
         expectedOut: freshExpected ? Math.max(0, freshExpected.out).toFixed(6) : undefined, gasDeskUsd: freshExpected?.gasUsd,
       };
-      await upsertOrder(stored);
+      // Kept on this page even when storage refuses it (storage.ts); only an order this browser doesn't hold at all
+      // stops here, before any payment.
+      if (await upsertOrder(stored) === 'failed' && !loadOrders().some(x => x.id === order.id)) {
+        throw new Error(`Rift created order ${order.id}, but this browser could not save it, so nothing was sent. Try again in a moment; that order expires unpaid.`);
+      }
       setActiveId(order.id);
       setAmountText('');
       setAck(null);
