@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PAY_WINDOW_MS, canMoveTo, canPay, capOrders, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowOpen, phaseInput,
-  canHide, isOutOfDate, pendingByLeastRecentPoll, sanitizeOrder,
+  BTC_MISSING_AFTER, canHide, isOutOfDate, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
 } from '../../src/lib/rift/order-state.ts';
 
 const T0 = 1_790_930_000_000;
@@ -157,4 +157,36 @@ test('an order in doubt can be hidden only after its window; hidden, it is out o
   assert.equal(capOrders([hidden, ...Array.from({ length: 3 }, (_, i) => order({ id: String(i), status: 'delivered' }))], 1, late).some(o => o === hidden), true);
   assert.equal(isOutOfDate(order({ payUnknown: true, hiddenAt: late, status: 'funded' }), late), false, 'a payment turned up');
   assert.equal(sanitizeOrder(order({ hiddenAt: 'yes', hlPostedAt: 'no' })).hiddenAt, undefined);
+});
+
+test('a Bitcoin payment seen once survives empty answers, and is marked missing only after several', () => {
+  const seen = { payments: [{ txid: 'ab'.repeat(32), confirmations: 0 }], totalSats: 1_000_000n };
+  const empty = { payments: [], totalSats: 0n };
+  let btc = nextBtcRecord(undefined, seen, T0);
+  assert.equal(btc.firstSeenAt, T0);
+  assert.equal(nextBtcRecord(undefined, empty, T0), undefined, 'nothing seen, nothing recorded');
+  for (let i = 1; i < BTC_MISSING_AFTER; i++) {
+    btc = nextBtcRecord(btc, empty, T0 + i);
+    assert.equal(btc.txid, 'ab'.repeat(32));
+    assert.equal(btc.missing, undefined, `${i} empty answer(s) are not enough`);
+  }
+  btc = nextBtcRecord(btc, empty, T0 + 10);
+  assert.equal(btc.missing, true);
+  assert.equal(btc.txid, 'ab'.repeat(32), 'still known: the order is never treated as unpaid');
+  const o = order({ sourceChain: 'bitcoin', btc, token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' } });
+  assert.equal(phaseInput(o, 'bitcoin').btcSeenAt, undefined, 'the QR code returns');
+  assert.equal(isAbandoned(o, T0 + 2 * 3600_000), false, 'not removable while the payment may still confirm');
+  const back = nextBtcRecord(btc, seen, T0 + 20);
+  assert.equal(back.missing, undefined);
+  assert.equal(back.firstSeenAt, T0, 'first seen keeps its time');
+});
+
+test('an expired order this browser saw paid needs Rift\u2019s support, so it is never cleared', () => {
+  const late = T0 + 8 * 864e5;
+  const paid = order({ status: 'expired', depositSentAt: T0, depositTxHash: HASH });
+  assert.equal(paidButExpired(paid, late), true);
+  assert.equal(paidButExpired(order({ status: 'expired' }), late), false);
+  assert.equal(paidButExpired(order({ status: 'expired', depositSentAt: T0, depositFailed: true, depositFailReason: 'reverted' }), late), false);
+  const others = Array.from({ length: 3 }, (_, i) => order({ id: String(i), status: 'delivered' }));
+  assert.ok(capOrders([paid, ...others], 1, late).includes(paid));
 });

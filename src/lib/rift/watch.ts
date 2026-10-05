@@ -15,7 +15,7 @@ import { useEffect, useRef } from 'react';
 import { getOrder, riftBudget } from './client';
 import { parseOrderUpdate } from './validate';
 import { applyStatusUpdate, markPolled, patchOrder, polledWithin, pollStamps } from './storage';
-import { isFinalStatus, isOutOfDate, isTerminalStatus, pendingByLeastRecentPoll } from './order-state';
+import { isFinalStatus, isOutOfDate, isTerminalStatus, paidButExpired, pendingByLeastRecentPoll } from './order-state';
 import type { RiftOrderStatus, StoredOrder } from './types';
 
 const POLL_MS = 60_000;
@@ -34,7 +34,9 @@ function message(o: StoredOrder): string {
   switch (o.status) {
     case 'delivered': return `${fmt(o.amountOut)} iAERO arrived in your wallet.`;
     case 'refunded': return `Rift refunded your ${o.token.symbol}.`;
-    case 'expired': return 'An order expired before a payment arrived. Nothing was taken.';
+    case 'expired': return paidButExpired(o, Date.now())
+      ? 'Rift closed an order that a payment was sent to. Open it for the order ID to give Rift.'
+      : 'An order expired before a payment arrived. Nothing was taken.';
     case 'frozen': return 'Rift put an order on hold. Open it for the order ID to give Rift.';
     case 'underfunded': return 'Rift received less than an order needs. Open it for what to do next.';
     default: return '';
@@ -112,7 +114,7 @@ export function useOrderWatcher(
       const before = seen.current.get(o.id);
       seen.current.set(o.id, o.status);
       if (before === undefined || before === o.status || !noticeWorthy(o.status) || o.notifiedStatus === o.status) continue;
-      patchOrder(o.id, { notifiedStatus: o.status });
+      patchOrder(o.id, { notifiedStatus: o.status }, { routine: `notice:${o.id}` });
       const msg = message(o);
       toastRef.current(msg, o.status === 'delivered' ? 'success' : 'warning');
       if (o.notify) void browserNotify('iAERO order update', msg, `iaero-order-${o.id}`);

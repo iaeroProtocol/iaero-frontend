@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canonicalToAsset, namesToLearn, unknownNames } from '../../src/lib/rift/names.ts';
+import { canonicalToAsset, mismatchedNames, namesToLearn, unknownNames } from '../../src/lib/rift/names.ts';
 
 const IAERO = 'base.0x81034fb34009115f215f5d5f564aac9ffa46a1dc';
 const USDT0 = 'arbitrum.0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9';
@@ -41,4 +41,24 @@ test('a name is learned only for exactly the asset asked for, on its own chain',
   assert.equal(namesToLearn({ from: 'bitcoin.btc', to: 'base.iaero' }, { from: 'bitcoin.other', to: RAW.to },
     { from: 'bitcoin.btc', to: IAERO }), null, 'an unknown raw source cannot establish the destination name');
   assert.equal(namesToLearn({ from: 'ethereum.usdt0', to: IAERO }, RAW, { from: USDT0, to: IAERO }), null, 'a name on another chain');
+});
+
+test('Rift\u2019s real raw ids for native ETH and HyperCore sources let the destination name be learned', () => {
+  // Raw ids exactly as Rift answered on 2026-10-05.
+  for (const [from, rawFrom] of [['arbitrum.eth', 'evm:42161.eth'], ['base.eth', 'evm:8453.eth'], ['bitcoin.btc', 'bitcoin.btc'],
+    ['hyperliquid.usdc', 'hyperliquid.spot:0'], ['hyperliquid.hype', 'hyperliquid.spot:150']]) {
+    assert.deepEqual(namesToLearn({ from, to: 'base.iaero' }, { from: rawFrom, to: RAW.to }, { from, to: IAERO }), { 'base.iaero': IAERO.slice(5) }, from);
+  }
+  assert.equal(namesToLearn({ from: 'hyperliquid.usdc', to: 'base.iaero' }, { from: 'hyperliquid.spot:150', to: RAW.to },
+    { from: 'hyperliquid.usdc', to: IAERO }), null, 'another HyperCore token');
+  assert.equal(namesToLearn({ from: 'arbitrum.eth', to: 'base.iaero' }, { from: 'evm:8453.eth', to: RAW.to },
+    { from: 'arbitrum.eth', to: IAERO }), null, 'the native coin of another chain');
+});
+
+test('a known name that stands for another address than asked needs a lookup (Rift may reassign names)', () => {
+  const names = { 'arbitrum.newtok': '0x1111111111111111111111111111111111111111' };
+  assert.deepEqual(mismatchedNames({ from: 'arbitrum.newtok', to: IAERO }, { from: 'arbitrum.0x2222222222222222222222222222222222222222', to: IAERO }, names),
+    ['arbitrum.newtok']);
+  assert.deepEqual(mismatchedNames({ from: 'arbitrum.newtok', to: IAERO }, { from: 'arbitrum.0x1111111111111111111111111111111111111111', to: IAERO }, names), []);
+  assert.deepEqual(mismatchedNames({ from: 'arbitrum.eth', to: IAERO }, { from: 'arbitrum.eth', to: IAERO }, names), [], 'native coins and addresses are not names');
 });

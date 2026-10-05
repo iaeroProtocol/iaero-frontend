@@ -120,7 +120,11 @@ export interface StoredOrder {
   hiddenAt?: number;
   /** Bitcoin payments to the deposit address, observed on mempool.space. `missing`: seen before, no longer
    *  found (dropped or replaced); `seenLate`: first seen already confirmed, so firstSeenAt is not the send time. */
-  btc?: { txid?: string; confirmations?: number; firstSeenAt?: number; totalSats?: string; payments?: number; missing?: boolean; seenLate?: boolean };
+  btc?: {
+    txid?: string; confirmations?: number; firstSeenAt?: number; totalSats?: string; payments?: number; missing?: boolean; seenLate?: boolean;
+    /** Empty answers in a row since the payment was last seen. */
+    emptyChecks?: number;
+  };
 
   // --- Rift's status ---
   status: RiftOrderStatus;

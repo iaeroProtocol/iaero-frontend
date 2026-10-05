@@ -4,7 +4,9 @@
 // address. rift-tokens.ts is a snapshot of that list; a name it lacks (a token Rift listed later, or iAERO itself
 // if Rift lists it) would make every answer for that token look like the wrong token. Such a name is resolved
 // with one "raw" quote for the same request, which answers with canonical ids (`evm:42161.0x…`), and remembered
-// in this browser (quote-check.ts). Only a name Rift gave to exactly the address asked for is learned.
+// in this browser (quote-check.ts). Only a name Rift gave to exactly the address asked for is learned. Rift says
+// names "may be reassigned": a known name that stands for another address than the one asked for is resolved
+// the same way, and the raw answer re-points it.
 // Pure, with no imports, so `node --test` can run it (tests/rift/).
 
 const KEY = 'iaero.rift.names.v1';
@@ -14,16 +16,23 @@ const NAME_RE = /^(ethereum|arbitrum|base)\.(?!0x[0-9a-f]{40}$)(?!eth$)[a-z0-9][
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
 const chainOf = (asset: string) => asset.slice(0, asset.indexOf('.'));
 
-/** The raw answer must identify the requested source even when the formatted answer already uses its address.
- * Unknown raw formats fail closed; otherwise a quote for another source could validate a destination name. */
+/** HyperCore spot token index per source asset (spotMeta; the same as hypercore.ts HYPERCORE_TOKENS). */
+export const HYPERCORE_SPOT_INDEX: Readonly<Record<string, number>> = {
+  'hyperliquid.usdc': 0, 'hyperliquid.hype': 150, 'hyperliquid.btc': 197, 'hyperliquid.eth': 221,
+};
+
+/** The raw answer must identify the requested source even when the formatted answer already uses its address,
+ *  or a quote for another source could vouch for a destination name. Raw ids seen from Rift (2026-10-05):
+ *  `evm:42161.0x…` for a token, `evm:42161.eth` for the native coin, `bitcoin.btc`, and `hyperliquid.spot:0` for
+ *  HyperCore USDC. Anything else fails closed. */
 function rawSourceMatches(id: unknown, asked: string): boolean {
   if (typeof id !== 'string') return false;
-  const want = asked.toLowerCase();
-  if (canonicalToAsset(id) === want) return true;
+  const raw = id.toLowerCase(), want = asked.toLowerCase();
+  if (canonicalToAsset(raw) === want || raw === want) return true;
   const chainId = CHAIN_IDS[chainOf(want)];
-  if (chainId && want === `${chainOf(want)}.eth`) return id.toLowerCase() === `evm:${chainId}.native`;
-  // Bitcoin and HyperCore raw IDs are not resolved here; an unfamiliar ID must not establish an EVM alias.
-  return id.toLowerCase() === want;
+  if (chainId && want === `${chainOf(want)}.eth`) return raw === `evm:${chainId}.eth` || raw === `evm:${chainId}.native`;
+  const spot = HYPERCORE_SPOT_INDEX[want];
+  return spot !== undefined && raw === `hyperliquid.spot:${spot}`;
 }
 
 /** `evm:<chainId>.<address>` (a raw answer's id) as `<chain>.<address>`; null for anything else. */
@@ -33,6 +42,20 @@ export function canonicalToAsset(id: unknown): string | null {
   if (!m) return null;
   const chain = Object.keys(CHAIN_IDS).find(k => CHAIN_IDS[k] === Number(m[1]));
   return chain ? `${chain}.${m[2].toLowerCase()}` : null;
+}
+
+/** The names in a formatted answer's `from` and `to` that `names` knows, but for another address than the one
+ *  asked for (`asked`: source and destination as `<chain>.<id>`): Rift may have reassigned them. */
+export function mismatchedNames(answer: unknown, asked: { from: string; to: string }, names: Readonly<Record<string, string>>): string[] {
+  const a = (answer && typeof answer === 'object' ? answer : {}) as { from?: unknown; to?: unknown };
+  const out: string[] = [];
+  for (const [v, want] of [[a.from, asked.from], [a.to, asked.to]] as const) {
+    if (typeof v !== 'string') continue;
+    const n = v.toLowerCase(), w = want.toLowerCase();
+    if (!NAME_RE.test(n) || names[n] === undefined) continue;
+    if (`${chainOf(n)}.${names[n]}` !== w) out.push(n);
+  }
+  return out;
 }
 
 /** The names in a formatted answer's `from` and `to` that `names` does not know. */
@@ -80,9 +103,9 @@ export function learnedNames(): Record<string, string> {
   return { ...out, ...memo };
 }
 
-/** Adds names not known yet; a name once learned is not re-pointed. */
+/** Adds or re-points names. Every pair comes from a raw answer for exactly the asset asked for (namesToLearn),
+ *  which is newer than any copy of Rift's list. */
 export function rememberNames(pairs: Record<string, string>) {
-  const known = learnedNames();
-  memo = { ...memo, ...Object.fromEntries(Object.entries(pairs).filter(([k]) => known[k] === undefined)) };
+  memo = { ...memo, ...pairs };
   try { window.localStorage.setItem(KEY, JSON.stringify(learnedNames())); } catch { /* this page only */ }
 }

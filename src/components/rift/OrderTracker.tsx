@@ -32,7 +32,9 @@ import { accountNonce, evmDepositEvidence, hyperDepositEvidence } from '@/lib/ri
 import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, RIFT_SUPPORT_URL, SOURCE_CHAINS } from '@/lib/rift/config';
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
 import { costText, costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
-import { canHide, isFinalStatus, isOutOfDate, isTerminalStatus, payState, payWindowMs, payWindowOpen, phaseInput } from '@/lib/rift/order-state';
+import {
+  canHide, isFinalStatus, isOutOfDate, isTerminalStatus, nextBtcRecord, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput,
+} from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
 // The QR library loads only for Bitcoin payments.
@@ -193,7 +195,10 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
               if (stop) return;
               if (ev === 'none') await ifCurrent({ depositFailed: true, depositFailReason: 'replaced' });
               // Sped up: the payment went out under a hash this page does not know.
-              else await ifCurrent(prev => ({ depositConfirmedAt: Date.now(), depositTxHash: undefined, pastTxHashes: [...(prev.pastTxHashes ?? []), hash].slice(-5) }));
+              else {
+                const at = Date.now();
+                await ifCurrent(prev => ({ depositConfirmedAt: at, depositTxHash: undefined, pastTxHashes: [...(prev.pastTxHashes ?? []), hash].slice(-5) }));
+              }
               return;
             }
           }
@@ -219,18 +224,12 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
         errors = 0;
         if (!stop) setBtcErrors(0);
         if (!stop) {
+          // Times are taken here, not in the change: a change that storage refused is applied again later.
+          const at = Date.now();
           await patchOrder(order.id, prev => {
-            if (!d.payments.length) return prev.btc?.txid ? { btc: { missing: true } } : {};
-            const confirmations = Math.min(...d.payments.map(p => p.confirmations));
-            // First seen already confirmed: the page was not watching when it was sent.
-            const seenLate = prev.btc?.firstSeenAt ? prev.btc.seenLate : confirmations > 0;
-            return {
-              btc: {
-                txid: d.payments[0].txid, confirmations, firstSeenAt: prev.btc?.firstSeenAt ?? Date.now(), totalSats: d.totalSats.toString(),
-                payments: d.payments.length, ...(seenLate ? { seenLate: true } : {}),
-              },
-            };
-          });
+            const btc = nextBtcRecord(prev.btc, d, at);
+            return btc === prev.btc ? {} : { btc };
+          }, { routine: `btc:${order.id}` });
         }
       } catch {
         errors++;
@@ -272,7 +271,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
           from = to + 1n;
         }
       } catch { /* the link is optional */ }
-      if (!stop) await patchOrder(order.id, { deliveryScannedTo: String(from) });
+      if (!stop) await patchOrder(order.id, { deliveryScannedTo: String(from) }, { routine: `scan:${order.id}` });
       if (!stop && ++tries < 8) timer = setTimeout(scan, 20000);
     };
     scan();
@@ -307,12 +306,16 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
     }
     return 'nothing';
   }
-  const markArrived = () => patchOrder(order.id, prev => ({
-    payUnknown: false, payRequestedAt: undefined, depositFailed: false, depositFailReason: undefined, depositConfirmedAt: Date.now(),
-    depositSentAt: prev.depositSentAt ?? prev.payAttemptAt ?? Date.now(), startEstimated: prev.startEstimated || !prev.depositSentAt,
-  }));
+  // Times are taken before each change, not inside it: a change that storage refused is applied again later.
+  const markArrived = () => {
+    const at = Date.now();
+    return patchOrder(order.id, prev => ({
+      payUnknown: false, payRequestedAt: undefined, depositFailed: false, depositFailReason: undefined, depositConfirmedAt: at,
+      depositSentAt: prev.depositSentAt ?? prev.payAttemptAt ?? at, startEstimated: prev.startEstimated || !prev.depositSentAt,
+    }));
+  };
   /** Out of the way once its window has closed and a check found nothing; still tracked, at the idle rate. */
-  const hide = () => { void patchOrder(order.id, prev => (canHide(prev, Date.now()) ? { hiddenAt: Date.now() } : {})); };
+  const hide = () => { const at = Date.now(); void patchOrder(order.id, prev => (canHide(prev, at) ? { hiddenAt: at } : {})); };
   const showChecks = () => { void patchOrder(order.id, { hiddenAt: undefined }); };
   async function checkPayment(thenPay = false) {
     if (thenPay && !settlementAck) return;
@@ -324,7 +327,8 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
         await markArrived();
         showToast?.('Your payment reached the deposit address. Tracking your order…', 'success');
       } else if (v === 'reverted') {
-        await patchOrder(order.id, prev => prev.depositTxHash === order.depositTxHash && payState(prev, Date.now()) === 'unknown'
+        const at = Date.now();
+        await patchOrder(order.id, prev => prev.depositTxHash === order.depositTxHash && payState(prev, at) === 'unknown'
           ? { payUnknown: false, payRequestedAt: undefined, depositFailed: true, depositFailReason: 'reverted' as const }
           : {});
         setCheckSaid('reverted');
@@ -332,7 +336,8 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
         setCheckSaid(v);
         if (v === 'nothing' && thenPay && kind === 'hypercore') {
           // HyperCore retries the same saved signed action. A tab still waiting on the wallet keeps its marker fresh.
-          await patchOrder(order.id, prev => (payState(prev, Date.now()) !== 'unknown' ? {} : {
+          const at = Date.now();
+          await patchOrder(order.id, prev => (payState(prev, at) !== 'unknown' ? {} : {
             payUnknown: false, payRequestedAt: undefined,
             ...(prev.depositSentAt ? { depositFailed: true, depositFailReason: 'lost' as const } : {}),
           }));
@@ -470,7 +475,9 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
               {short(order.refundAddress ?? 'the paying address')} on {chain.name}.
             </div>
           )}
-          {phase === 'expired' && <div className="text-sm text-slate-300">No payment arrived before the deadline, so this order closed. Nothing was taken.</div>}
+          {phase === 'expired' && (paidButExpired(order, now)
+            ? <div className="text-sm text-red-200">Rift closed this order, but a payment was sent to its deposit address. Please {supportLink} with the order ID below.</div>
+            : <div className="text-sm text-slate-300">No payment arrived before the deadline, so this order closed. Nothing was taken.</div>)}
           {phase === 'frozen' && <div className="text-sm text-red-200">Rift put this order on hold (a compliance or safety check). Please {supportLink} with the order ID below. This page keeps checking it.</div>}
           {phase === 'underfunded' && (
             <div className="text-sm text-red-200">
@@ -603,8 +610,18 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
           </>
         ) : (
           <div className="space-y-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-sm text-slate-200">
-            <div>This order wasn’t paid within an hour, so its price is out of date. Don’t send to its address; start a new order instead.</div>
-            {staleActions}
+            {order.btc?.txid ? (
+              // A payment was seen and has gone missing: the order stays (it completes if that payment confirms).
+              <>
+                <div>The Bitcoin payment seen earlier is no longer visible. If your wallet shows it as sent, this order completes when it confirms; otherwise start a new order. Don’t send to this order’s address again.</div>
+                <Button onClick={() => onReorder(order)} className="bg-gradient-to-r from-indigo-600 to-purple-600">New order at today’s price</Button>
+              </>
+            ) : (
+              <>
+                <div>This order wasn’t paid within an hour, so its price is out of date. Don’t send to its address; start a new order instead.</div>
+                {staleActions}
+              </>
+            )}
           </div>
         ))}
         {kind === 'bitcoin' && btcGot > 0n && btcGot !== btcNeeded && order.status === 'awaiting_deposit' && (

@@ -20,6 +20,10 @@ test('Bitcoin addresses are checked with their checksums', () => {
     'bc1qqqqqqqq',
     'Bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq', // mixed case
     'bc1par0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq', // v1 with a bech32 (not bech32m) checksum
+    // Valid encodings (BIP-350 vectors) that anyone can spend today: a refund sent there could be taken.
+    'bc1pw508d6qejxtdg4y5r3zarvary0c5xw7kw508d6qejxtdg4y5r3zarvary0c5xw7kt5nd6y', // v1 with a 40-byte program
+    'bc1zw508d6qejxtdg4y5r3zarvaryvaxxpcs', // v2
+    'BC1SW50QGDZ25J', // v16
     'tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx', // testnet
     '0x81034Fb34009115F215f5d5F564AAc9FfA46a1Dc',
   ]) assert.equal(isBtcAddress(a), false, a);

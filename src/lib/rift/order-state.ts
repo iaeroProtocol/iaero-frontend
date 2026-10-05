@@ -84,7 +84,8 @@ export const canHide = (o: StoredOrder, now: number) =>
   o.status === 'awaiting_deposit' && KIND_OF[o.sourceChain] !== 'bitcoin' && !payWindowOpen(o, KIND_OF[o.sourceChain], now)
   && payState(o, now) === 'unknown';
 
-/** The payment facts the progress phases are computed from (timing.ts phaseOf), the same everywhere. */
+/** The payment facts the progress phases are computed from (timing.ts phaseOf), the same everywhere. A Bitcoin
+ *  payment that has gone missing puts the order back to paying (the QR code returns). */
 export function phaseInput(o: StoredOrder, kind: SourceKind) {
   const unknown = !!o.payUnknown;
   return {
@@ -92,9 +93,37 @@ export function phaseInput(o: StoredOrder, kind: SourceKind) {
     sourceKind: kind,
     depositSentAt: o.depositSentAt && !o.depositFailed && !unknown ? o.depositSentAt : undefined,
     depositConfirmedAt: o.depositFailed || unknown ? undefined : o.depositConfirmedAt,
-    btcSeenAt: o.btc?.firstSeenAt,
+    btcSeenAt: o.btc?.missing ? undefined : o.btc?.firstSeenAt,
   };
 }
+
+/** Empty answers in a row before a Bitcoin payment seen earlier counts as gone (dropped or replaced): one empty
+ *  answer from a lagging mempool.space backend must not erase it. */
+export const BTC_MISSING_AFTER = 3;
+
+/** The order's Bitcoin record after a look at its deposit address. A payment seen earlier keeps its id and times
+ *  (the order is never treated as unpaid because of them) and is marked missing only after several empty answers. */
+export function nextBtcRecord(
+  prev: StoredOrder['btc'], seen: { payments: { txid: string; confirmations: number }[]; totalSats: bigint }, now: number,
+): StoredOrder['btc'] {
+  if (!seen.payments.length) {
+    if (!prev?.txid) return prev;
+    const emptyChecks = (prev.emptyChecks ?? 0) + 1;
+    return { ...prev, emptyChecks, ...(emptyChecks >= BTC_MISSING_AFTER ? { missing: true } : {}) };
+  }
+  const confirmations = Math.min(...seen.payments.map(p => p.confirmations));
+  // First seen already confirmed: the page was not watching when it was sent.
+  const seenLate = prev?.firstSeenAt ? prev.seenLate : confirmations > 0;
+  return {
+    txid: seen.payments[0].txid, confirmations, firstSeenAt: prev?.firstSeenAt ?? now, totalSats: seen.totalSats.toString(),
+    payments: seen.payments.length, ...(seenLate ? { seenLate: true } : {}),
+  };
+}
+
+/** Rift closed the order as expired although this browser saw a payment go to it: it needs Rift's support (and its
+ *  order ID), so it is never cleared like an order that simply ran out. */
+export const paidButExpired = (o: StoredOrder, now: number) =>
+  o.status === 'expired' && (payState(o, now) === 'sent' || !!o.depositConfirmedAt || !!o.btc?.txid);
 
 /** Frozen orders are not moving (Rift's operators decide), but they can still be refunded or delivered. */
 export const isTerminalStatus = (s: RiftOrderStatus) => FINAL.includes(s) || s === 'frozen';
@@ -205,6 +234,7 @@ export function sanitizeOrder(x: unknown): StoredOrder | null {
       if (isNum(btc.payments)) b.payments = btc.payments;
       if (btc.missing === true) b.missing = true;
       if (btc.seenLate === true) b.seenLate = true;
+      if (isNum(btc.emptyChecks)) b.emptyChecks = btc.emptyChecks;
       clean.btc = b;
     }
   }
@@ -221,7 +251,7 @@ export function sanitizeOrder(x: unknown): StoredOrder | null {
  *  finished or abandoned (never paid, past their window) ones first. */
 export function capOrders(list: StoredOrder[], max: number, now: number): StoredOrder[] {
   if (list.length <= max) return list;
-  const droppable = (o: StoredOrder) => (isFinalStatus(o.status) && !needsAttention(o.status)) || isAbandoned(o, now);
+  const droppable = (o: StoredOrder) => (isFinalStatus(o.status) && !needsAttention(o.status) && !paidButExpired(o, now)) || isAbandoned(o, now);
   const keep = new Set(list.filter(o => !droppable(o)).map(o => o.id));
   const rest = list.filter(o => !keep.has(o.id)).sort((a, b) => b.createdAt - a.createdAt);
   for (const o of rest) { if (keep.size >= max) break; keep.add(o.id); }

@@ -30,7 +30,7 @@ function load({ raw = RAW, budget = true } = {}) {
       './names': names, './validate': validate,
     })[n] ?? (() => { throw new Error(`unexpected import ${n}`); })(),
   });
-  return { ...exports, calls };
+  return { ...exports, calls, names };
 }
 const expect = { destination: DEST, fromChain: 'arbitrum', fromAmount: '20', fromAsset: USDT0 };
 
@@ -63,4 +63,14 @@ test('nothing is learned from a raw answer for another token or destination', as
   await assert.rejects(m.checkQuote(formatted({ from: USDT0 }), expect, { rawAmount: 20_000_000n, kind: 'user' }), /does not deliver iAERO/);
   const wrongAmount = load({ raw: { ...RAW, from_amount: '1' } });
   await assert.rejects(wrongAmount.checkQuote(formatted(), expect, { rawAmount: 20_000_000n, kind: 'user' }), /does not deliver iAERO/);
+});
+
+test('a name Rift moved to another contract is re-pointed by the raw answer, not refused for good', async () => {
+  const OLD = '0x1111111111111111111111111111111111111111';
+  const m = load();
+  m.names.rememberNames({ 'arbitrum.usdt0': OLD }); // learned for another contract earlier
+  const q = await m.checkQuote(formatted({ to: DEST }), expect, { rawAmount: 20_000_000n, kind: 'user' });
+  assert.equal(q.from, 'arbitrum.usdt0');
+  assert.equal(m.calls.filter(c => c.format === 'raw').length, 1, 'one lookup');
+  assert.equal(m.names.learnedNames()['arbitrum.usdt0'], USDT0.slice(9), 're-pointed to the contract the raw answer names');
 });

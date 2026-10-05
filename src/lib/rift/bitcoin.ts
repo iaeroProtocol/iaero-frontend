@@ -48,7 +48,9 @@ function isSegwitAddress(address: string): boolean {
   if (version > 16 || chk !== (version === 0 ? 1 : 0x2bc830a3)) return false;
   const program = convertBits(payload.slice(1), 5, 8);
   if (!program || program.length < 2 || program.length > 40) return false;
-  return version !== 0 || program.length === 20 || program.length === 32;
+  // Version 0 (20 or 32 bytes) and taproot (version 1, 32 bytes) only: other programs are valid encodings that
+  // anyone can spend today, so a refund sent there could be taken.
+  return version === 0 ? program.length === 20 || program.length === 32 : version === 1 && program.length === 32;
 }
 
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -80,6 +82,8 @@ export const bip21 = (address: string, amountBtc: string) => `bitcoin:${address}
 // --- Payments to an address, from mempool.space ---
 
 const MEMPOOL = 'https://mempool.space/api';
+/** For the whole lookup, bodies included: a stalled answer must not stop tracking. */
+const MEMPOOL_TIMEOUT_MS = 15_000;
 
 interface MempoolTx {
   txid: string;
@@ -92,23 +96,32 @@ export interface BtcDeposits { payments: BtcPayment[]; totalSats: bigint }
 
 /** Every transaction paying `address` (oldest first) with its confirmations, and their total. */
 export async function findBtcDeposits(address: string, signal?: AbortSignal): Promise<BtcDeposits> {
-  const res = await fetch(`${MEMPOOL}/address/${address}/txs`, { signal });
-  if (!res.ok) throw new Error(`mempool.space ${res.status}`);
-  const txs = (await res.json()) as MempoolTx[];
-  const paying = txs
-    .map(tx => ({ tx, sats: tx.vout.filter(o => o.scriptpubkey_address === address).reduce((n, o) => n + BigInt(o.value), 0n) }))
-    .filter(x => x.sats > 0n)
-    .reverse();
-  let tip = 0;
-  if (paying.some(p => p.tx.status.confirmed)) {
-    const r = await fetch(`${MEMPOOL}/blocks/tip/height`, { signal });
-    if (r.ok) tip = Number(await r.text()) || 0;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MEMPOOL_TIMEOUT_MS);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener('abort', onAbort);
+  try {
+    const res = await fetch(`${MEMPOOL}/address/${address}/txs`, { signal: controller.signal });
+    if (!res.ok) throw new Error(`mempool.space ${res.status}`);
+    const txs = (await res.json()) as MempoolTx[];
+    const paying = txs
+      .map(tx => ({ tx, sats: tx.vout.filter(o => o.scriptpubkey_address === address).reduce((n, o) => n + BigInt(o.value), 0n) }))
+      .filter(x => x.sats > 0n)
+      .reverse();
+    let tip = 0;
+    if (paying.some(p => p.tx.status.confirmed)) {
+      const r = await fetch(`${MEMPOOL}/blocks/tip/height`, { signal: controller.signal });
+      if (r.ok) tip = Number(await r.text()) || 0;
+    }
+    const payments = paying.map(({ tx, sats }) => ({
+      txid: tx.txid, sats,
+      confirmations: tx.status.confirmed && tx.status.block_height && tip ? Math.max(1, tip - tx.status.block_height + 1) : 0,
+    }));
+    return { payments, totalSats: payments.reduce((n, p) => n + p.sats, 0n) };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
   }
-  const payments = paying.map(({ tx, sats }) => ({
-    txid: tx.txid, sats,
-    confirmations: tx.status.confirmed && tx.status.block_height && tip ? Math.max(1, tip - tx.status.block_height + 1) : 0,
-  }));
-  return { payments, totalSats: payments.reduce((n, p) => n + p.sats, 0n) };
 }
 
 /** "0.00012345" BTC -> satoshis. */

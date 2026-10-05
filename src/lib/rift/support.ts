@@ -10,10 +10,11 @@
 //   most of them.
 //
 // Only real answers are cached: "no route" for 30 minutes and "unknown asset" for 6 hours. Rift's "could not be
-// priced" answer means an outage or no route for this token; a control quote tells which. Outages and rate
-// limits are not cached, and a token is asked again a little later. A negative answer from a small check is
-// asked again once the holding is worth several times more. The queue and its back-offs live outside the
-// component, so a balance refresh does not restart them.
+// priced" answer means an outage or no route for this token; a control quote, right after it, tells which.
+// Outages, rate limits and unclear answers are not cached; the token is asked again later, waiting twice as long
+// each time (2 minutes up to 30). A negative answer from a small check is asked again once the holding is worth
+// several times more. The queue and its back-offs live outside the component, so a balance refresh does not
+// restart them.
 
 'use client';
 
@@ -22,8 +23,7 @@ import { classifyRiftError, fetchQuote, riftBudget, riftPricing, RiftApiError } 
 import { CURATED_TOKENS, RIFT_DESTINATION } from './config';
 import { RIFT_LISTED } from './rift-tokens';
 import { probeAmount, PROBE_USD, type Holding } from './holdings';
-import { checkQuote, riftNames } from './quote-check';
-import { unknownNames } from './names';
+import { checkQuote, unresolvedNames } from './quote-check';
 import { decimalToRaw } from './validate';
 
 export type Support = 'supported' | 'unsupported' | 'checking';
@@ -33,6 +33,7 @@ const OK_TTL_MS = 24 * 3600_000;
 const NO_ROUTE_TTL_MS = 30 * 60_000;
 const UNSUPPORTED_TTL_MS = 6 * 3600_000;
 const RETRY_LATER_MS = 2 * 60_000;
+const RETRY_MAX_MS = 30 * 60_000;
 /** Ethereum holdings below this that would need a route check are not offered. */
 const MIN_ETHEREUM_CHECK_USD = 25;
 
@@ -77,6 +78,13 @@ const checkedUsd = (h: Holding) => Math.min(h.valueUsd, PROBE_USD);
 
 /** Asked again no earlier than this (after an outage or an unclear answer), per asset, for this page's life. */
 const retryAt = new Map<string, number>();
+/** Unclear answers so far, per asset: each one doubles the wait. */
+const unclear = new Map<string, number>();
+const askLater = (asset: string) => {
+  const n = (unclear.get(asset) ?? 0) + 1;
+  unclear.set(asset, n);
+  retryAt.set(asset, Date.now() + Math.min(RETRY_LATER_MS * 2 ** (n - 1), RETRY_MAX_MS));
+};
 
 /** What is known without asking Rift; undefined if a check is needed. */
 function knownSupport(h: Holding, cache: Cache, now: number): Support | undefined {
@@ -137,9 +145,9 @@ export function useRiftSupport(holdings: Holding[], enabled = true): Record<stri
           } catch (e) {
             if (e instanceof RiftApiError) throw e;
             settle(asset, 'unsupported');
-            if (unknownNames(json, riftNames()).length) {
+            if (unresolvedNames(json, h.asset, RIFT_DESTINATION).length) {
               // A token name not resolved yet (no room in the budget for the lookup): asked again later, not cached.
-              retryAt.set(asset, Date.now() + RETRY_LATER_MS);
+              askLater(asset);
               queue.push(asset);
             } else {
               remember(asset.toLowerCase(), { ok: false, at: Date.now(), ttl: NO_ROUTE_TTL_MS, usd: checkedUsd(h) });
@@ -147,12 +155,14 @@ export function useRiftSupport(holdings: Holding[], enabled = true): Record<stri
             continue;
           }
           remember(asset.toLowerCase(), { ok: true, at: Date.now(), ttl: OK_TTL_MS, usd: checkedUsd(h) });
+          unclear.delete(asset);
           settle(asset, 'supported');
         } catch (e) {
           let kind = classifyRiftError(e);
-          // "Could not be priced": an outage, or no route for this token. Rift pricing other routes says which.
+          // "Could not be priced": an outage, or no route for this token. Rift pricing other routes says which; that
+          // control quote comes straight after this check, so it is held to the poll limit, not the probe spacing.
           if (kind === 'unavailable') {
-            const up = await riftPricing();
+            const up = await riftPricing('background');
             if (up === true) kind = 'no_route';
           }
           if (kind === 'no_route' || kind === 'unsupported') {
@@ -160,7 +170,7 @@ export function useRiftSupport(holdings: Holding[], enabled = true): Record<stri
             settle(asset, 'unsupported');
           } else {
             // Rate limited, down or unreachable: hidden for now, asked again later, nothing cached.
-            retryAt.set(asset, Date.now() + RETRY_LATER_MS);
+            askLater(asset);
             queue.push(asset);
             settle(asset, 'unsupported');
           }

@@ -75,6 +75,7 @@ async function call(path: string, init: { method?: 'GET' | 'POST'; body?: unknow
   init.signal?.addEventListener('abort', onAbort);
   logCall(init.kind ?? 'user', Date.now());
   let res: Response;
+  let text: string;
   try {
     res = await fetch(`${RIFT_API}${path}`, {
       method: init.method ?? 'GET',
@@ -82,6 +83,7 @@ async function call(path: string, init: { method?: 'GET' | 'POST'; body?: unknow
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
       signal: controller.signal,
     });
+    text = await res.text(); // within the timeout: a stalled body must not hang the caller
   } catch (e) {
     if (init.signal?.aborted) throw e;
     throw new RiftApiError(0, controller.signal.aborted ? 'Rift took too long to answer' : 'Could not reach Rift');
@@ -89,7 +91,6 @@ async function call(path: string, init: { method?: 'GET' | 'POST'; body?: unknow
     clearTimeout(timer);
     init.signal?.removeEventListener('abort', onAbort);
   }
-  const text = await res.text();
   let data: unknown = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* plain text, e.g. Cloudflare's "error code: 1015" */ }
   if (!res.ok) {
@@ -144,13 +145,15 @@ let control: { at: number; up: boolean } | null = null;
  * Rift's "execution costs could not be priced, so no route was evaluated in full" means an outage, or that
  * this token has no route: a control quote tells them apart. true: Rift prices other routes (so this token
  * has none); false: Rift is down; null: can't tell now (rate limit, network, or no budget for a background check).
+ * `background`: asked right after a route check, so held to the poll limit rather than the route checks' 15 s
+ * spacing (which would never let it go).
  */
-export async function riftPricing(kind: 'user' | 'probe' = 'probe'): Promise<boolean | null> {
+export async function riftPricing(kind: 'user' | 'background' = 'background'): Promise<boolean | null> {
   const now = Date.now();
   if (control && now - control.at < CONTROL_TTL_MS) return control.up;
-  if (kind === 'probe' && !riftBudget('probe', now)) return null;
+  if (kind === 'background' && !riftBudget('poll', now)) return null;
   try {
-    await fetchQuote({ ...CONTROL, quote_mode: 'fast' }, undefined, kind);
+    await fetchQuote({ ...CONTROL, quote_mode: 'fast' }, undefined, kind === 'user' ? 'user' : 'probe');
     control = { at: Date.now(), up: true };
   } catch (e) {
     const kind = classifyRiftError(e);

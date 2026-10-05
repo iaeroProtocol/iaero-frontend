@@ -24,8 +24,8 @@ const KEY = ORDERS_KEY;
 const LOCK = 'iaero-rift-orders';
 const EVENT = 'iaero-rift-orders';
 const MAX_ORDERS = 25;
-/** At most this many unreadable records are carried along. */
-const MAX_FOREIGN = 10;
+/** At most this many unreadable records (written by a newer version, or damaged) are carried along. */
+const MAX_FOREIGN = 100;
 /** Polls refresh `lastPolledAt` at most this often, so an unchanged status does not rewrite storage. */
 const POLL_STAMP_MS = 30_000;
 /** A status first seen after a gap this long was not watched live: its time is not when it happened. */
@@ -33,12 +33,15 @@ const LATE_AFTER_MS = 150_000;
 const PROBE_KEY = 'iaero.rift.probe';
 
 type Change = (list: StoredOrder[]) => StoredOrder[] | null;
+/** A change storage refused. `routine`: one that a later change of the same kind replaces (a status poll, a scan
+ *  stamp), so a long outage does not pile them up; every other change (payments, claims, removals) is kept. */
+interface Unsaved { change: Change; routine?: string }
 
 let memory: StoredOrder[] | null = null;
 let foreign: unknown[] = [];
 let writeFailed = false;
 /** Changes this page could not save, in order (storage full or blocked). */
-let unsaved: Change[] = [];
+let unsaved: Unsaved[] = [];
 
 function readStorage(): StoredOrder[] | null {
   try {
@@ -62,7 +65,7 @@ function current(): StoredOrder[] | null {
   const stored = readStorage();
   if (!stored) return null;
   let list = stored;
-  for (const c of unsaved) list = c(list) ?? list;
+  for (const u of unsaved) list = u.change(list) ?? list;
   return list;
 }
 
@@ -74,13 +77,12 @@ export function loadOrders(): StoredOrder[] {
 
 /** True while this browser is not saving orders (storage full or blocked). */
 export const storageFailing = () => writeFailed;
+/** How many refused changes this page is carrying (diagnostics and tests). */
+export const unsavedChanges = () => unsaved.length;
 
-/** Why this browser cannot pay orders safely, or null. Payments need Web Locks (tabs agree on who opens the
- *  wallet) and storage that takes writes (the claim is saved before the wallet is asked). */
-export function paymentStorageProblem(): string | null {
-  if (typeof navigator === 'undefined' || !navigator.locks?.request) {
-    return 'This browser can’t coordinate payments between tabs (it has no Web Locks). Use an up-to-date browser.';
-  }
+/** Why this browser can't keep an order, or null: a new order must be saved before its payment instructions are
+ *  shown (a Bitcoin order, paid from another wallet, needs nothing more). */
+export function orderStorageProblem(): string | null {
   if (writeFailed) return 'This browser isn’t saving orders right now (its storage is full or blocked). Refresh after fixing it.';
   try {
     window.localStorage.setItem(PROBE_KEY, '1');
@@ -89,6 +91,15 @@ export function paymentStorageProblem(): string | null {
     return 'This browser’s storage is full or blocked, so orders can’t be tracked safely. Allow site storage and refresh.';
   }
   return null;
+}
+
+/** Why this browser cannot pay orders safely, or null. Payments also need Web Locks (tabs agree on who opens the
+ *  wallet; the claim is saved before the wallet is asked). */
+export function paymentStorageProblem(): string | null {
+  if (typeof navigator === 'undefined' || !navigator.locks?.request) {
+    return 'This browser can’t coordinate payments between tabs (it has no Web Locks). Use an up-to-date browser.';
+  }
+  return orderStorageProblem();
 }
 
 /** Ids of saved records this version cannot show (written by a newer version, or damaged). */
@@ -117,7 +128,7 @@ export type WriteResult = 'saved' | 'unchanged' | 'failed';
 /** Read, change and save the list under the cross-tab lock. `change` returns null for "nothing to save".
  *  The change is applied to what storage holds now (with this page's unsaved changes); this page's copy is used
  *  only when storage can't be read. */
-function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: boolean } = {}): Promise<WriteResult> {
+function mutate(change: Change, { keepOnFailure = true, routine }: { keepOnFailure?: boolean; routine?: string } = {}): Promise<WriteResult> {
   const run = (): WriteResult => {
     const base = current() ?? memory ?? [];
     const next = change(base);
@@ -134,9 +145,10 @@ function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: bool
       window.dispatchEvent(new Event(EVENT));
       return 'failed';
     }
-    // Never drop an older change to make room for polling updates: it may contain a sent payment hash.
+    // Never drop a payment change (it may hold a sent payment's hash); a routine one replaces its predecessor.
     // These changes live only for this page's lifetime and are cleared by the next successful save.
-    unsaved.push(change);
+    if (routine !== undefined) unsaved = unsaved.filter(u => u.routine !== routine);
+    unsaved.push({ change, routine });
     window.dispatchEvent(new Event(EVENT));
     return 'failed';
   };
@@ -155,8 +167,10 @@ export function upsertOrder(order: StoredOrder, opts: { keepOnFailure?: boolean 
 }
 
 /** Change one order. Nothing is written when nothing changes, and statuses only move forward (a late poll
- *  from another tab can land after a newer one): order-state.ts canMoveTo. */
-export function patchOrder(id: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>)): Promise<WriteResult> {
+ *  from another tab can land after a newer one): order-state.ts canMoveTo. `routine`: see Unsaved. */
+export function patchOrder(
+  id: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>), opts: { routine?: string } = {},
+): Promise<WriteResult> {
   return mutate(list => {
     const i = list.findIndex(o => o.id === id);
     if (i < 0) return null;
@@ -168,8 +182,11 @@ export function patchOrder(id: string, patch: Partial<StoredOrder> | ((o: Stored
     const copy = list.slice();
     copy[i] = next;
     return copy;
-  });
+  }, opts);
 }
+
+/** A refusal raised here, whose message already says that nothing was sent. */
+class ClaimRefused extends Error {}
 
 /** Claim a payment under the cross-tab Web Lock before opening a wallet prompt. A payment requires durable
  *  storage: if Web Locks or localStorage are unavailable, two tabs cannot safely agree who owns the prompt.
@@ -181,9 +198,9 @@ export async function claimPayment(
   if (!locks?.request) throw new Error('This browser cannot safely coordinate payments across tabs. Use a browser with Web Locks support.');
   try {
     return await locks.request(LOCK, () => {
-      if (writeFailed) throw new Error('Browser storage is not saving orders. Nothing was sent; refresh this page after fixing storage.');
+      if (writeFailed) throw new ClaimRefused('Browser storage is not saving orders. Nothing was sent; refresh this page after fixing storage.');
       const list = readStorage();
-      if (!list) throw new Error('Could not read saved orders. Nothing was sent; enable browser storage and try again.');
+      if (!list) throw new ClaimRefused('Could not read saved orders. Nothing was sent; enable browser storage and try again.');
       memory = list;
       const i = list.findIndex(o => o.id === id);
       if (i < 0) return null;
@@ -203,14 +220,15 @@ export async function claimPayment(
       if (!saveOrders(next)) {
         memory = list;
         window.dispatchEvent(new Event(EVENT));
-        throw new Error('Could not save the payment attempt. Nothing was sent; enable browser storage and try again.');
+        throw new ClaimRefused('Could not save the payment attempt. Nothing was sent; enable browser storage and try again.');
       }
       window.dispatchEvent(new Event(EVENT));
       return attempt;
     });
   } catch (e) {
-    // A failed lock request must never fall back to an unlocked payment.
-    throw e instanceof Error ? e : new Error('Could not coordinate this payment across tabs. Nothing was sent.');
+    // A failed lock request must never fall back to an unlocked payment, and the browser's own message ("The
+    // request was aborted.") would not say that nothing was sent.
+    throw e instanceof ClaimRefused ? e : new Error('Could not coordinate this payment across tabs. Nothing was sent; try again in a moment.');
   }
 }
 
@@ -246,6 +264,7 @@ export async function beginHyperPost(id: string, attemptId: string, action: { ti
 /** Record a status poll: the status, when it was first seen (and whether that was live), the amount out. */
 export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()): Promise<WriteResult> {
   markPolled(id, now);
+  // While storage refuses writes, only the latest poll per status is kept (statuses only move forward).
   return patchOrder(id, prev => {
     const stamp = !prev.lastPolledAt || now - prev.lastPolledAt > POLL_STAMP_MS ? now : prev.lastPolledAt;
     if (!u.status) return { rawStatus: u.rawStatus, lastPolledAt: stamp };
@@ -264,7 +283,7 @@ export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()):
       // Rift has seen a deposit: whether the last payment attempt went out is no longer in doubt.
       ...(u.status !== 'awaiting_deposit' ? { payUnknown: false, payRequestedAt: undefined } : {}),
     };
-  });
+  }, { routine: `status:${id}:${u.status ?? u.rawStatus}` });
 }
 
 export function removeOrders(ids: string[]): Promise<WriteResult> {

@@ -22,7 +22,7 @@ const order = () => {
   };
 };
 
-function harness(saved, { locksAvailable = true, lockRejects = false } = {}) {
+function harness(saved, { locksAvailable = true, lockRejects = false, lockError = new Error('lock unavailable') } = {}) {
   const data = new Map([[key, JSON.stringify(Array.isArray(saved) ? saved : [saved])]]);
   const listeners = [];
   let storageBlocked = false;
@@ -32,7 +32,7 @@ function harness(saved, { locksAvailable = true, lockRejects = false } = {}) {
     removeItem: k => { data.delete(k); },
   };
   let tail = Promise.resolve();
-  const locks = !locksAvailable ? undefined : lockRejects ? { request: () => Promise.reject(new Error('lock unavailable')) } : { request: (_name, fn) => {
+  const locks = !locksAvailable ? undefined : lockRejects ? { request: () => Promise.reject(lockError) } : { request: (_name, fn) => {
     const task = tail.then(fn);
     tail = task.then(() => {}, () => {});
     return task;
@@ -229,4 +229,39 @@ test('a sent payment hash stays visible through more than fifty failed later wri
   h.unblock();
   assert.equal(await a.patchOrder(x.id, { notify: true }), 'saved');
   assert.equal(h.read().depositTxHash, HASH, 'the hash is saved when storage recovers');
+});
+
+test('routine changes refused by storage replace each other; payment changes are all kept', async () => {
+  const x = order();
+  const h = harness(x);
+  const a = h.tab();
+  const claimed = await a.claimPayment(x.id, owner);
+  h.block();
+  assert.equal(await a.patchPaymentAttempt(x.id, claimed.payAttemptId, { depositTxHash: HASH, depositSentAt: Date.now() }), 'failed');
+  for (let i = 0; i < 200; i++) await a.applyStatusUpdate(x.id, { status: 'awaiting_deposit', rawStatus: 'awaiting_deposit', amountOut: null }, Date.now() + i * 40_000);
+  assert.ok(a.unsavedChanges() <= 3, `bounded: ${a.unsavedChanges()}`);
+  assert.equal(a.loadOrders()[0].depositTxHash, HASH, 'the payment change is still applied');
+  h.unblock();
+  assert.equal(await a.patchOrder(x.id, { notify: true }), 'saved');
+  assert.equal(h.read().depositTxHash, HASH);
+  assert.equal(a.unsavedChanges(), 0);
+});
+
+test('a refused lock says nothing was sent, whatever the browser\u2019s own message', async () => {
+  const h = harness(order(), { lockRejects: true, lockError: new Error('The request was aborted.') });
+  await assert.rejects(h.tab().claimPayment(h.read().id, owner), /Could not coordinate this payment across tabs\. Nothing was sent/);
+});
+
+test('a Bitcoin order needs storage but not Web Locks; up to 100 newer-version records are kept', async () => {
+  const noLocks = harness(order(), { locksAvailable: false }).tab();
+  assert.equal(noLocks.orderStorageProblem(), null);
+  assert.match(noLocks.paymentStorageProblem(), /Web Locks/);
+  const blocked = harness(order());
+  blocked.block();
+  assert.match(blocked.tab().orderStorageProblem(), /storage is full or blocked/);
+  const newer = Array.from({ length: 14 }, () => ({ id: randomUUID(), schema: 'v99' }));
+  const h = harness([order(), ...newer]);
+  const t = h.tab();
+  await t.patchOrder(h.read().id, { notify: true });
+  assert.equal(h.all().filter(r => r.schema === 'v99').length, 14);
 });

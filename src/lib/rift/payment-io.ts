@@ -10,13 +10,15 @@ import type { StoredOrder } from './types';
 
 const HL_TIMEOUT_MS = 15_000;
 
-async function hlPost(path: '/info' | '/exchange', body: unknown): Promise<Response> {
+/** A POST to Hyperliquid, its body read within the same timeout (a stalled body must not hang a payment). */
+async function hlPost(path: '/info' | '/exchange', body: unknown): Promise<{ ok: boolean; status: number; text: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HL_TIMEOUT_MS);
   try {
-    return await fetch(`${HL_API}${path}`, {
+    const res = await fetch(`${HL_API}${path}`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal,
     });
+    return { ok: res.ok, status: res.status, text: await res.text() };
   } finally {
     clearTimeout(timer);
   }
@@ -45,21 +47,20 @@ export async function hyperDepositEvidence(o: Pick<StoredOrder, 'toAddress' | 'd
   const since = o.createdAt - 60_000;
   const res = await hlPost('/info', { type: 'userNonFundingLedgerUpdates', user: o.toAddress, startTime: since });
   if (!res.ok) throw new Error(`Hyperliquid HTTP ${res.status}`);
-  return judgeHyperLedger(await res.json(), { owner: o.toAddress, deposit: o.depositAddress, symbol, need: Number(o.fromAmount), since });
+  return judgeHyperLedger(JSON.parse(res.text), { owner: o.toAddress, deposit: o.depositAddress, symbol, need: Number(o.fromAmount), since });
 }
 
 /** Post a signed HyperCore spot transfer. Only a 200 with status "err" is a refusal; anything else that is not
  *  "ok" (a gateway error, a timeout) leaves the outcome unknown. */
 export async function postHyperTransfer(a: NonNullable<StoredOrder['hlAction']>): Promise<ExchangeOutcome> {
-  let res: Response;
+  let res: Awaited<ReturnType<typeof hlPost>>;
   try {
     res = await hlPost('/exchange', spotSendRequest(a, { r: a.r, s: a.s, v: a.v }));
   } catch {
     return { kind: 'unknown' };
   }
-  const text = await res.text().catch(() => '');
   let json: unknown = null;
-  try { json = JSON.parse(text); } catch { /* not JSON: unknown */ }
+  try { json = JSON.parse(res.text); } catch { /* not JSON: unknown */ }
   return exchangeOutcome(res.ok, json);
 }
 
