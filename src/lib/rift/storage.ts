@@ -40,8 +40,18 @@ let writeFailed = false;
 /** Changes this page could not save, in order (storage full or blocked). Every one is kept: a later change is
  *  computed on top of the earlier ones, so dropping one could lose what it recorded (a payment seen, a hash). The
  *  list stays small because changes that record nothing new are not made while storage is failing (a poll that
- *  only stamps its time) or are no-ops (an observation that matches what is shown). */
+ *  only stamps its time, a Bitcoin look that only moves a counter) or are no-ops (an observation that matches
+ *  what is shown). */
 let unsaved: Change[] = [];
+/** While changes are unsaved they are tried again this often, so the page notices storage working again even
+ *  when nothing else writes. */
+const RETRY_SAVE_MS = 15_000;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+function retryLater() {
+  if (retryTimer !== undefined || !unsaved.length || typeof setTimeout !== 'function') return;
+  retryTimer = setTimeout(() => { retryTimer = undefined; void mutate(() => null); }, RETRY_SAVE_MS);
+}
 
 function readStorage(): StoredOrder[] | null {
   try {
@@ -130,9 +140,22 @@ export type WriteResult = 'saved' | 'unchanged' | 'failed';
  *  only when storage can't be read. */
 function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: boolean } = {}): Promise<WriteResult> {
   const run = (): WriteResult => {
-    const base = current() ?? memory ?? [];
+    const stored = current();
+    const base = stored ?? memory ?? [];
     const next = change(base);
-    if (!next) { memory = base; return 'unchanged'; }
+    if (!next) {
+      memory = base;
+      // Nothing new, but changes storage refused are waiting: try them again, over what storage holds now (never
+      // over this page's copy alone). While storage fails, a poll that only stamps its time changes nothing, so
+      // this is how the page notices storage working again, before a refresh could drop what it carries.
+      if (stored && unsaved.length) {
+        if (saveOrders(base)) {
+          unsaved = [];
+          window.dispatchEvent(new Event(EVENT));
+        } else retryLater();
+      }
+      return 'unchanged';
+    }
     if (saveOrders(next)) {
       unsaved = [];
       window.dispatchEvent(new Event(EVENT));
@@ -142,11 +165,13 @@ function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: bool
       // A new order must not expose payment instructions if it would disappear on reload. Keep this page's
       // earlier unsaved changes, but discard this failed insertion from its view.
       memory = base;
+      retryLater();
       window.dispatchEvent(new Event(EVENT));
       return 'failed';
     }
     // Kept for this page's lifetime, and cleared by the next successful save.
     unsaved.push(change);
+    retryLater();
     window.dispatchEvent(new Event(EVENT));
     return 'failed';
   };
@@ -297,14 +322,23 @@ export function removeOrders(ids: string[]): Promise<WriteResult> {
 
 const POLLED_KEY = 'iaero.rift.polled.v1';
 
+/** This page's own stamps, kept too: while storage refuses writes, the stored ones go stale. */
+const polledHere: Record<string, number> = {};
+
 function readPolled(): Record<string, number> {
-  try { return JSON.parse(window.localStorage.getItem(POLLED_KEY) ?? '{}') ?? {}; } catch { return {}; }
+  let stored: Record<string, number> = {};
+  try { stored = JSON.parse(window.localStorage.getItem(POLLED_KEY) ?? '{}') ?? {}; } catch { /* this page's own */ }
+  const out = { ...stored };
+  for (const [k, t] of Object.entries(polledHere)) if (!(out[k] >= t)) out[k] = t;
+  return out;
 }
 
 /** Snapshot used to serve the least recently polled orders first when Rift's budget is tight. */
 export const pollStamps = () => readPolled();
 
 export function markPolled(id: string, now = Date.now()) {
+  polledHere[id] = Math.max(polledHere[id] ?? 0, now);
+  for (const k of Object.keys(polledHere)) if (now - polledHere[k] > 3600_000) delete polledHere[k];
   try {
     const m = readPolled();
     m[id] = now;

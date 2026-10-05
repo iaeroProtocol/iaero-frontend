@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PAY_WINDOW_MS, canMoveTo, canPay, capOrders, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowOpen, phaseInput,
-  BTC_MISSING_AFTER, canHide, isOutOfDate, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
+  BTC_MISSING_AFTER, btcSightingChanged, canHide, isOutOfDate, missingButExpired, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
 } from '../../src/lib/rift/order-state.ts';
 
 const T0 = 1_790_930_000_000;
@@ -196,4 +196,31 @@ test('an expired order this browser saw paid needs Rift\u2019s support, so it is
   assert.equal(paidButExpired(order({ status: 'expired', sourceChain: 'bitcoin', btc: { txid: 'ab'.repeat(32), missing: true } }), late), false);
   const others = Array.from({ length: 3 }, (_, i) => order({ id: String(i), status: 'delivered' }));
   assert.ok(capOrders([paid, ...others], 1, late).includes(paid));
+});
+
+test('while storage refuses writes, a Bitcoin look records what was seen, not its counters', () => {
+  const seen = c => ({ payments: [{ txid: 'ab'.repeat(32), confirmations: c }], totalSats: 1_000_000n });
+  const empty = { payments: [], totalSats: 0n };
+  const first = nextBtcRecord(undefined, seen(0), T0);
+  assert.equal(btcSightingChanged(undefined, first), true, 'first seen');
+  assert.equal(btcSightingChanged(first, nextBtcRecord(first, seen(0), T0 + 1)), false);
+  const one = nextBtcRecord(first, seen(1), T0 + 2);
+  assert.equal(btcSightingChanged(first, one), true, 'first confirmation');
+  assert.equal(btcSightingChanged(one, nextBtcRecord(one, seen(2), T0 + 3)), false, 'more confirmations: a counter');
+  assert.equal(btcSightingChanged(one, nextBtcRecord(one, empty, T0 + 4, 1)), false, 'one empty answer: a counter');
+  // The page's own count stands in for the stored one, which a sighting it could not record left too high.
+  const high = { ...one, emptyChecks: 2 };
+  assert.equal(nextBtcRecord(high, empty, T0 + 5, 1).missing, undefined);
+  const gone = nextBtcRecord(high, empty, T0 + 6, BTC_MISSING_AFTER);
+  assert.equal(gone.missing, true);
+  assert.equal(btcSightingChanged(high, gone), true, 'missing is recorded');
+});
+
+test('an expired order whose Bitcoin payment went missing can be cleared, but is never dropped automatically', () => {
+  const late = T0 + 8 * 864e5;
+  const o = order({ status: 'expired', sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' }, btc: { txid: 'ab'.repeat(32), missing: true } });
+  assert.equal(missingButExpired(o), true);
+  assert.equal(paidButExpired(o, late), false);
+  const others = Array.from({ length: 3 }, (_, i) => order({ id: String(i), status: 'delivered' }));
+  assert.ok(capOrders([o, ...others], 1, late).includes(o));
 });

@@ -25,6 +25,7 @@ const order = () => {
 function harness(saved, { locksAvailable = true, lockRejects = false, lockError = new Error('lock unavailable') } = {}) {
   const data = new Map([[key, JSON.stringify(Array.isArray(saved) ? saved : [saved])]]);
   const listeners = [];
+  const timers = [];
   let storageBlocked = false;
   const localStorage = {
     getItem: k => data.get(k) ?? null,
@@ -48,6 +49,7 @@ function harness(saved, { locksAvailable = true, lockRejects = false, lockError 
       },
       window: { localStorage, dispatchEvent: () => { for (const listener of listeners) listener(); } },
       navigator: { locks }, Event: class {}, crypto: { randomUUID },
+      setTimeout: fn => timers.push(fn), clearTimeout() {},
       Date, JSON, Promise, Set, Map,
     });
     return exports;
@@ -56,6 +58,9 @@ function harness(saved, { locksAvailable = true, lockRejects = false, lockError 
     tab, read: () => JSON.parse(data.get(key))[0], all: () => JSON.parse(data.get(key)),
     onEvent: listener => listeners.push(listener),
     block: () => { storageBlocked = true; }, unblock: () => { storageBlocked = false; },
+    timers,
+    /** Fire the timers set so far (the page's 15 s retry), then let their writes finish. */
+    runTimers: async () => { for (const fn of timers.splice(0)) fn(); await new Promise(r => setImmediate(r)); },
   };
 }
 
@@ -285,6 +290,85 @@ test('a Bitcoin payment first seen while storage refuses writes survives later e
   assert.equal(await a.patchOrder(x.id, { notify: true }), 'saved');
   assert.equal(h.read().btc.txid, TXID, 'saved once storage recovers');
   assert.equal(h.read().btc.missing, true);
+});
+
+test('once storage works again, the next write of any kind saves what the page carried', async () => {
+  // Review 7, Medium: while storage fails, a poll that only stamps its time changes nothing, so nothing wrote, and
+  // the refresh the banner asks for dropped the unsaved hash.
+  const x = { ...order(), statusTimes: { awaiting_deposit: Date.now() - 1000 }, lastPolledAt: Date.now() - 1000 };
+  const h = harness(x);
+  const a = h.tab();
+  const claimed = await a.claimPayment(x.id, owner);
+  h.block();
+  assert.equal(await a.patchPaymentAttempt(x.id, claimed.payAttemptId, { depositTxHash: HASH, depositSentAt: Date.now() }), 'failed');
+  assert.equal(a.storageFailing(), true);
+  h.unblock();
+  assert.equal(await a.applyStatusUpdate(x.id, { status: 'awaiting_deposit', rawStatus: 'awaiting_deposit', amountOut: null }), 'unchanged');
+  assert.equal(h.read().depositTxHash, HASH, 'saved by a poll that changed nothing');
+  assert.equal(a.storageFailing(), false);
+  assert.equal(a.unsavedChanges(), 0);
+  assert.equal(h.tab().loadOrders()[0].depositTxHash, HASH, 'a refresh keeps it');
+});
+
+test('changes storage refused are tried again every 15 s, even with nothing else writing', async () => {
+  const x = order();
+  const h = harness(x);
+  const a = h.tab();
+  h.block();
+  assert.equal(await a.patchOrder(x.id, { notify: true }), 'failed');
+  assert.equal(h.timers.length, 1, 'one retry set');
+  await h.runTimers();
+  assert.equal(h.read().notify, undefined, 'still refused');
+  assert.equal(h.timers.length, 1, 'set again');
+  h.unblock();
+  await h.runTimers();
+  assert.equal(h.read().notify, true, 'saved once storage works');
+  assert.equal(a.storageFailing(), false);
+  assert.equal(h.timers.length, 0, 'nothing left to retry');
+});
+
+test('while storage refuses writes, Bitcoin looks record what was seen and not their counters', async () => {
+  // Review 7, Low 2: confirmations and a flapping mempool.space answer used to add a change per look.
+  const x = {
+    ...order(), sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' }, fromAmount: '0.001', fromAmountRaw: '100000',
+    depositAddress: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq', route: [{ venue: 'garden', from: 'bitcoin.btc', to: 'base.cbbtc' }],
+  };
+  const h = harness(x);
+  const a = h.tab();
+  const TXID = 'ef'.repeat(32);
+  const seen = c => ({ payments: [{ txid: TXID, confirmations: c }], totalSats: 100_000n });
+  const empty = { payments: [], totalSats: 0n };
+  let empties = 0;
+  // As the order card looks (OrderTracker.tsx 2b).
+  const look = d => {
+    empties = d.payments.length ? 0 : empties + 1;
+    const at = Date.now(), failing = a.storageFailing(), run = empties;
+    return a.patchOrder(x.id, prev => {
+      const btc = orderState.nextBtcRecord(prev.btc, d, at, failing ? run : undefined);
+      return btc === prev.btc || (failing && !orderState.btcSightingChanged(prev.btc, btc)) ? {} : { btc };
+    });
+  };
+  h.block();
+  await look(seen(0)); // first seen: a change
+  await a.patchOrder(x.id, { notify: true }); // storage is now known to be failing
+  for (let i = 0; i < 100; i++) await look(i % 2 ? empty : seen(Math.min(i, 6)));
+  assert.ok(a.unsavedChanges() <= 4, `bounded: ${a.unsavedChanges()}`);
+  assert.equal(a.loadOrders()[0].btc.txid, TXID);
+  assert.equal(a.loadOrders()[0].btc.missing, undefined, 'a flapping answer is not "missing"');
+  for (let i = 0; i < 3; i++) await look(empty);
+  assert.equal(a.loadOrders()[0].btc.missing, true, 'three empty answers in a row, counted by the page');
+  h.unblock();
+  await a.patchOrder(x.id, {});
+  assert.equal(h.read().btc.missing, true);
+  assert.equal(h.read().btc.txid, TXID);
+});
+
+test('poll stamps hold while storage refuses writes', () => {
+  const h = harness(order());
+  const a = h.tab();
+  h.block();
+  a.markPolled('abc', Date.now());
+  assert.equal(a.polledWithin('abc', 60_000), true, 'this page\u2019s own stamp counts');
 });
 
 test('a refused lock says nothing was sent, whatever the browser\u2019s own message', async () => {

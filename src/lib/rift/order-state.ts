@@ -103,13 +103,16 @@ export function phaseInput(o: StoredOrder, kind: SourceKind) {
 export const BTC_MISSING_AFTER = 3;
 
 /** The order's Bitcoin record after a look at its deposit address. A payment seen earlier keeps its id and times
- *  (the order is never treated as unpaid because of them) and is marked missing only after several empty answers. */
+ *  (the order is never treated as unpaid because of them) and is marked missing only after several empty answers
+ *  in a row. `emptyRun`: while storage can't record each look, the page's own count of them stands in (a sighting
+ *  it could not record would leave the stored count too high). */
 export function nextBtcRecord(
   prev: StoredOrder['btc'], seen: { payments: { txid: string; confirmations: number }[]; totalSats: bigint }, now: number,
+  emptyRun?: number,
 ): StoredOrder['btc'] {
   if (!seen.payments.length) {
     if (!prev?.txid || prev.missing) return prev; // nothing more to record once it is missing
-    const emptyChecks = (prev.emptyChecks ?? 0) + 1;
+    const emptyChecks = emptyRun ?? (prev.emptyChecks ?? 0) + 1;
     return { ...prev, emptyChecks, ...(emptyChecks >= BTC_MISSING_AFTER ? { missing: true } : {}) };
   }
   const confirmations = Math.min(...seen.payments.map(p => p.confirmations));
@@ -120,6 +123,17 @@ export function nextBtcRecord(
     payments: seen.payments.length, ...(seenLate ? { seenLate: true } : {}),
   };
 }
+
+/** Whether a new Bitcoin record changes what was seen (a payment, its amount, its first confirmation, missing or
+ *  not) rather than only a counter. While storage refuses writes only such changes are recorded: each refused
+ *  change is carried, and applied again, until a save works. */
+export const btcSightingChanged = (a: StoredOrder['btc'], b: StoredOrder['btc']) =>
+  a?.txid !== b?.txid || !!a?.missing !== !!b?.missing || a?.totalSats !== b?.totalSats || a?.payments !== b?.payments
+  || (a?.confirmations ?? 0) > 0 !== (b?.confirmations ?? 0) > 0;
+
+/** Rift expired the order after its Bitcoin payment went missing (most likely dropped or replaced). The user may
+ *  clear it, but it is never dropped automatically: only their wallet can say the payment didn't go through. */
+export const missingButExpired = (o: StoredOrder) => o.status === 'expired' && !!o.btc?.missing;
 
 /** Rift closed the order as expired although this browser saw a payment go to it: it needs Rift's support (and its
  *  order ID), so it is never cleared like an order that simply ran out. */
@@ -252,7 +266,8 @@ export function sanitizeOrder(x: unknown): StoredOrder | null {
  *  finished or abandoned (never paid, past their window) ones first. */
 export function capOrders(list: StoredOrder[], max: number, now: number): StoredOrder[] {
   if (list.length <= max) return list;
-  const droppable = (o: StoredOrder) => (isFinalStatus(o.status) && !needsAttention(o.status) && !paidButExpired(o, now)) || isAbandoned(o, now);
+  const droppable = (o: StoredOrder) =>
+    (isFinalStatus(o.status) && !needsAttention(o.status) && !paidButExpired(o, now) && !missingButExpired(o)) || isAbandoned(o, now);
   const keep = new Set(list.filter(o => !droppable(o)).map(o => o.id));
   const rest = list.filter(o => !keep.has(o.id)).sort((a, b) => b.createdAt - a.createdAt);
   for (const o of rest) { if (keep.size >= max) break; keep.add(o.id); }

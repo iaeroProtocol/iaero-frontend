@@ -36,11 +36,29 @@ const PAUSE_AFTER_429_MS = 60_000;
 interface CallLog { t: number[]; pausedUntil: number; lastProbe: number }
 let memLog: CallLog = { t: [], pausedUntil: 0, lastProbe: 0 };
 
+/** Two lists of call times as one, each time as often as either list has it. */
+function union(a: number[], b: number[]): number[] {
+  const count = new Map<number, number>();
+  for (const x of a) count.set(x, (count.get(x) ?? 0) + 1);
+  const other = new Map<number, number>();
+  for (const x of b) other.set(x, (other.get(x) ?? 0) + 1);
+  for (const [x, n] of other) count.set(x, Math.max(count.get(x) ?? 0, n));
+  return [...count].flatMap(([x, n]) => Array<number>(n).fill(x));
+}
+
+/** The shared log, together with this tab's own: while storage refuses writes, the stored one goes stale, and
+ *  calls (or a 429 pause) would be forgotten. */
 function readLog(now: number): CallLog {
   let log = memLog;
   try {
     const raw = JSON.parse(window.localStorage.getItem(BUDGET_KEY) ?? 'null');
-    if (raw && Array.isArray(raw.t)) log = { t: raw.t.filter((x: unknown) => typeof x === 'number'), pausedUntil: Number(raw.pausedUntil) || 0, lastProbe: Number(raw.lastProbe) || 0 };
+    if (raw && Array.isArray(raw.t)) {
+      log = {
+        t: union(raw.t.filter((x: unknown) => typeof x === 'number'), memLog.t),
+        pausedUntil: Math.max(Number(raw.pausedUntil) || 0, memLog.pausedUntil),
+        lastProbe: Math.max(Number(raw.lastProbe) || 0, memLog.lastProbe),
+      };
+    }
   } catch { /* storage blocked: this tab's own log */ }
   return { ...log, t: log.t.filter(x => now - x < WINDOW_MS && x <= now + 1000) };
 }

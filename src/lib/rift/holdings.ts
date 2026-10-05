@@ -40,10 +40,21 @@ export const MIN_VALUE_USD = 1;
  *  any number; a huge one would make the string arithmetic below allocate hundreds of megabytes, or throw. */
 export const validDecimals = (d: unknown): d is number => typeof d === 'number' && Number.isInteger(d) && d >= 0 && d <= 36;
 
-/** Whether a multicall read nothing: the first `count` results all failed, which is what a refused aggregate
- *  call looks like (an RPC down, or one token answering with megabytes of data). */
-export const wholeReadFailed = (results: readonly { status: string }[], count: number) =>
-  results.slice(0, count).every(r => r.status === 'failure');
+/** Whether a multicall read nothing: every result at `at` (the balance reads, not the decimals reads) failed,
+ *  which is what a refused aggregate call looks like (an RPC down, or one token answering with megabytes). */
+export const wholeReadFailed = (results: readonly { status: string }[], at: readonly number[]) =>
+  at.every(i => results[i]?.status !== 'success');
+
+/** Where each token's reads go in a chain's multicall, after ETH at 0: its balanceOf(), then its decimals() right
+ *  after it when they are read. A token that breaks a batch then breaks one part of it, which splitRead narrows
+ *  down; laid out apart, its two reads would break both halves. */
+export function callLayout(readsDecimals: readonly boolean[]): { balance: number; decimals?: number }[] {
+  let next = 1;
+  return readsDecimals.map(d => {
+    const balance = next++;
+    return d ? { balance, decimals: next++ } : { balance };
+  });
+}
 
 /**
  * `calls` read again after a batch of all of them was refused as a whole: in halves, and any half whose every
@@ -64,7 +75,7 @@ export async function splitRead<C, R extends { status: string }>(
       let out: readonly R[] = [];
       try { out = await read(half); } catch { /* every call in it failed */ }
       if (out.length !== half.length) out = half.map(failed);
-      return wholeReadFailed(out, half.length) ? split(half) : [...out];
+      return out.every(r => r.status === 'failure') ? split(half) : [...out];
     }));
     return halves.flat();
   };

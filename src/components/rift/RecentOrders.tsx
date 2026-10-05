@@ -5,7 +5,7 @@ import React from 'react';
 import { History, Trash2 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { PHASE_STYLE, STALE_STYLE } from './status';
+import { badgeStyle } from './status';
 import { phaseOf } from '@/lib/rift/timing';
 import { SOURCE_CHAINS } from '@/lib/rift/config';
 import { isAbandoned, isFinalStatus, isOutOfDate, isTerminalStatus, needsAttention, paidButExpired, phaseInput } from '@/lib/rift/order-state';
@@ -55,7 +55,7 @@ export default function RecentOrders({ orders, activeId, onSelect, onClearFinish
         {orders.map(o => {
           const phase = phaseOf(phaseInput(o, SOURCE_CHAINS[o.sourceChain].kind));
           const stale = isOutOfDate(o, now);
-          const style = stale ? STALE_STYLE : PHASE_STYLE[phase];
+          const style = badgeStyle(phase, stale, !!o.btc?.missing);
           const outcome = o.status === 'delivered' ? `${fmt(o.amountOut)} iAERO`
             : o.status === 'refunded' ? `refunded ${o.amountOut ? `${fmt(o.amountOut)} ` : ''}${o.token.symbol}`
             : isTerminalStatus(o.status) || stale ? '—'

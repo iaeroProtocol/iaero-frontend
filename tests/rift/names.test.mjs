@@ -41,6 +41,9 @@ test('a name is learned only for exactly the asset asked for, on its own chain',
   assert.equal(namesToLearn({ from: 'bitcoin.btc', to: 'base.iaero' }, { from: 'bitcoin.other', to: RAW.to },
     { from: 'bitcoin.btc', to: IAERO }), null, 'an unknown raw source cannot establish the destination name');
   assert.equal(namesToLearn({ from: 'ethereum.usdt0', to: IAERO }, RAW, { from: USDT0, to: IAERO }), null, 'a name on another chain');
+  const A = '0x1111111111111111111111111111111111111111';
+  assert.equal(namesToLearn({ from: 'base.newtok', to: 'base.newtok' }, { from: `evm:8453.${A}`, to: RAW.to }, { from: `base.${A}`, to: IAERO }),
+    null, 'one name for two tokens');
 });
 
 test('Rift\u2019s real raw ids for native ETH and HyperCore sources let the destination name be learned', () => {

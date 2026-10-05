@@ -87,7 +87,9 @@ export function namesToLearn(formatted: unknown, raw: unknown, asked: { from: st
     if (n === w) continue; // already the asset asked for
     const asset = canonicalToAsset(rawId);
     if (asset !== w || !NAME_RE.test(n) || chainOf(n) !== chainOf(asset)) return null;
-    out[n] = asset.slice(asset.indexOf('.') + 1);
+    const id = asset.slice(asset.indexOf('.') + 1);
+    if (out[n] !== undefined && out[n] !== id) return null; // one name for two tokens
+    out[n] = id;
   }
   return out;
 }

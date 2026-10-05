@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyLlamaPrices, candidatesToHoldings, parseNative, parseTokenBalances, probeAmount, rankHoldings, rawToNumber, splitRead, validDecimals, wholeReadFailed,
+  applyLlamaPrices, candidatesToHoldings, parseNative, parseTokenBalances, probeAmount, rankHoldings, rawToNumber, splitRead, validDecimals, wholeReadFailed, callLayout,
 } from '../../src/lib/rift/holdings.ts';
 
 const IAERO = 'base.0x81034fb34009115f215f5d5f564aac9ffa46a1dc';
@@ -120,8 +120,8 @@ test('a decimals() no real token answers is never used in arithmetic', () => {
 
 test('a multicall refused as a whole is told apart from single calls failing', () => {
   const ok = { status: 'success' }, fail = { status: 'failure' };
-  assert.equal(wholeReadFailed([fail, fail, fail, ok], 3), true, 'only the balance reads count, not the decimals reads after them');
-  assert.equal(wholeReadFailed([fail, ok, fail], 3), false);
+  assert.equal(wholeReadFailed([fail, fail, ok, fail], [0, 1, 3]), true, 'only the balance reads count, not a decimals read among them');
+  assert.equal(wholeReadFailed([fail, ok, fail], [0, 1, 2]), false);
 });
 
 test('a refused multicall is read again in halves until the call that breaks it fails alone', async () => {
@@ -142,4 +142,19 @@ test('a refused multicall is read again in halves until the call that breaks it 
   assert.deepEqual(await splitRead(calls.slice(0, 4), read, failed, { maxReads: 16, mayRead: () => false }), calls.slice(0, 4).map(failed), 'no time: no reads');
   const thrown = await splitRead([1, 2], async () => { throw new Error('out of time'); }, failed, { maxReads: 16, mayRead: () => true });
   assert.deepEqual(thrown, [failed(), failed()], 'a read that throws fails its calls');
+});
+
+test('each token\u2019s decimals() sits right after its balanceOf(), so a token that breaks a batch costs almost nothing else', async () => {
+  // Review 7, Low 3: laid out apart, one token's two reads broke both halves, and 14-19 other tokens were lost.
+  assert.deepEqual(callLayout([false, true, true]), [{ balance: 1 }, { balance: 2, decimals: 3 }, { balance: 4, decimals: 5 }]);
+  const layout = callLayout(Array.from({ length: 120 }, (_, i) => i >= 3)); // 120 tokens, 117 outside our list
+  const total = 1 + layout.reduce((n, l) => n + (l.decimals ? 2 : 1), 0);
+  const calls = Array.from({ length: total }, (_, i) => i).slice(1);
+  for (const hostile of [0, 50, 119]) {
+    const bad = new Set([layout[hostile].balance, layout[hostile].decimals]);
+    const read = async part => (part.some(c => bad.has(c)) ? part.map(() => ({ status: 'failure' })) : part.map(c => ({ status: 'success', result: c })));
+    const out = await splitRead(calls, read, () => ({ status: 'failure' }), { maxReads: 16, mayRead: () => true });
+    const lost = out.filter((r, i) => r.status === 'failure' && !bad.has(calls[i])).length;
+    assert.ok(lost <= 4, `token ${hostile}: good reads lost ${lost}`);
+  }
 });

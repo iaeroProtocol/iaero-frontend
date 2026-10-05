@@ -31,7 +31,8 @@ import { EVM_ADDRESS_RE, badRequest } from '@/lib/rift/server';
 import { parseLlamaPrices } from '@/lib/rift/cost';
 import {
   HOLDING_CHAINS, MAX_UNPRICED_CANDIDATES, applyLlamaPrices, blockscoutCandidates, candidatesToHoldings, mergeTokenRows, nativeHolding,
-  parseNative, parseTokenBalances, rankHoldings, rawToNumber, splitRead, validDecimals, wholeReadFailed, type EvmHoldingChain, type Holding,
+  callLayout, parseNative, parseTokenBalances, rankHoldings, rawToNumber, splitRead, validDecimals, wholeReadFailed, type EvmHoldingChain,
+  type Holding,
   type TokenCandidate,
 } from '@/lib/rift/holdings';
 import { HL_API, HYPERCORE_TOKENS, hyperCoreHoldings, parseSpotBalances, usdcForFee } from '@/lib/rift/hypercore';
@@ -157,42 +158,51 @@ async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: T
     chain: VIEM_CHAINS[chainId],
     transport: fallback(rpcUrls(chainId, { server: true }).map(url => http(url, { timeout, retryCount: 0 })), { retryCount: 0 }),
   });
-  const unlisted = tokens.filter(t => !MAJOR.has(`${chainKey(chainId)}.${t.address}`));
+  const listed = (t: TokenCandidate) => MAJOR.has(`${chainKey(chainId)}.${t.address}`);
+  // ETH, then each token's balanceOf() with its decimals() right after it (callLayout).
+  const layout = callLayout(tokens.map(t => !listed(t)));
   const contracts = [
     { address: MULTICALL3, abi: GET_ETH_BALANCE, functionName: 'getEthBalance', args: [owner] },
-    ...tokens.map(t => ({ address: t.address, abi: erc20Abi, functionName: 'balanceOf', args: [owner] })),
-    ...unlisted.map(t => ({ address: t.address, abi: DECIMALS, functionName: 'decimals', args: [] })),
+    ...tokens.flatMap(t => [
+      { address: t.address, abi: erc20Abi, functionName: 'balanceOf', args: [owner] },
+      ...(listed(t) ? [] : [{ address: t.address, abi: DECIMALS, functionName: 'decimals', args: [] }]),
+    ]),
   ] as unknown as Parameters<typeof client.multicall>[0]['contracts'];
+  const balanceAt = [0, ...layout.map(l => l.balance)];
   // One aggregate call per read (batchSize 0: viem would otherwise split by calldata size, not by call).
   const read = (part: readonly unknown[], by: number) =>
     beforeDeadline(client.multicall({ contracts: part as typeof contracts, allowFailure: true, batchSize: 0 }), by) as Promise<CallResult[]>;
   let results = await read(contracts, until);
-  if (wholeReadFailed(results, 1 + tokens.length)) {
+  if (wholeReadFailed(results, balanceAt)) {
     const by = until - FALLBACK_RESERVE_MS;
     const mayRead = () => by - Date.now() > RETRY_MIN_MS;
     const eth = mayRead() ? await beforeDeadline(client.getBalance({ address: owner }), by).catch(() => null) : null;
     if (eth !== null) {
-      const rest = await splitRead(contracts.slice(1), part => read(part, by), notRead, { maxReads: MAX_SPLIT_READS, mayRead });
-      if (!wholeReadFailed(rest, tokens.length)) results = [{ status: 'success', result: eth }, ...rest];
+      const again: CallResult[] = [
+        { status: 'success', result: eth },
+        ...await splitRead(contracts.slice(1), part => read(part, by), notRead, { maxReads: MAX_SPLIT_READS, mayRead }),
+      ];
+      if (!wholeReadFailed(again, balanceAt.slice(1))) results = again;
     }
   }
-  const balanceReads = results.slice(0, 1 + tokens.length);
-  if (wholeReadFailed(results, 1 + tokens.length)) return null;
+  if (wholeReadFailed(results, balanceAt)) return null;
   const eth = results[0];
-  const balanceResults = results.slice(1, 1 + tokens.length);
-  const decimals = new Map(unlisted.map((t, i) => {
-    const r = results[1 + tokens.length + i];
+  const decimals = new Map(tokens.flatMap((t, i) => {
+    const at = layout[i].decimals;
+    if (at === undefined) return [];
+    const r = results[at];
     // Untrusted: a decimals() no real token answers counts as a failed read.
     const d = r.status === 'success' ? Number(r.result) : NaN;
-    return [t.address, validDecimals(d) ? d : null] as const;
+    return [[t.address, validDecimals(d) ? d : null] as const];
   }));
   return {
-    incomplete: balanceReads.some(r => r.status === 'failure') || [...decimals.values()].some(d => d === null),
+    incomplete: balanceAt.some(i => results[i].status === 'failure') || [...decimals.values()].some(d => d === null),
     native: eth.status === 'success' ? (eth.result as bigint) : null,
     // A token whose decimals the chain does not confirm is left out rather than mis-sized.
     tokens: tokens.map(t => (decimals.has(t.address) ? { ...t, decimals: decimals.get(t.address) ?? -1 } : t)),
-    balances: balanceResults.map((r, i) => {
-      const d = decimals.get(tokens[i].address);
+    balances: tokens.map((t, i) => {
+      const r = results[layout[i].balance];
+      const d = decimals.get(t.address);
       return r.status === 'success' && d !== null ? (r.result as bigint) : null;
     }),
   };

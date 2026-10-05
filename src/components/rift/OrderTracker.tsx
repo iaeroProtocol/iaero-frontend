@@ -22,10 +22,10 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress as Bar } from '@/components/ui/progress';
 import RouteSteps, { type StepLink } from './RouteSteps';
-import { PHASE_STYLE, STALE_STYLE } from './status';
+import { badgeStyle } from './status';
 import { classifyRiftError, getOrder, riftBudget } from '@/lib/rift/client';
 import { parseOrderUpdate } from '@/lib/rift/validate';
-import { applyStatusUpdate, markPolled, patchOrder, polledWithin } from '@/lib/rift/storage';
+import { applyStatusUpdate, markPolled, patchOrder, polledWithin, storageFailing } from '@/lib/rift/storage';
 import { btcToSats, findBtcDeposits } from '@/lib/rift/bitcoin';
 import { hyperCoreToken } from '@/lib/rift/hypercore';
 import { accountNonce, evmDepositEvidence, hyperDepositEvidence } from '@/lib/rift/payment-io';
@@ -33,7 +33,8 @@ import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, RIFT_SUPP
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
 import { costText, costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
 import {
-  canHide, isFinalStatus, isOutOfDate, isTerminalStatus, nextBtcRecord, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput,
+  btcSightingChanged, canHide, isFinalStatus, isOutOfDate, isTerminalStatus, missingButExpired, nextBtcRecord, paidButExpired, payState,
+  payWindowMs, payWindowOpen, phaseInput,
 } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
@@ -211,35 +212,40 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
   }, [kind, order.id, order.depositTxHash, order.depositConfirmedAt, order.depositFailed, order.payUnknown, sourcePublic]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 2b. Bitcoin: every payment to the deposit address every 20 s, until Rift has picked it up. A payment that
-  //     was seen and is gone (dropped or replaced) is said so, and the QR code comes back.
+  //     was seen and is gone (dropped or replaced) is said so, and the QR code comes back. An order Rift expired
+  //     after its payment went missing is looked at every 10 minutes: if the payment turns up, it needs support.
   const [btcErrors, setBtcErrors] = useState(0);
+  const watchBtc = kind === 'bitcoin' && (order.status === 'awaiting_deposit' || order.status === 'underfunded' || missingButExpired(order));
   useEffect(() => {
-    if (kind !== 'bitcoin' || (order.status !== 'awaiting_deposit' && order.status !== 'underfunded')) return;
+    if (!watchBtc) return;
     let stop = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let errors = 0;
+    let empties = 0; // empty answers in a row
     const tick = async () => {
       try {
         const d = await findBtcDeposits(order.depositAddress);
         errors = 0;
+        empties = d.payments.length ? 0 : empties + 1;
         if (!stop) setBtcErrors(0);
         if (!stop) {
-          // Times are taken here, not in the change: a change that storage refused is applied again later.
-          const at = Date.now();
+          // Taken here, not in the change: a change that storage refused is applied again later. While storage
+          // refuses writes, only a change in what was seen is recorded, and empty answers are counted here.
+          const at = Date.now(), failing = storageFailing(), run = empties;
           await patchOrder(order.id, prev => {
-            const btc = nextBtcRecord(prev.btc, d, at);
-            return btc === prev.btc ? {} : { btc };
+            const btc = nextBtcRecord(prev.btc, d, at, failing ? run : undefined);
+            return btc === prev.btc || (failing && !btcSightingChanged(prev.btc, btc)) ? {} : { btc };
           });
         }
       } catch {
         errors++;
         if (!stop) setBtcErrors(errors);
       }
-      if (!stop) timer = setTimeout(tick, staleRef.current ? 10 * 60_000 : 20000);
+      if (!stop) timer = setTimeout(tick, staleRef.current || order.status === 'expired' ? 10 * 60_000 : 20000);
     };
     tick();
     return () => { stop = true; if (timer) clearTimeout(timer); };
-  }, [kind, order.id, order.depositAddress, order.status]);
+  }, [watchBtc, order.id, order.depositAddress, order.status]);
 
   // 3. Delivery: the iAERO Transfer to the wallet on Base, scanned in 2,000-block chunks (public RPCs refuse
   //    more) from where the last scan stopped, carrying on across retries. It must come from the order's vault
@@ -367,7 +373,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
   });
   const phase = progress.phase;
   const moving = phase === 'confirming' || phase === 'detecting' || phase === 'executing';
-  const style = stale ? STALE_STYLE : PHASE_STYLE[phase];
+  const style = badgeStyle(phase, stale, !!order.btc?.missing);
   const windowOpen = payWindowOpen(order, kind, now);
   const wrongAccount = !!account && account.toLowerCase() !== order.toAddress.toLowerCase();
 
