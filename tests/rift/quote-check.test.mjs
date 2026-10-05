@@ -25,7 +25,7 @@ function load({ raw = RAW, budget = true } = {}) {
   vm.runInNewContext(cjs('quote-check.ts'), {
     exports, window,
     require: n => ({
-      './client': { fetchQuote: async (body, _s, kind) => { calls.push({ ...body, kind }); return raw; }, riftBudget: kind => (calls.push({ budget: kind }), budget) },
+      './client': { fetchQuote: async (body, _s, kind) => { calls.push({ ...body, kind }); return { from_amount: body.from_amount, ...raw }; }, riftBudget: kind => (calls.push({ budget: kind }), budget) },
       './rift-tokens': { RIFT_TOKEN_NAMES: { 'arbitrum.usdt0': USDT0.slice(9) } },
       './names': names, './validate': validate,
     })[n] ?? (() => { throw new Error(`unexpected import ${n}`); })(),
@@ -59,4 +59,8 @@ test('nothing is learned from a raw answer for another token or destination', as
     const m = load({ raw });
     await assert.rejects(m.checkQuote(formatted(), expect, { rawAmount: 20_000_000n, kind: 'user' }), /does not deliver iAERO|different token/);
   }
+  const m = load({ raw: { ...RAW, from: 'evm:42161.0x1111111111111111111111111111111111111111' } });
+  await assert.rejects(m.checkQuote(formatted({ from: USDT0 }), expect, { rawAmount: 20_000_000n, kind: 'user' }), /does not deliver iAERO/);
+  const wrongAmount = load({ raw: { ...RAW, from_amount: '1' } });
+  await assert.rejects(wrongAmount.checkQuote(formatted(), expect, { rawAmount: 20_000_000n, kind: 'user' }), /does not deliver iAERO/);
 });

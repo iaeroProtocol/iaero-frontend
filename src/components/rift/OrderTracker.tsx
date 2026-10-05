@@ -313,6 +313,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
   }));
   /** Out of the way once its window has closed and a check found nothing; still tracked, at the idle rate. */
   const hide = () => { void patchOrder(order.id, prev => (canHide(prev, Date.now()) ? { hiddenAt: Date.now() } : {})); };
+  const showChecks = () => { void patchOrder(order.id, { hiddenAt: undefined }); };
   async function checkPayment(thenPay = false) {
     if (thenPay && !settlementAck) return;
     setChecking(true);
@@ -516,9 +517,12 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
               <div>This order delivers iAERO to <span className="font-mono">{short(order.toAddress)}</span>. Connect that wallet to pay it.</div>
             ) : ps === 'unknown' && order.hiddenAt ? (
               <>
-                <div>You hid this order after a check found no payment. It is still tracked: if a payment turns up, it continues here.</div>
+                <div>You hid this order after a check found no payment. It is still tracked, but a wallet request may still be pending. Check your wallet before starting another order.</div>
                 {/* No Dismiss: its payment was never proven absent, so the order stays until Rift settles or expires it. */}
-                <Button onClick={() => onReorder(order)} className="bg-gradient-to-r from-indigo-600 to-purple-600">New order at today’s price</Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" onClick={showChecks} className="border-slate-600 text-slate-200">Show payment checks</Button>
+                  <Button onClick={() => onReorder(order)} className="bg-gradient-to-r from-indigo-600 to-purple-600">New order at today’s price</Button>
+                </div>
               </>
             ) : ps === 'unknown' ? (
               <>

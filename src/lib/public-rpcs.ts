@@ -24,13 +24,10 @@ const alchemyUrl = (chainId: RpcChainId, key: string) => `https://${ALCHEMY_SUBD
  * The endpoints to try, in order.
  * - Browser: Alchemy first when NEXT_PUBLIC_ALCHEMY_KEY is set (that key only answers the site's own origin:
  *   the Alchemy app has a domain allowlist), then the public endpoints.
- * - Server (`server: true`): the public endpoints first, then ALCHEMY_SERVER_KEY last when it is set (a separate
- *   key without the allowlist, never sent to browsers), so an anonymous route spends its quota only when every
- *   public endpoint fails. Read on each call: the Pages worker exposes its variables through process.env per
- *   request. A URL with a key in it must never be logged or returned (viem errors carry the URL).
+ * - Server (`server: true`): public endpoints only. The anonymous holdings route must not spend a private
+ *   Alchemy key's quota; its per-instance rate limit cannot bound usage across Workers and client IPs.
  */
 export const rpcUrls = (chainId: RpcChainId, opts: { server?: boolean } = {}): string[] => {
   if (!opts.server) return [...(ALCHEMY_KEY ? [alchemyUrl(chainId, ALCHEMY_KEY)] : []), ...PUBLIC_RPCS[chainId]];
-  const key = process.env.ALCHEMY_SERVER_KEY || '';
-  return [...PUBLIC_RPCS[chainId], ...(key ? [alchemyUrl(chainId, key)] : [])];
+  return [...PUBLIC_RPCS[chainId]];
 };

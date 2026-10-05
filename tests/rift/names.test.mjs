@@ -34,5 +34,11 @@ test('a name is learned only for exactly the asset asked for, on its own chain',
     { from: USDT0, to: IAERO }), null, 'the raw answer is for another token');
   assert.equal(namesToLearn({ from: USDT0, to: 'base.iaero' }, { ...RAW, to: 'evm:8453.0x2222222222222222222222222222222222222222' },
     { from: USDT0, to: IAERO }), null, 'the raw answer delivers something else');
+  assert.equal(namesToLearn({ from: USDT0, to: 'base.iaero' }, { ...RAW, from: 'evm:42161.0x1111111111111111111111111111111111111111' },
+    { from: USDT0, to: IAERO }), null, 'a canonical formatted source does not excuse a different raw source');
+  assert.equal(namesToLearn({ from: 'arbitrum.eth', to: 'base.iaero' }, { from: 'evm:1.native', to: RAW.to },
+    { from: 'arbitrum.eth', to: IAERO }), null, 'a native source must be on the requested chain');
+  assert.equal(namesToLearn({ from: 'bitcoin.btc', to: 'base.iaero' }, { from: 'bitcoin.other', to: RAW.to },
+    { from: 'bitcoin.btc', to: IAERO }), null, 'an unknown raw source cannot establish the destination name');
   assert.equal(namesToLearn({ from: 'ethereum.usdt0', to: IAERO }, RAW, { from: USDT0, to: IAERO }), null, 'a name on another chain');
 });

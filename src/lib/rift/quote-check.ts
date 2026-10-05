@@ -34,6 +34,7 @@ export async function checkQuote(
     const raw = await fetchQuote(
       { from: expect.fromAsset, from_amount: resolve.rawAmount.toString(), quote_mode: 'fast', format: 'raw' }, undefined, resolve.kind,
     );
+    if (!raw || typeof raw !== 'object' || (raw as { from_amount?: unknown }).from_amount !== resolve.rawAmount.toString()) throw e;
     const pairs = namesToLearn(json, raw, { from: expect.fromAsset, to: expect.destination });
     if (!pairs || !Object.keys(pairs).length) throw e;
     rememberNames(pairs);

@@ -24,6 +24,7 @@ const order = () => {
 
 function harness(saved, { locksAvailable = true, lockRejects = false } = {}) {
   const data = new Map([[key, JSON.stringify(Array.isArray(saved) ? saved : [saved])]]);
+  const listeners = [];
   let storageBlocked = false;
   const localStorage = {
     getItem: k => data.get(k) ?? null,
@@ -45,13 +46,15 @@ function harness(saved, { locksAvailable = true, lockRejects = false } = {}) {
         if (name === './keys') return { ORDERS_KEY: key };
         throw new Error(`unexpected import ${name}`);
       },
-      window: { localStorage, dispatchEvent() {} }, navigator: { locks }, Event: class {}, crypto: { randomUUID },
+      window: { localStorage, dispatchEvent: () => { for (const listener of listeners) listener(); } },
+      navigator: { locks }, Event: class {}, crypto: { randomUUID },
       Date, JSON, Promise, Set, Map,
     });
     return exports;
   };
   return {
     tab, read: () => JSON.parse(data.get(key))[0], all: () => JSON.parse(data.get(key)),
+    onEvent: listener => listeners.push(listener),
     block: () => { storageBlocked = true; }, unblock: () => { storageBlocked = false; },
   };
 }
@@ -187,4 +190,43 @@ test('changes a full storage refused are kept on this page and applied on top of
   assert.equal(await a.patchOrder(x.id, { lastPolledAt: 1 }), 'saved');
   assert.equal(h.all().find(o => o.id === y.id).notify, true, 'saved once storage takes writes again');
   assert.equal(a.storageFailing(), false);
+});
+
+test('an order that could not be saved is not offered for a Bitcoin payment', async () => {
+  const existing = order();
+  const h = harness([existing]);
+  const a = h.tab();
+  const claimed = await a.claimPayment(existing.id, owner);
+  const btc = {
+    ...order(), sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' },
+    fromAmount: '0.001', fromAmountRaw: '100000',
+    depositAddress: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
+  };
+  h.block();
+  assert.equal(await a.patchPaymentAttempt(existing.id, claimed.payAttemptId, { depositTxHash: HASH, depositSentAt: Date.now() }), 'failed');
+  assert.equal(await a.upsertOrder(btc, { keepOnFailure: false }), 'failed');
+  assert.equal(a.loadOrders().some(o => o.id === btc.id), false, 'the payment card cannot show an ephemeral deposit address');
+  assert.equal(h.all().some(o => o.id === btc.id), false, 'nothing was saved');
+  assert.equal(a.loadOrders().find(o => o.id === existing.id).depositTxHash, HASH, 'discarding the new order keeps an earlier unsaved payment');
+  h.unblock();
+  assert.equal(await a.upsertOrder(btc, { keepOnFailure: false }), 'saved');
+  assert.equal(a.loadOrders().some(o => o.id === btc.id), true);
+  assert.equal(h.all().find(o => o.id === existing.id).depositTxHash, HASH, 'the earlier payment is saved too');
+});
+
+test('a sent payment hash stays visible through more than fifty failed later writes', async () => {
+  const x = order();
+  const h = harness(x);
+  const a = h.tab();
+  const claimed = await a.claimPayment(x.id, owner);
+  const seen = [];
+  h.onEvent(() => seen.push(a.loadOrders()[0]?.depositTxHash));
+  h.block();
+  assert.equal(await a.patchPaymentAttempt(x.id, claimed.payAttemptId, { depositTxHash: HASH, depositSentAt: Date.now() }), 'failed');
+  assert.equal(seen.at(-1), HASH, 'the change event exposes the unsaved hash to the order card');
+  for (let i = 0; i < 51; i++) assert.equal(await a.patchOrder(x.id, { lastPolledAt: Date.now() + i }), 'failed');
+  assert.equal(a.loadOrders()[0].depositTxHash, HASH, 'the open tab must retain its only record of the sent transaction');
+  h.unblock();
+  assert.equal(await a.patchOrder(x.id, { notify: true }), 'saved');
+  assert.equal(h.read().depositTxHash, HASH, 'the hash is saved when storage recovers');
 });

@@ -5,10 +5,10 @@
 //   site, so two tabs writing at once cannot undo each other's changes (without the lock, a stress test lost
 //   182 of 600 updates). Changes therefore apply asynchronously; await the returned promise when the next step
 //   reads the result.
-// - A copy is also kept in memory: if storage is full or blocked, the order stays tracked on this page and
-//   the page says so, instead of the order disappearing. Changes that could not be saved are applied again on top
-//   of what storage holds now, on every read and write, until a save succeeds: a write never starts from an old
-//   copy, so a tab whose save failed cannot undo another tab's payment record.
+// - A copy is also kept in memory: if storage is full or blocked, existing orders and payment updates stay
+//   tracked on this page and the page says so. A newly created order is refused before payment if it cannot be
+//   saved. Unsaved changes are applied again on top of what storage holds now, on every read and write, until a
+//   save succeeds: a write never starts from an old copy, so a failed save cannot undo another tab's payment.
 // - Saved records are checked one by one (order-state.ts). Ones this version cannot read (written by a newer
 //   version, or damaged) are kept as they are, not erased by the next write.
 
@@ -33,7 +33,6 @@ const LATE_AFTER_MS = 150_000;
 const PROBE_KEY = 'iaero.rift.probe';
 
 type Change = (list: StoredOrder[]) => StoredOrder[] | null;
-const MAX_UNSAVED = 50;
 
 let memory: StoredOrder[] | null = null;
 let foreign: unknown[] = [];
@@ -108,7 +107,6 @@ function saveOrders(list: StoredOrder[]): boolean {
   } catch {
     writeFailed = true;
   }
-  window.dispatchEvent(new Event(EVENT));
   return !writeFailed;
 }
 
@@ -119,13 +117,27 @@ export type WriteResult = 'saved' | 'unchanged' | 'failed';
 /** Read, change and save the list under the cross-tab lock. `change` returns null for "nothing to save".
  *  The change is applied to what storage holds now (with this page's unsaved changes); this page's copy is used
  *  only when storage can't be read. */
-function mutate(change: Change): Promise<WriteResult> {
+function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: boolean } = {}): Promise<WriteResult> {
   const run = (): WriteResult => {
     const base = current() ?? memory ?? [];
     const next = change(base);
     if (!next) { memory = base; return 'unchanged'; }
-    if (saveOrders(next)) { unsaved = []; return 'saved'; }
-    unsaved = [...unsaved, change].slice(-MAX_UNSAVED);
+    if (saveOrders(next)) {
+      unsaved = [];
+      window.dispatchEvent(new Event(EVENT));
+      return 'saved';
+    }
+    if (!keepOnFailure) {
+      // A new order must not expose payment instructions if it would disappear on reload. Keep this page's
+      // earlier unsaved changes, but discard this failed insertion from its view.
+      memory = base;
+      window.dispatchEvent(new Event(EVENT));
+      return 'failed';
+    }
+    // Never drop an older change to make room for polling updates: it may contain a sent payment hash.
+    // These changes live only for this page's lifetime and are cleared by the next successful save.
+    unsaved.push(change);
+    window.dispatchEvent(new Event(EVENT));
     return 'failed';
   };
   const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
@@ -135,11 +147,11 @@ function mutate(change: Change): Promise<WriteResult> {
 }
 
 /** A new order first. An order already stored under the same id keeps what this browser learned about it. */
-export function upsertOrder(order: StoredOrder): Promise<WriteResult> {
+export function upsertOrder(order: StoredOrder, opts: { keepOnFailure?: boolean } = {}): Promise<WriteResult> {
   return mutate(list => {
     const prev = list.find(o => o.id === order.id);
     return [prev ? { ...order, ...prev } : order, ...list.filter(o => o.id !== order.id)];
-  });
+  }, opts);
 }
 
 /** Change one order. Nothing is written when nothing changes, and statuses only move forward (a late poll
@@ -193,6 +205,7 @@ export async function claimPayment(
         window.dispatchEvent(new Event(EVENT));
         throw new Error('Could not save the payment attempt. Nothing was sent; enable browser storage and try again.');
       }
+      window.dispatchEvent(new Event(EVENT));
       return attempt;
     });
   } catch (e) {

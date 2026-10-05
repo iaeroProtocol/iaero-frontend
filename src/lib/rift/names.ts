@@ -14,6 +14,18 @@ const NAME_RE = /^(ethereum|arbitrum|base)\.(?!0x[0-9a-f]{40}$)(?!eth$)[a-z0-9][
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
 const chainOf = (asset: string) => asset.slice(0, asset.indexOf('.'));
 
+/** The raw answer must identify the requested source even when the formatted answer already uses its address.
+ * Unknown raw formats fail closed; otherwise a quote for another source could validate a destination name. */
+function rawSourceMatches(id: unknown, asked: string): boolean {
+  if (typeof id !== 'string') return false;
+  const want = asked.toLowerCase();
+  if (canonicalToAsset(id) === want) return true;
+  const chainId = CHAIN_IDS[chainOf(want)];
+  if (chainId && want === `${chainOf(want)}.eth`) return id.toLowerCase() === `evm:${chainId}.native`;
+  // Bitcoin and HyperCore raw IDs are not resolved here; an unfamiliar ID must not establish an EVM alias.
+  return id.toLowerCase() === want;
+}
+
 /** `evm:<chainId>.<address>` (a raw answer's id) as `<chain>.<address>`; null for anything else. */
 export function canonicalToAsset(id: unknown): string | null {
   if (typeof id !== 'string') return null;
@@ -40,6 +52,7 @@ export function unknownNames(answer: unknown, names: Readonly<Record<string, str
 export function namesToLearn(formatted: unknown, raw: unknown, asked: { from: string; to: string }): Record<string, string> | null {
   const f = (formatted && typeof formatted === 'object' ? formatted : {}) as { from?: unknown; to?: unknown };
   const r = (raw && typeof raw === 'object' ? raw : {}) as { from?: unknown; to?: unknown };
+  if (!rawSourceMatches(r.from, asked.from) || canonicalToAsset(r.to) !== asked.to.toLowerCase()) return null;
   const out: Record<string, string> = {};
   for (const [name, rawId, want] of [[f.from, r.from, asked.from], [f.to, r.to, asked.to]] as const) {
     if (typeof name !== 'string') return null;

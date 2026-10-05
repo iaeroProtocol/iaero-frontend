@@ -237,7 +237,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       if (p === 'denied') showToast('Notifications are blocked for this site in your browser settings.', 'info');
     } catch { setNotify(false); }
   };
-  const typeAmount = (text: string) => { setAmountText(text); setSpent(null); };
+  const typeAmount = (text: string) => { setAmountText(text); setAutoText(null); setSpent(null); };
   /** A plain decimal the page puts in the amount box, written in the user's locale. */
   const writeAmount = (decimal: string) => { const text = toInputText(decimal, decimalSep); typeAmount(text); setAutoText(text); };
 
@@ -915,10 +915,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         marketUsdIn: px.inputUsd ? Number(fromAmount) * px.inputUsd + hlFeeUsd : undefined, marketIaeroUsd: px.iaeroUsd,
         expectedOut: freshExpected ? Math.max(0, freshExpected.out).toFixed(6) : undefined, gasDeskUsd: freshExpected?.gasUsd,
       };
-      // Kept on this page even when storage refuses it (storage.ts); only an order this browser doesn't hold at all
-      // stops here, before any payment.
-      if (await upsertOrder(stored) === 'failed' && !loadOrders().some(x => x.id === order.id)) {
-        throw new Error(`Rift created order ${order.id}, but this browser could not save it, so nothing was sent. Try again in a moment; that order expires unpaid.`);
+      // The order must survive a reload before showing Bitcoin's deposit address or opening an EVM wallet.
+      if (await upsertOrder(stored, { keepOnFailure: false }) !== 'saved') {
+        throw new Error(`Rift created order ${order.id}, but this browser could not save it. Do not pay this order; allow site storage and try again with a new order.`);
       }
       setActiveId(order.id);
       setAmountText('');

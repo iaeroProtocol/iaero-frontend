@@ -18,9 +18,8 @@
 // - Answers are cached per wallet (Cloudflare's cache, where available) for 90 s, longer than the page's
 //   60 s refresh, or 20 s when a source failed (`warnings`, not `notes`); `?fresh=1` (the Refresh button)
 //   skips it, at most every 20 s.
-// - Each Worker instance limits callers to 30 requests a minute (IPv6 per /64). Balances are read from public
-//   RPCs first; ALCHEMY_SERVER_KEY, when set, is tried last, so anonymous callers spend it only when every
-//   public endpoint fails.
+// - Each Worker instance limits callers to 30 requests a minute (IPv6 per /64). Balance reads use public RPCs
+//   only, so anonymous callers cannot spend a private RPC key's quota.
 // - `hyperliquidUsdc` is the USDC that can pay Hyperliquid's 1 USDC new-address fee, whatever token is sent.
 
 import { type NextRequest, NextResponse } from 'next/server';
@@ -139,7 +138,7 @@ const DECIMALS = [{ type: 'function', name: 'decimals', stateMutability: 'view',
  *  the user is converted with them, so they come from the chain, not the indexer). No retries (the fallback
  *  list is the retry), short timeouts, nothing past `until`. null when the read as a whole failed, which is
  *  when every call failed (a token's own revert fails only its call). Errors are never logged: the server
- *  key's URL is in them. */
+ *  errors may carry provider URLs. */
 async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: TokenCandidate[], until: number) {
   const timeout = Math.max(1, Math.min(RPC_TIMEOUT_MS, until - Date.now()));
   const client = createPublicClient({
