@@ -28,21 +28,34 @@ import { parseOrderUpdate } from '@/lib/rift/validate';
 import { applyStatusUpdate, markPolled, patchOrder, polledWithin, storageFailing } from '@/lib/rift/storage';
 import { btcToSats, lookAtBtcAddress } from '@/lib/rift/bitcoin';
 import { hyperCoreToken } from '@/lib/rift/hypercore';
-import { accountNonce, evmDepositEvidence, hyperDepositEvidence } from '@/lib/rift/payment-io';
+import { accountNonce, evmDepositEvidence, hyperDepositEvidence, minedPayment } from '@/lib/rift/payment-io';
 import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, RIFT_SUPPORT_URL, SOURCE_CHAINS } from '@/lib/rift/config';
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
 import { costText, costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
 import {
-  BTC_MISSING_AFTER, btcCheckpoint, btcConfirmed, btcLookEveryMs, btcLookPatch, btcNeedsLook, btcUnchecked, canHide, doubtButExpired, isFinalStatus, isOutOfDate, isTerminalStatus, missingButExpired, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput, PRE_SEND_COOLDOWN_MS,
+  BTC_MISSING_AFTER, btcConfirmed, btcLookChange, btcLookEveryMs, btcNeedsLook, nonceUsed, btcUnchecked, canHide, doubtButExpired, isFinalStatus, isOutOfDate, isTerminalStatus, missingButExpired, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput, PRE_SEND_COOLDOWN_MS,
 } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
-// The QR library loads only for Bitcoin payments.
-const BitcoinPayment = dynamic(() => import('./BitcoinPayment'), { ssr: false });
+/** The payment view's code couldn't load (a page left open across a site update, or the network): nothing is wrong
+ *  with the order, and a reload shows its payment details. */
+function BitcoinPaymentUnavailable() {
+  return (
+    <div role="alert" className="space-y-2 rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-sm text-amber-100">
+      <div>The payment details couldn’t load (this page may be older than the site). Reload the page to see them: the order is saved.</div>
+      <button type="button" onClick={() => window.location.reload()} className="rounded-lg border border-amber-400/40 px-3 py-1.5 hover:border-amber-300">
+        Reload the page
+      </button>
+    </div>
+  );
+}
+
+// The QR library loads only for Bitcoin payments. A failed load shows a reload prompt, not the card's error (which
+// would call the order damaged).
+const BitcoinPayment = dynamic(() => import('./BitcoinPayment').catch(() => ({ default: BitcoinPaymentUnavailable })), { ssr: false });
 
 type EvmChainId = 1 | 42161 | 8453;
 const TRANSFER = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)');
-const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const SCAN_CHUNK = 1_999n;
 const SCAN_CHUNKS_PER_RUN = 25;
 /** A payment hash no node has shown for this long (a private relay, a dropped transaction, or a wallet that
@@ -158,23 +171,12 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
     const ifCurrent = (patch: Partial<StoredOrder> | ((prev: StoredOrder) => Partial<StoredOrder>)) =>
       patchOrder(id, prev => (prev.depositTxHash === hash && !prev.depositFailed && !prev.depositConfirmedAt && !prev.payUnknown
         ? (typeof patch === 'function' ? patch(prev) : patch) : {}));
-    /** This order's own transaction took nonce `n` (mined, or replaced with nothing arriving): an earlier attempt that
-     *  "failed before anything was sent" at that nonce provably sent nothing there (storage preSendNonce). */
-    const nonceUsed = (prev: StoredOrder, n: number | undefined) => (n !== undefined && prev.preSendNonce === n ? { preSendNonce: n + 1 } : {});
     const settle = async (r: TransactionReceipt) => {
       if (nonce === undefined) nonce = await sourcePublic.getTransaction({ hash }).then(t => t.nonce, () => undefined);
-      if (r.status !== 'success') return ifCurrent(prev => ({ depositFailed: true, depositFailReason: 'reverted' as const, ...nonceUsed(prev, nonce) }));
-      let received: string | undefined;
-      if (order.token.address) {
-        const token = order.token.address.toLowerCase(), to = order.depositAddress.toLowerCase();
-        const sum = r.logs
-          .filter(l => l.address.toLowerCase() === token && l.topics[0] === TRANSFER_TOPIC && !!l.topics[2] && `0x${l.topics[2].slice(26)}`.toLowerCase() === to)
-          .reduce((n, l) => n + BigInt(l.data), 0n);
-        // Mined, but nothing reached the deposit address (a token that returns false instead of reverting): failed.
-        if (sum === 0n) return ifCurrent(prev => ({ depositFailed: true, depositFailReason: 'reverted' as const, ...nonceUsed(prev, nonce) }));
-        if (sum < BigInt(order.fromAmountRaw)) received = sum.toString();
-      }
-      return ifCurrent({ depositConfirmedAt: Date.now(), depositReceivedRaw: received });
+      const mined = await minedPayment(sourcePublic, order, r);
+      if (mined.kind === 'failed') return ifCurrent(prev => ({ depositFailed: true, depositFailReason: 'reverted' as const, ...nonceUsed(prev, nonce) }));
+      if (mined.kind === 'doubt') return ifCurrent({ payUnknown: true });
+      return ifCurrent({ depositConfirmedAt: Date.now(), depositReceivedRaw: mined.received });
     };
     const receipt = () => sourcePublic.getTransactionReceipt({ hash }).catch(e => (notFound(e) ? null : Promise.reject(e)));
     let nonce = order.depositNonce;
@@ -250,9 +252,9 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
           empties = seen !== 'known' && !seen.payments.length ? empties + 1 : 0;
           if (!stop) { setBtcErrors(0); setBtcUnseen(storageFailing() && empties >= BTC_MISSING_AFTER); }
           if (!stop) {
-            // Taken here, not in the change (order-state.ts btcLookPatch): a change storage refused is applied later.
-            const look = { at: Date.now(), failing: storageFailing(), checkpoint: btcCheckpoint(orderRef.current) };
-            await patchOrder(order.id, prev => btcLookPatch(prev.btc, seen, look));
+            // Taken here, not in the change (order-state.ts btcLookChange): a change storage refused is applied later.
+            const look = { at: Date.now(), failing: storageFailing() };
+            await patchOrder(order.id, prev => btcLookChange(prev, seen, look));
           }
         } catch {
           errors++;
@@ -320,8 +322,8 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
       if (order.depositTxHash) {
         const receipt = await sourcePublic.getTransactionReceipt({ hash: order.depositTxHash as `0x${string}` })
           .catch(e => (notFound(e) ? null : Promise.reject(e)));
-        if (receipt?.status === 'reverted') return 'reverted';
-        if (receipt) return 'pending'; // a successful transfer with no deposit needs investigation
+        // Mined: failed (reverted, or a token transfer that moved nothing), or it needs investigation.
+        if (receipt) return (await minedPayment(sourcePublic, order, receipt)).kind === 'failed' ? 'reverted' : 'pending';
       }
       if (order.payNonce !== undefined && await accountNonce(sourcePublic, order.toAddress, 'pending') > order.payNonce) return 'pending';
     } else if (kind === 'hypercore') {
@@ -354,8 +356,11 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
         showToast?.('Your payment reached the deposit address. Tracking your order…', 'success');
       } else if (v === 'reverted') {
         const at = Date.now();
-        await patchOrder(order.id, prev => prev.depositTxHash === order.depositTxHash && payState(prev, at) === 'unknown'
-          ? { payUnknown: false, payRequestedAt: undefined, depositFailed: true, depositFailReason: 'reverted' as const }
+        // The failed transaction used its nonce: an earlier "nothing was sent" at that nonce is settled (nonceUsed).
+        const hash = order.depositTxHash as `0x${string}`;
+        const n = order.depositNonce ?? await sourcePublic?.getTransaction({ hash }).then(t => t.nonce, () => undefined);
+        await patchOrder(order.id, prev => prev.depositTxHash === hash && payState(prev, at) === 'unknown'
+          ? { payUnknown: false, payRequestedAt: undefined, depositFailed: true, depositFailReason: 'reverted' as const, ...nonceUsed(prev, n) }
           : {});
         setCheckSaid('reverted');
       } else if (v !== 'moved') {
@@ -442,6 +447,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
     }
   };
   const supportLink = <a href={RIFT_SUPPORT_URL} target="_blank" rel="noopener noreferrer" className="underline hover:text-white">contact Rift</a>;
+  const rawStatusPause = 'Paying is paused while Rift reports a status this page doesn’t know (above): don’t send anything to this order until it shows a known status. If you already paid, this page keeps tracking it.';
   const staleActions = (
     <div className="flex flex-wrap gap-2">
       <Button onClick={() => onReorder(order)} className="bg-gradient-to-r from-indigo-600 to-purple-600">New order at today’s price</Button>
@@ -513,7 +519,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                 : <div className="text-sm text-slate-300">No payment arrived before the deadline, so this order closed. Nothing was taken.</div>)}
           {/* Kept until the user says otherwise: Rift support needs the ID, or this page can't check the address. */}
           {((phase === 'expired' && (paidButExpired(order, now) || missingButExpired(order) || doubtButExpired(order, now) || (btcUnchecked(order) && btcErrors >= 3)))
-            || order.status === 'frozen' || order.status === 'underfunded') && (
+            || order.status === 'frozen' || order.status === 'underfunded' || (!!order.rawStatus && !payWindowOpen(order, kind, now))) && (
             <button
               type="button"
               onClick={() => { if (window.confirm(`Remove this order from this browser? Keep its ID first if you may need Rift’s support: ${order.id}`)) onForget(order); }}
@@ -621,6 +627,9 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                 <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
                 Waiting for your wallet{paying ? '' : ' (in another tab)'} to confirm or reject this payment…
               </div>
+            ) : order.rawStatus ? (
+              // Not "out of date" nor "nothing was sent": Rift's answer (shown above) may concern a payment.
+              <div>{rawStatusPause}</div>
             ) : !windowOpen ? (
               <>
                 <div>This order wasn’t paid within {Math.round(payWindowMs(kind) / 60_000)} minutes, so its price is out of date. Nothing was sent.</div>
@@ -669,6 +678,8 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                 <div>The Bitcoin payment seen earlier is no longer visible. If your wallet shows it as sent, this order completes when it confirms; otherwise start a new order. Don’t send to this order’s address again.</div>
                 <Button onClick={() => onReorder(order)} className="bg-gradient-to-r from-indigo-600 to-purple-600">New order at today’s price</Button>
               </>
+            ) : order.rawStatus ? (
+              <div>{rawStatusPause}</div>
             ) : btcUnchecked(order) ? (
               // Not yet looked at well after the cutoff: a payment sent at the last minute may still show up.
               <>
@@ -697,7 +708,9 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
         )}
         {kind === 'bitcoin' && btcErrors >= 3 && (order.status === 'awaiting_deposit' || order.status === 'expired') && (
           <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
-            Can’t check the Bitcoin network right now. If you already sent the payment, don’t send it again: Rift’s status here still updates when it arrives.
+            {order.status === 'expired'
+              ? <>Can’t check the Bitcoin network right now, so this page can’t yet tell whether a payment reached this order. It keeps trying.</>
+              : <>Can’t check the Bitcoin network right now. If you already sent the payment, don’t send it again: Rift’s status here still updates when it arrives.</>}
           </div>
         )}
 

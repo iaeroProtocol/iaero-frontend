@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   PAY_WINDOW_MS, canMoveTo, canPay, capOrders, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowOpen, phaseInput,
   BTC_MISSING_AFTER, BTC_GRACE_MS, btcCheckpoint, btcConfirmed, btcLookPatch, btcNeedsLook, btcPositive, btcUnchecked, btcUnpaid, canRetryUnknown, BTC_EMPTY_SPAN_MS, BTC_LOOK_FRESH_MS, btcLookEveryMs, doubtButExpired,
-  PRE_SEND_COOLDOWN_MS,
+  PRE_SEND_COOLDOWN_MS, btcLookChange, nonceUsed, paymentFacts,
   clearable, canHide, isOutOfDate, missingButExpired, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
 } from '../../src/lib/rift/order-state.ts';
 
@@ -383,4 +383,58 @@ test('Pay waits a minute after "nothing was sent", and never while Rift reports 
   assert.equal(isAbandoned(order({ rawStatus: 'rebalancing' }), T0 + 3600_000), false, 'never "nothing was sent" then');
   const action = { destination: '0x1', token: 'USDC:0x6d', amount: '10', time: 1, r: '0x1', s: '0x2', v: 27 };
   assert.equal(canRetryUnknown(order({ sourceChain: 'hyperliquid', token: { symbol: 'USDC', decimals: 8, asset: 'hyperliquid.usdc' }, hlAction: action, payUnknown: true, rawStatus: 'x' }), T0 + 1000), false);
+});
+
+// --- Round 6 ---
+
+const btcOrd = (over = {}) => order({ sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' }, ...over });
+const EMPTY = { payments: [], totalSats: 0n };
+/** `fn` run with the clock at `t`. */
+const clockAt = (t, fn) => { const real = Date.now; Date.now = () => t; try { return fn(); } finally { Date.now = real; } };
+
+test('round 6: a look is judged against the order as stored when applied (Rift expired it while the look ran)', () => {
+  const cp = T0 + 60 * 60_000 + BTC_GRACE_MS;
+  // A run of empty looks past the old checkpoint, left unfinished days ago (the page was closed).
+  const waiting = btcOrd({ btc: { emptyChecks: 2, emptySince: cp + 60_000 } });
+  const expiredAt = T0 + 7 * 864e5;
+  const expired = { ...waiting, status: 'expired', statusTimes: { expired: expiredAt } };
+  const t = expiredAt + 30_000;
+  // Judged with the checkpoint of the order as it was when the look began, one answer after the expiry proved it.
+  const stale = clockAt(t, () => btcLookPatch(expired.btc, EMPTY, { at: t, failing: false, checkpoint: btcCheckpoint(waiting) }));
+  assert.equal(stale.btc.emptyAt, t, 'what the call sites did before');
+  // Against the stored order's checkpoint, it starts a new run.
+  const r = clockAt(t, () => btcLookChange(expired, EMPTY, { at: t, failing: false }));
+  assert.deepEqual({ ...r.btc }, { emptyChecks: 1, emptySince: t });
+  assert.equal(btcUnchecked({ ...expired, ...r }), true, 'one answer proves nothing');
+});
+
+test('round 6: a payment seen for an expired order is followed for two weeks; an unchecked address until checked', () => {
+  const expiredAt = T0 + 7 * 864e5;
+  const seen = btcOrd({ status: 'expired', statusTimes: { expired: expiredAt },
+    btc: { txid: 'ab'.repeat(32), confirmations: 0, firstSeenAt: T0, totalSats: '100000', payments: 1, missing: true } });
+  assert.equal(btcNeedsLook(seen, expiredAt + 13 * 864e5), true);
+  assert.equal(btcNeedsLook(seen, expiredAt + 15 * 864e5), false, 'by then it has confirmed or left every mempool');
+  assert.equal(btcNeedsLook({ ...seen, btc: { ...seen.btc, missing: undefined } }, expiredAt + 15 * 864e5), false);
+  assert.equal(btcNeedsLook(btcOrd({ status: 'expired', statusTimes: { expired: expiredAt } }), expiredAt + 30 * 864e5), true,
+    'never "nothing was taken" without a look');
+  assert.equal(btcNeedsLook(btcOrd(), T0 + 30 * 864e5), true, 'an open order is always watched');
+});
+
+test('round 6: an explicit removal is judged on the payment, not on a look\'s own bookkeeping', () => {
+  const o = btcOrd({ status: 'expired', statusTimes: { expired: T0 }, btc: { emptyChecks: 1, emptySince: T0 + 1000 } });
+  assert.equal(paymentFacts(o), paymentFacts({ ...o, btc: { emptyChecks: 2, emptySince: T0 + 1000 } }), 'a look ran meanwhile');
+  assert.notEqual(paymentFacts(o), paymentFacts({ ...o, btc: { txid: 'ab'.repeat(32), confirmations: 0, firstSeenAt: T0, totalSats: '1', payments: 1 } }));
+  const seen = { txid: 'ab'.repeat(32), confirmations: 0, firstSeenAt: T0, totalSats: '1', payments: 1 };
+  assert.notEqual(paymentFacts({ ...o, btc: seen }), paymentFacts({ ...o, btc: { ...seen, confirmations: 1, confirmed: true } }), 'it confirmed');
+  assert.notEqual(paymentFacts(o), paymentFacts({ ...o, status: 'delivered' }));
+  assert.notEqual(paymentFacts(order()), paymentFacts(order({ payUnknown: true })));
+  assert.notEqual(paymentFacts(order()), paymentFacts(order({ rawStatus: 'held' })));
+  assert.equal(paymentFacts(order({ payUnknown: false })), paymentFacts(order()), 'false and unset are the same');
+});
+
+test('round 6: the kept pre-send nonce moves past a transaction of this order that used it, and only that one', () => {
+  assert.deepEqual(nonceUsed(order({ preSendNonce: 7 }), 7), { preSendNonce: 8 });
+  assert.deepEqual(nonceUsed(order({ preSendNonce: 7 }), 6), {});
+  assert.deepEqual(nonceUsed(order({ preSendNonce: 7 }), undefined), {});
+  assert.deepEqual(nonceUsed(order(), 7), {});
 });

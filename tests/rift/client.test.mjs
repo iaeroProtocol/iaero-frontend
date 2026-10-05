@@ -34,7 +34,7 @@ function load({ full = false, status, throws = false } = {}) {
     AbortController, setTimeout, clearTimeout, Date, JSON, Number, Math,
   });
   if (full) refuse = true;
-  return { ...exports, calls, fill: () => { refuse = true; } };
+  return { ...exports, calls, store, fill: () => { refuse = true; } };
 }
 
 test('right after a route check that could not be priced, the control quote still runs and says which', async () => {
@@ -73,4 +73,18 @@ test('a call that fails outright starts a short pause (a rate limit the browser 
   await assert.rejects(failing.fetchQuote({ from: 'base.0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', from_amount: '1' }));
   const left = failing.riftPauseLeft();
   assert.ok(left > 0 && left <= 20_000, String(left));
+});
+
+test('round 6: a pause or route check stored while the clock ran ahead is dropped once the clock is put back', () => {
+  const c = load();
+  const now = Date.now();
+  c.store.set('iaero.rift.calls.v1', JSON.stringify({ t: [], pausedUntil: now + 2 * 3600_000, lastProbe: now + 2 * 3600_000 }));
+  assert.equal(c.riftPauseLeft(now), 0, 'not two hours of no status polls');
+  assert.equal(c.riftBudget('poll', now), true);
+  assert.equal(c.riftBudget('probe', now), true);
+  // A pause set by this clock still holds.
+  c.store.set('iaero.rift.calls.v1', JSON.stringify({ t: [], pausedUntil: now + 60_000, lastProbe: now - 1000 }));
+  assert.equal(c.riftPauseLeft(now), 60_000);
+  assert.equal(c.riftBudget('poll', now), false);
+  assert.equal(c.riftBudget('probe', now + 5000), false, 'route checks stay spaced');
 });

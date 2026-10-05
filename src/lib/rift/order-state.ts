@@ -57,6 +57,12 @@ export function payWindowOpen(o: StoredOrder, kind: SourceKind, now: number): bo
 }
 
 /** Whether the app may ask the wallet to pay this order now. */
+/** This order's own transaction took nonce `n` (mined, or replaced with nothing arriving): an earlier attempt that
+ *  "failed before anything was sent" at that nonce provably sent nothing there, so the kept nonce moves past it
+ *  (storage.ts preSendNonce). */
+export const nonceUsed = (prev: StoredOrder, n: number | undefined) =>
+  (n !== undefined && prev.preSendNonce === n ? { preSendNonce: n + 1 } : {});
+
 /** After an attempt "failed before anything was sent" (a wallet's word, from its error), Pay waits this long: a payment
  *  sent through a private relay shows only once mined, and the re-pay checks must be able to see it. */
 export const PRE_SEND_COOLDOWN_MS = 60_000;
@@ -201,6 +207,12 @@ export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcL
   return JSON.stringify(btc) === JSON.stringify(before) ? {} : { btc: { ...btc, lastSeenAt: look.at } };
 }
 
+/** btcLookPatch over the order as stored when the change is applied, with that order's checkpoint: Rift may have
+ *  expired it since the look began, moving the checkpoint, and empty answers from before the expiry must not count
+ *  towards "nothing was sent" after it. (A change applied later is positive-only, so its checkpoint is unused.) */
+export const btcLookChange = (prev: StoredOrder, seen: BtcSeen, look: Omit<BtcLook, 'checkpoint'>) =>
+  btcLookPatch(prev.btc, seen, { ...look, checkpoint: btcCheckpoint(prev) });
+
 /** How often an order card looks at a Bitcoin address: every 20 s while the order can still be paid, and while a run of
  *  looks past its checkpoint is deciding "nothing was sent" (about two minutes; not while storage refuses writes, when
  *  that run can't complete); otherwise every 10 minutes. Failed looks back off, doubling up to 10 minutes. */
@@ -224,14 +236,19 @@ export const btcCheckpoint = (o: StoredOrder) =>
 export const btcUnchecked = (o: StoredOrder) =>
   KIND_OF[o.sourceChain] === 'bitcoin' && !o.btc?.txid && !o.btc?.missing && (o.btc?.emptyAt ?? 0) < btcCheckpoint(o);
 
+/** A payment seen for an order Rift expired is followed this long after the expiry: Bitcoin nodes drop an unconfirmed
+ *  transaction from their mempool after two weeks by default, so by then it has confirmed or is gone. */
+export const BTC_LOOK_AFTER_EXPIRY_MS = 14 * 24 * 3600_000;
+
 /** Whether a Bitcoin order's address still needs looking at: until Rift has the payment; and once Rift expired the
- *  order, while a payment seen is unconfirmed or missing (it may still confirm, or vanish), or until a look shows
- *  that nothing was sent. */
-export function btcNeedsLook(o: StoredOrder): boolean {
+ *  order, while a payment seen is unconfirmed or missing (it may still confirm, or vanish; for two weeks), or until
+ *  a look shows that nothing was sent. */
+export function btcNeedsLook(o: StoredOrder, now = Date.now()): boolean {
   if (KIND_OF[o.sourceChain] !== 'bitcoin') return false;
   if (o.status === 'awaiting_deposit' || o.status === 'underfunded') return true;
   if (o.status !== 'expired') return false;
-  return o.btc?.txid ? !btcConfirmed(o.btc) : btcUnchecked(o);
+  if (!o.btc?.txid) return btcUnchecked(o);
+  return !btcConfirmed(o.btc) && now - (o.statusTimes.expired ?? o.createdAt) < BTC_LOOK_AFTER_EXPIRY_MS;
 }
 
 /** Rift expired the order after its Bitcoin payment went missing (most likely dropped or replaced). The user may
@@ -261,6 +278,14 @@ export const clearable = (o: StoredOrder, now: number) =>
  *  fresh look at its address (GetIaeroSection.tsx), never by the cap. */
 export const btcUnpaid = (o: StoredOrder) =>
   KIND_OF[o.sourceChain] === 'bitcoin' && !o.btc?.txid && (o.status === 'awaiting_deposit' || o.status === 'expired');
+
+/** What an explicit removal ("Remove from this browser") is judged on: the order's payment as the user saw it. A
+ *  change here (a status, a payment seen, confirmed or gone) keeps the order; a look's own bookkeeping (a run of
+ *  empty answers) does not. */
+export const paymentFacts = (o: StoredOrder) => JSON.stringify([
+  o.status, o.rawStatus ?? null, o.btc?.txid ?? null, !!o.btc?.missing, btcConfirmed(o.btc), o.depositSentAt ?? null,
+  o.depositConfirmedAt ?? null, !!o.payUnknown,
+]);
 
 /** Frozen orders are not moving (Rift's operators decide), but they can still be refunded or delivered. */
 export const isTerminalStatus = (s: RiftOrderStatus) => FINAL.includes(s) || s === 'frozen';

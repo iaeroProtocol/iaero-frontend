@@ -61,7 +61,13 @@ function readLog(now: number): CallLog {
       };
     }
   } catch { /* storage blocked: this tab's own log */ }
-  return { ...log, t: log.t.filter(x => now - x < WINDOW_MS && x <= now + 1000) };
+  // A time written while the clock ran ahead (and was then put back) is dropped, not kept until the clock catches up:
+  // no pause is ever set further ahead than PAUSE_AFTER_429_MS, and no call is made in the future.
+  return {
+    t: log.t.filter(x => now - x < WINDOW_MS && x <= now + 1000),
+    pausedUntil: log.pausedUntil > now + PAUSE_AFTER_429_MS ? 0 : log.pausedUntil,
+    lastProbe: log.lastProbe > now + 1000 ? 0 : log.lastProbe,
+  };
 }
 function writeLog(log: CallLog) {
   memLog = log;

@@ -50,11 +50,12 @@ import {
   spotSendTypedData, usdcForFee,
 } from '@/lib/rift/hypercore';
 import {
-  DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, assessCost, costNeedsTick, costText, formatPct, gasDeskChains,
-  gasDeskUsd, priceDropPct, type CostCheck, type CostLevel,
+  DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, assessCost, costNeedsTick, costText, ethereumGasDeskWei, formatPct,
+  gasDeskChains, gasDeskUsd, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
 import {
-  btcCheckpoint, btcLookPatch, btcUnpaid, canPay, canRetryUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, PAY_HEARTBEAT_MS, payWindowOpen, sourceKindOf,
+  btcLookChange, btcUnpaid, canPay, canRetryUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, PAY_HEARTBEAT_MS, paymentFacts, payState,
+  payWindowOpen, sourceKindOf,
 } from '@/lib/rift/order-state';
 import {
   applyStatusUpdate, beginHyperPost, claimPayment, loadOrders, orderStorageProblem, patchOrder, patchPaymentAttempt, removeOrders, saveCarriedNow, storageFailing, unreadableOrderIds, unsavedChanges, upsertOrder, useStoredOrders,
@@ -112,8 +113,14 @@ const fmt = (v: string | number | undefined, digits = 4) => {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: digits }) : '—';
 };
-const fmtUsd = (n: number) => (Number.isFinite(n) ? n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: n >= 1000 ? 0 : 2 }) : '—');
+// Whole dollars from $1,000 (the minimum is set too: older browsers refuse a maximum below the currency's default minimum).
+const fmtUsd = (n: number) => (Number.isFinite(n)
+  ? n.toLocaleString(undefined, { style: 'currency', currency: 'USD', ...(n >= 1000 ? { minimumFractionDigits: 0, maximumFractionDigits: 0 } : { maximumFractionDigits: 2 }) })
+  : '—');
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+/** A part of the page that couldn't load (a page older than the site, or the network), not a damaged order. */
+const isLoadError = (e: Error) => e?.name === 'ChunkLoadError'
+  || /loading (css )?chunk|dynamically imported module|importing a module script failed/i.test(e?.message ?? '');
 const errText = (e: unknown) => {
   const x = e as { shortMessage?: string; message?: string };
   return x?.shortMessage ?? x?.message ?? String(e);
@@ -419,7 +426,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     refetchInterval: () => (moved || !active ? false : Math.max(30_000, riftPauseLeft())),
     staleTime: 20_000,
     retry: (count, e) => classifyRiftError(e) === 'network' && count < 1,
-    retryDelay: 3_000,
+    // A call that failed outright starts a short pause (client.ts): the retry waits it out.
+    retryDelay: () => Math.max(3_000, riftPauseLeft()),
   });
   const quote = quoteQuery.data && quoteAmount && amountState.normalized === quoteAmount && spent !== quoteKey ? quoteQuery.data : undefined;
   const estimate = useMemo(() => (quote ? estimateRoute(chainKey, quote.route, KNOWN_SYMBOLS) : null), [quote, chainKey]);
@@ -458,7 +466,12 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     const e = expectedFor(q, px, gasWei);
     const usdOut = e && px.iaeroUsd ? e.out * px.iaeroUsd : null;
     const atLeast = gasWei === undefined ? expectedFor(q, px, ETHEREUM_GAS_FLOOR_WEI) : e;
-    return { check: assessCost(usdIn, usdOut), usdIn, usdOut, tooSmall: (usdOut !== null && usdOut <= 0) || (!!atLeast && atLeast.out <= 0) };
+    // Paid in ETH, the Ethereum gas charge is compared with the amount itself: no market price needed.
+    let swallowed = false;
+    if (/^(ethereum|arbitrum|base)\.eth$/i.test(token?.asset ?? '')) {
+      try { swallowed = decimalToRaw(q.from_amount, 18) <= ethereumGasDeskWei(gasDeskChains(q.route), gasWei ?? ETHEREUM_GAS_FLOOR_WEI); } catch { /* not a decimal: the quote check refuses it */ }
+    }
+    return { check: assessCost(usdIn, usdOut), usdIn, usdOut, tooSmall: swallowed || (usdOut !== null && usdOut <= 0) || (!!atLeast && atLeast.out <= 0) };
   };
   const renderNow = Date.now();
   const gasNow = gasAt(renderNow);
@@ -593,16 +606,26 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   function whileWalletOpen(id: string, attemptId: string, waiting: string) {
     setBusy(waiting);
     const started = Date.now();
+    let warned = false;
     const beat = setInterval(() => {
       const at = Date.now();
+      // Rift already has a payment for the order (sent from elsewhere), or reports something new: approving could pay
+      // twice, or into an order in an unknown state.
+      const stored = loadOrders().find(x => x.id === id);
+      if (!warned && stored && (stored.status !== 'awaiting_deposit' || stored.rawStatus)) {
+        warned = true;
+        setBusy(stored.status === 'expired' ? 'Rift has closed this order. Reject the request in your wallet.'
+          : stored.rawStatus ? 'Rift reports a status this page doesn’t know for this order. Reject the request in your wallet.'
+          : 'Rift already has a payment for this order. Reject the request in your wallet: approving it would pay twice.');
+      }
       if (at - started > MAX_PROMPT_MS) {
         clearInterval(beat);
-        setBusy('Your wallet hasn’t answered for 15 minutes. If it no longer shows this request, reload this page: the order card can then check whether anything was sent.');
+        if (!warned) setBusy('Your wallet hasn’t answered for 15 minutes. If it no longer shows this request, reload this page: the order card can then check whether anything was sent.');
         return;
       }
       void patchPaymentAttempt(id, attemptId, prev => (prev.payRequestedAt ? { payRequestedAt: at } : {}));
     }, PAY_HEARTBEAT_MS);
-    const slow = setTimeout(() => setBusy('Still waiting for your wallet. Rift fills at the price when your payment arrives: if it may have moved, reject the request and buy again.'), SLOW_PROMPT_MS);
+    const slow = setTimeout(() => { if (!warned) setBusy('Still waiting for your wallet. Rift fills at the price when your payment arrives: if it may have moved, reject the request and buy again.'); }, SLOW_PROMPT_MS);
     return () => { clearInterval(beat); clearTimeout(slow); };
   }
 
@@ -832,7 +855,10 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     // show that nothing moved.
     const begun = await beginHyperPost(id, o.payAttemptId!, action);
     if (begun === 'paid') {
-      await patchPaymentAttempt(id, o.payAttemptId!, { payRequestedAt: undefined });
+      // A transfer posted before stays in doubt unless Rift has a payment (its claim cleared that): Rift reporting a
+      // status this page doesn't know, or expiry, settles nothing about it.
+      await patchPaymentAttempt(id, o.payAttemptId!, prev => (prev.hlPostedAt && (prev.status === 'awaiting_deposit' || prev.status === 'expired')
+        ? { payRequestedAt: undefined, payUnknown: true } : { payRequestedAt: undefined }));
       throw new Error('Rift already has a payment for this order, or reports a status this page doesn’t know. Nothing more was sent.');
     }
     if (begun === 'closed') {
@@ -921,13 +947,20 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       // An order must be kept, under the cross-tab lock: checked before it exists.
       const storageProblem = orderStorageProblem();
       if (storageProblem) throw new Error(`${storageProblem} Nothing was sent.`);
-      // Two Bitcoin orders both waiting for payment buy twice if both QR codes are paid: asked once, at the click.
+      // Two Bitcoin orders both waiting for payment buy twice if both QR codes are paid (one whose payment went missing
+      // shows its QR code again): asked once, at the click.
+      const mine = loadOrders().filter(x => x.toAddress.toLowerCase() === owner.toLowerCase() && x.status === 'awaiting_deposit');
       if (chain.kind === 'bitcoin') {
-        const open = loadOrders().find(x => x.sourceChain === 'bitcoin' && x.toAddress.toLowerCase() === owner.toLowerCase()
-          && payWindowOpen(x, 'bitcoin', Date.now()) && !x.btc?.txid);
+        const open = mine.find(x => x.sourceChain === 'bitcoin' && payWindowOpen(x, 'bitcoin', Date.now()) && (!x.btc?.txid || x.btc.missing));
         if (open && !window.confirm(`Order ${open.id} is still waiting for a Bitcoin payment. Paying both would buy twice. Create another order anyway?`)) {
           throw new Error('Kept the Bitcoin order already waiting for payment. Nothing was created.');
         }
+      }
+      // A payment this page couldn't confirm (a lost wallet answer) may have gone out: buying again could buy twice.
+      // Not for an order the user hid after a check found nothing.
+      const doubtful = mine.find(x => !x.hiddenAt && (payState(x, Date.now()) === 'unknown' || payState(x, Date.now()) === 'requesting'));
+      if (doubtful && !window.confirm(`This page couldn’t confirm whether the payment for order ${doubtful.id} went out. If it did, another order buys twice. Create another order anyway?`)) {
+        throw new Error('Kept the order whose payment is unconfirmed. Nothing was created: check that order first.');
       }
       const refund = chain.kind === 'bitcoin' ? normalizeBtcAddress(btcRefund) : owner;
       if (chain.kind === 'bitcoin' && !isBtcAddress(refund)) {
@@ -1121,8 +1154,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   const dismiss = async (o: StoredOrder) => {
     if (!(await stillUnpaid(o))) return;
     // Checked again when the removal is applied, against the record as it is then.
-    void removeOrders([o.id], clearable);
-    if (activeId === o.id && clearable(loadOrders().find(x => x.id === o.id) ?? o, Date.now())) setActiveId(null);
+    const r = await removeOrders([o.id], clearable);
+    const gone = !loadOrders().some(x => x.id === o.id);
+    if (gone) { if (activeId === o.id) setActiveId(null); return; }
+    setError(r === 'failed' ? 'This browser couldn’t remove the order right now. Try again in a moment.'
+      : 'This order changed since you asked to dismiss it (a payment may have been seen, or Rift reports something new), so it stays.');
   };
   /** Before a Bitcoin order with no payment seen is removed at the user's request: one fresh look at its address. A
    *  payment made from another wallet, or one another tab saw but could not save, must not go with the order. Says
@@ -1135,28 +1171,31 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       setError(`Couldn’t check the Bitcoin address of order ${o.id} before removing it, so it stays. Try again in a moment.`);
       return false;
     }
-    const look = { at: Date.now(), failing: storageFailing(), checkpoint: btcCheckpoint(o) };
-    await patchOrder(o.id, prev => btcLookPatch(prev.btc, seen, look));
+    const look = { at: Date.now(), failing: storageFailing() };
+    await patchOrder(o.id, prev => btcLookChange(prev, seen, look));
     if (seen === 'known' || seen.payments.length) {
       setError(`A payment to the Bitcoin address of order ${o.id} was just found, so it stays, and is tracked here.`);
       return false;
     }
     return true;
   }
-  /** Removed from this browser whatever its state: a damaged record this page can't show. */
-  const remove = (o: StoredOrder) => {
-    void removeOrders([o.id], () => true);
-    if (activeId === o.id) setActiveId(null);
-  };
-  /** Removed at the user's explicit request ("Remove from this browser"), only if the order is as they saw it: another
-   *  tab may have recorded a payment since. */
+  /** Removed at the user's explicit request ("Remove from this browser"), only if its payment is as they saw it
+   *  (order-state.ts paymentFacts): another tab may have recorded a payment since. */
   const forget = async (o: StoredOrder) => {
-    const seen = JSON.stringify([o.status, o.btc ?? null, o.depositSentAt ?? null, o.payUnknown ?? null]);
-    const r = await removeOrders([o.id], x => JSON.stringify([x.status, x.btc ?? null, x.depositSentAt ?? null, x.payUnknown ?? null]) === seen);
-    if (r === 'saved') { if (activeId === o.id) setActiveId(null); return; }
+    const seen = paymentFacts(o);
+    const r = await removeOrders([o.id], x => paymentFacts(x) === seen);
+    // Removed, here or already by another tab.
+    if (r === 'saved' || !loadOrders().some(x => x.id === o.id)) { if (activeId === o.id) setActiveId(null); return; }
     setError(r === 'unchanged'
       ? 'This order changed since you asked to remove it (a payment may have been seen), so it stays. Check it again.'
       : 'This browser couldn’t remove the order right now. Try again in a moment.');
+  };
+  /** "Remove it from this browser" for an order its card can't show: asked first, after a fresh look at an unpaid
+   *  Bitcoin order's address, and only if its payment is as it was. */
+  const removeDamaged = async (o: StoredOrder) => {
+    if (!window.confirm(`Remove this order from this browser? Keep its ID first if you may need Rift’s support: ${o.id}`)) return;
+    if (!(await stillUnpaid(o))) return;
+    await forget(o);
   };
 
   // The price-moved panel shows the same after-gas figures as the quote panel.
@@ -1349,8 +1388,12 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
                   )}
                   {!expected && gasDeskChains(quote.route).length > 0 && (
                     <div className="text-xs text-amber-300/90">
-                      Rift also deducts network gas once you pay, which its quote leaves out and which could not be estimated right now, so
-                      expect somewhat less than this.
+                      {gasDeskChains(quote.route).includes(1)
+                        ? <>Rift also deducts network gas once you pay, which its quote leaves out: on Ethereum about{' '}
+                          {fmt(formatUnits(ethereumGasDeskWei([1], gasNow ?? ETHEREUM_GAS_FLOOR_WEI), 18), 5)} ETH{gasNow === undefined ? ' or more' : ''},
+                          which couldn’t be valued in iAERO right now. On a small order that can be most of it.</>
+                        : <>Rift also deducts network gas once you pay, which its quote leaves out and which could not be estimated right now, so
+                          expect somewhat less than this.</>}
                     </div>
                   )}
                   {(() => {
@@ -1521,18 +1564,30 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         {activeOrder ? (
           <RiftErrorBoundary
             key={activeOrder.id}
-            fallback={() => (
+            fallback={error => (isLoadError(error) ? (
+              // Part of the page didn't load (it is older than the site, or the network dropped): the order is fine.
+              <div role="alert" className="space-y-3 rounded-xl border border-amber-500/20 bg-amber-500/10 p-6 text-sm text-amber-100">
+                <div className="font-medium text-white">This order can’t be shown right now</div>
+                <div>
+                  Part of this page couldn’t load (it may be older than the site). Reload the page: the order is saved. Order{' '}
+                  <span className="break-all font-mono">{activeOrder.id}</span>.
+                </div>
+                <button type="button" onClick={() => window.location.reload()} className="rounded-lg border border-amber-400/40 px-3 py-1.5 hover:border-amber-300">
+                  Reload the page
+                </button>
+              </div>
+            ) : (
               <div role="alert" className="space-y-3 rounded-xl border border-red-500/20 bg-red-500/10 p-6 text-sm text-red-200">
                 <div className="font-medium text-white">This order can’t be shown</div>
                 <div>
                   Its saved record is damaged. Your funds are not affected and Rift completes the order regardless. Order{' '}
                   <span className="break-all font-mono text-red-100">{activeOrder.id}</span>: keep this ID if you need Rift’s support.
                 </div>
-                <button type="button" onClick={() => remove(activeOrder)} className="rounded-lg border border-red-400/40 px-3 py-1.5 text-red-100 hover:border-red-300">
+                <button type="button" onClick={() => { void removeDamaged(activeOrder); }} className="rounded-lg border border-red-400/40 px-3 py-1.5 text-red-100 hover:border-red-300">
                   Remove it from this browser
                 </button>
               </div>
-            )}
+            ))}
           >
             <OrderTracker
               key={activeOrder.id}

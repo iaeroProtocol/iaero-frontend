@@ -152,6 +152,11 @@ export const L2_GAS_DESK_USD = 0.1;
 export const gasDeskChains = (route: { execution?: { mode: string; chain?: number } }[]): number[] =>
   [...new Set(route.flatMap(s => (s.execution?.mode === 'evm_gas_desk' && Number.isSafeInteger(s.execution.chain) && s.execution.chain! > 0 ? [s.execution.chain!] : [])))];
 
+/** The gas desk's expected Ethereum charge in wei (0 when the route doesn't run on Ethereum): an order paid in ETH is
+ *  compared with it directly, with no market price needed. */
+export const ethereumGasDeskWei = (chains: number[], ethGasPriceWei: bigint): bigint =>
+  chains.includes(1) ? ethGasPriceWei * BigInt(ETHEREUM_GAS_DESK_UNITS) : 0n;
+
 /** Expected gas-desk charge in USD, or null when Ethereum is involved and its gas price or ETH price is unknown. */
 export function gasDeskUsd(chains: number[], ethGasPriceWei: bigint | undefined, ethUsd: number | undefined): number | null {
   let usd = 0;

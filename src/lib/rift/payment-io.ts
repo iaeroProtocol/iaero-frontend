@@ -3,7 +3,7 @@
 // The network side of paying and of checking a payment: reading the deposit address (evidence.ts judges what
 // is found) and posting a signed HyperCore transfer. Every call has a timeout.
 
-import { erc20Abi, type Address, type PublicClient } from 'viem';
+import { erc20Abi, type Address, type PublicClient, type TransactionReceipt } from 'viem';
 import { HL_API, exchangeOutcome, spotSendRequest, type ExchangeOutcome } from './hypercore';
 import { judgeEvmDeposit, judgeHyperLedger, type Evidence } from './evidence';
 import type { StoredOrder } from './types';
@@ -45,6 +45,34 @@ export async function evmDepositEvidence(
  *  clock, which can run ahead of Hyperliquid's. The deposit address is new for each order, so nothing older can
  *  match it anyway. */
 const LEDGER_LOOKBACK_MS = 24 * 3600_000;
+
+const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+
+/** A Transfer log's amount: its data, or the last topic of a token that indexes it. Only the first word counts. */
+function transferValue(l: { data: string; topics: readonly string[] }): bigint {
+  const word = l.data && l.data !== '0x' ? l.data.slice(0, 66) : l.topics[3];
+  try { return word ? BigInt(word) : 0n; } catch { return 0n; }
+}
+
+/** What a mined payment did. A token payment is judged by its Transfer logs to the deposit address; with no standard
+ *  Transfer there, by what the address holds once the transaction is mined: nothing (a token that returns false
+ *  instead of reverting) is a failed payment, the whole amount (a token with a non-standard event) a payment, and part
+ *  of it, which can't be told from an earlier attempt's, leaves the payment in doubt. Throws if the chain can't be read. */
+export async function minedPayment(
+  client: PublicClient, o: Pick<StoredOrder, 'depositAddress' | 'token' | 'fromAmountRaw'>, r: Pick<TransactionReceipt, 'status' | 'logs' | 'blockNumber'>,
+): Promise<{ kind: 'paid'; received?: string } | { kind: 'failed' } | { kind: 'doubt' }> {
+  if (r.status !== 'success') return { kind: 'failed' };
+  if (!o.token.address) return { kind: 'paid' };
+  const token = o.token.address.toLowerCase(), to = o.depositAddress.toLowerCase();
+  const sum = r.logs
+    .filter(l => l.address.toLowerCase() === token && l.topics[0] === TRANSFER_TOPIC && !!l.topics[2] && `0x${l.topics[2].slice(26)}`.toLowerCase() === to)
+    .reduce((n, l) => n + transferValue(l), 0n);
+  if (sum > 0n) return { kind: 'paid', received: sum < BigInt(o.fromAmountRaw) ? sum.toString() : undefined };
+  // Read at a block that includes the transaction (one behind the head: a load-balanced node likely has it).
+  const head = (await client.getBlockNumber()) - 1n;
+  const ev = await evmDepositEvidence(client, o, head > r.blockNumber ? head : r.blockNumber);
+  return ev === 'none' ? { kind: 'failed' } : ev === 'partial' ? { kind: 'doubt' } : { kind: 'paid' };
+}
 
 /** The payer's HyperCore transfers to the deposit address. Throws if Hyperliquid cannot be read. */
 export async function hyperDepositEvidence(o: Pick<StoredOrder, 'toAddress' | 'depositAddress' | 'fromAmount' | 'createdAt'>, symbol: string) {

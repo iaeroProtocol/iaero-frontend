@@ -18,9 +18,8 @@ const btcOrder = (over = {}) => ({
 });
 /** Bitcoin looks as the order card takes them (OrderTracker.tsx 2b); `at`: when (now by default). */
 const trackerLook = (t, id) => (d, at = Date.now()) => {
-  const o = t.loadOrders().find(x => x.id === id);
-  const look = { at, failing: t.storageFailing(), checkpoint: orderState.btcCheckpoint(o) };
-  return t.patchOrder(id, prev => orderState.btcLookPatch(prev.btc, d, look));
+  const look = { at, failing: t.storageFailing() };
+  return t.patchOrder(id, prev => orderState.btcLookChange(prev, d, look));
 };
 const order = () => {
   const now = Date.now();
