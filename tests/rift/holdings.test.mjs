@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyLlamaPrices, candidatesToHoldings, parseNative, parseTokenBalances, probeAmount, rankHoldings, rawToNumber, splitRead, validDecimals, wholeReadFailed, callLayout,
+  applyLlamaPrices, candidatesToHoldings, parseNative, parseTokenBalances, probeAmount, rankHoldings, rawToNumber, splitRead, validDecimals, wholeReadFailed, callLayout, parseDecimals, blockscoutCandidates,
 } from '../../src/lib/rift/holdings.ts';
 
 const IAERO = 'base.0x81034fb34009115f215f5d5f564aac9ffa46a1dc';
@@ -157,4 +157,16 @@ test('each token\u2019s decimals() sits right after its balanceOf(), so a token 
     const lost = out.filter((r, i) => r.status === 'failure' && !bad.has(calls[i])).length;
     assert.ok(lost <= 4, `token ${hostile}: good reads lost ${lost}`);
   }
+});
+
+test('decimals Blockscout leaves out or writes oddly are not taken as 0', () => {
+  // Another audit, Medium 4: Number('') is 0, so a row without decimals sized its amount as a 0-decimal token.
+  for (const v of ['', null, undefined, ' 18', '0x12', '1e1', '18.0', '-1', '37', 37, 2.5, NaN]) assert.equal(parseDecimals(v), null, String(v));
+  for (const [v, d] of [['18', 18], ['6', 6], ['0', 0], [8, 8]]) assert.equal(parseDecimals(v), d, String(v));
+  const row = decimals => ({ value: '5000000', token: { type: 'ERC-20', address_hash: `0x${'44'.repeat(20)}`, symbol: 'X', name: 'X', decimals, exchange_rate: '1' } });
+  for (const decimals of [undefined, null, '']) {
+    assert.deepEqual(parseTokenBalances('base', [row(decimals)]), [], `parseTokenBalances, decimals ${decimals}`);
+    assert.deepEqual(blockscoutCandidates([row(decimals)]), [], `blockscoutCandidates, decimals ${decimals}`);
+  }
+  assert.equal(parseTokenBalances('base', [row('6')])[0].decimals, 6);
 });

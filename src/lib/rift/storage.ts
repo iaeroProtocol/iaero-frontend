@@ -90,9 +90,13 @@ export const storageFailing = () => writeFailed;
 /** How many refused changes this page is carrying (diagnostics and tests). */
 export const unsavedChanges = () => unsaved.length;
 
-/** Why this browser can't keep an order, or null: a new order must be saved before its payment instructions are
- *  shown (a Bitcoin order, paid from another wallet, needs nothing more). */
+/** Why this browser can't keep an order, or null. Every order is written under a cross-tab Web Lock: without
+ *  one, another tab's write could drop it (a Bitcoin order too, whose deposit address would then be lost). A new
+ *  order must also be saved before its payment instructions are shown, or a payment claimed. */
 export function orderStorageProblem(): string | null {
+  if (typeof navigator === 'undefined' || !navigator.locks?.request) {
+    return 'This browser can’t keep orders safely between tabs (it has no Web Locks). Use an up-to-date browser.';
+  }
   if (writeFailed) return 'This browser isn’t saving orders right now (its storage is full or blocked). Refresh after fixing it.';
   try {
     window.localStorage.setItem(PROBE_KEY, '1');
@@ -101,15 +105,6 @@ export function orderStorageProblem(): string | null {
     return 'This browser’s storage is full or blocked, so orders can’t be tracked safely. Allow site storage and refresh.';
   }
   return null;
-}
-
-/** Why this browser cannot pay orders safely, or null. Payments also need Web Locks (tabs agree on who opens the
- *  wallet; the claim is saved before the wallet is asked). */
-export function paymentStorageProblem(): string | null {
-  if (typeof navigator === 'undefined' || !navigator.locks?.request) {
-    return 'This browser can’t coordinate payments between tabs (it has no Web Locks). Use an up-to-date browser.';
-  }
-  return orderStorageProblem();
 }
 
 /** Ids of saved records this version cannot show (written by a newer version, or damaged). */
@@ -177,8 +172,8 @@ function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: bool
     return 'failed';
   };
   const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
-  if (!locks?.request) return Promise.resolve(run());
-  // Without the lock nothing is written: an unlocked write could undo a payment claim made in another tab.
+  // Without the lock nothing is written: an unlocked write could drop another tab's order or payment claim.
+  if (!locks?.request) return Promise.resolve('failed');
   return locks.request(LOCK, run).then(r => r, (): WriteResult => 'failed');
 }
 

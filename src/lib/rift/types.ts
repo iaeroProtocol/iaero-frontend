@@ -124,6 +124,8 @@ export interface StoredOrder {
     txid?: string; confirmations?: number; firstSeenAt?: number; totalSats?: string; payments?: number; missing?: boolean; seenLate?: boolean;
     /** Empty answers in a row since the payment was last seen. */
     emptyChecks?: number;
+    /** A payment was seen with a confirmation: it is never treated as missing (order-state.ts btcConfirmed). */
+    confirmed?: boolean;
   };
 
   // --- Rift's status ---

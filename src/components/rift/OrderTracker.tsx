@@ -25,7 +25,7 @@ import RouteSteps, { type StepLink } from './RouteSteps';
 import { badgeStyle } from './status';
 import { classifyRiftError, getOrder, riftBudget } from '@/lib/rift/client';
 import { parseOrderUpdate } from '@/lib/rift/validate';
-import { applyStatusUpdate, markPolled, patchOrder, polledWithin, storageFailing } from '@/lib/rift/storage';
+import { applyStatusUpdate, loadOrders, markPolled, patchOrder, polledWithin, storageFailing } from '@/lib/rift/storage';
 import { btcToSats, findBtcDeposits } from '@/lib/rift/bitcoin';
 import { hyperCoreToken } from '@/lib/rift/hypercore';
 import { accountNonce, evmDepositEvidence, hyperDepositEvidence } from '@/lib/rift/payment-io';
@@ -33,7 +33,7 @@ import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, RIFT_SUPP
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
 import { costText, costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
 import {
-  btcSightingChanged, canHide, isFinalStatus, isOutOfDate, isTerminalStatus, missingButExpired, nextBtcRecord, paidButExpired, payState,
+  btcLookPatch, canHide, isFinalStatus, isOutOfDate, isTerminalStatus, missingButExpired, paidButExpired, payState,
   payWindowMs, payWindowOpen, phaseInput,
 } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
@@ -229,13 +229,14 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
         empties = d.payments.length ? 0 : empties + 1;
         if (!stop) setBtcErrors(0);
         if (!stop) {
-          // Taken here, not in the change: a change that storage refused is applied again later. While storage
-          // refuses writes, only a change in what was seen is recorded, and empty answers are counted here.
-          const at = Date.now(), failing = storageFailing(), run = empties;
-          await patchOrder(order.id, prev => {
-            const btc = nextBtcRecord(prev.btc, d, at, failing ? run : undefined);
-            return btc === prev.btc || (failing && !btcSightingChanged(prev.btc, btc)) ? {} : { btc };
-          });
+          // Taken here, not in the change (order-state.ts btcLookPatch): a change that storage refused is applied
+          // again later, over newer records.
+          const failing = storageFailing();
+          const look = {
+            at: Date.now(), failing, run: empties,
+            counted: failing ? JSON.stringify(loadOrders().find(o => o.id === order.id)?.btc ?? null) : '',
+          };
+          await patchOrder(order.id, prev => btcLookPatch(prev.btc, d, look));
         }
       } catch {
         errors++;

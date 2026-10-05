@@ -66,6 +66,9 @@ const RETRY_MIN_MS = 2_000;
 const MAX_SPLIT_READS = 16;
 /** Kept back from those reads for Blockscout's numbers, used when the chain can't be read after all. */
 const FALLBACK_RESERVE_MS = 3_000;
+/** The first read's limit, leaving time to read again in halves: a token can make the whole read slow (an
+ *  expensive balanceOf()), not only refuse it. Two RPC attempts. */
+const FIRST_READ_MS = 2 * RPC_TIMEOUT_MS;
 const VIEM_CHAINS = { 1: mainnet, 42161: arbitrum, 8453: base } as const;
 const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11' as const;
 const GET_ETH_BALANCE = [{
@@ -172,17 +175,18 @@ async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: T
   // One aggregate call per read (batchSize 0: viem would otherwise split by calldata size, not by call).
   const read = (part: readonly unknown[], by: number) =>
     beforeDeadline(client.multicall({ contracts: part as typeof contracts, allowFailure: true, batchSize: 0 }), by) as Promise<CallResult[]>;
-  let results = await read(contracts, until);
+  const by = until - FALLBACK_RESERVE_MS;
+  const mayRead = () => by - Date.now() > RETRY_MIN_MS;
+  // A first read that fails as a whole, or runs out of time, is read again as below.
+  let results = await read(contracts, Math.min(by, Date.now() + FIRST_READ_MS)).catch((): CallResult[] => contracts.map(notRead));
   if (wholeReadFailed(results, balanceAt)) {
-    const by = until - FALLBACK_RESERVE_MS;
-    const mayRead = () => by - Date.now() > RETRY_MIN_MS;
     const eth = mayRead() ? await beforeDeadline(client.getBalance({ address: owner }), by).catch(() => null) : null;
+    // Kept even if every token read fails after all (chainHoldings then uses Blockscout's token numbers).
     if (eth !== null) {
-      const again: CallResult[] = [
+      results = [
         { status: 'success', result: eth },
         ...await splitRead(contracts.slice(1), part => read(part, by), notRead, { maxReads: MAX_SPLIT_READS, mayRead }),
       ];
-      if (!wholeReadFailed(again, balanceAt.slice(1))) results = again;
     }
   }
   if (wholeReadFailed(results, balanceAt)) return null;
@@ -268,8 +272,15 @@ async function chainHoldings(chain: EvmHoldingChain, chainId: 1 | 42161 | 8453, 
     return out;
   }
   if (!list) report.warnings.push(`${chain}: token list unavailable, major tokens only`);
-  if (read.incomplete) report.warnings.push(`${chain}: some balances could not be checked on-chain`);
-  const out = candidatesToHoldings(chain, read.tokens, read.balances);
+  let out: Holding[];
+  if (read.balances.length && read.balances.every(b => b === null) && list) {
+    // Only ETH could be read on-chain: the tokens are Blockscout's own numbers, flagged.
+    out = parseTokenBalances(chain, list.items, [RIFT_DESTINATION]);
+    report.warnings.push(`${chain}: token balances could not be checked on-chain and may be out of date`);
+  } else {
+    if (read.incomplete) report.warnings.push(`${chain}: some balances could not be checked on-chain`);
+    out = candidatesToHoldings(chain, read.tokens, read.balances);
+  }
   if (read.native !== null) { const n = nativeHolding(chain, read.native, 0); if (n) out.push(n); }
   return out;
 }

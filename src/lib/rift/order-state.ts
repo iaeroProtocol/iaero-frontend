@@ -102,25 +102,32 @@ export function phaseInput(o: StoredOrder, kind: SourceKind) {
  *  answer from a lagging mempool.space backend must not erase it. */
 export const BTC_MISSING_AFTER = 3;
 
+/** A Bitcoin payment seen with a confirmation. It is never treated as dropped: a confirmed transaction leaves only
+ *  in a deep reorganisation, so an empty answer about it is the API's fault, and offering the QR code again could
+ *  be paid twice. */
+export const btcConfirmed = (b: StoredOrder['btc']) => !!b?.confirmed || (b?.confirmations ?? 0) > 0;
+
 /** The order's Bitcoin record after a look at its deposit address. A payment seen earlier keeps its id and times
  *  (the order is never treated as unpaid because of them) and is marked missing only after several empty answers
- *  in a row. `emptyRun`: while storage can't record each look, the page's own count of them stands in (a sighting
- *  it could not record would leave the stored count too high). */
+ *  in a row, and only while unconfirmed. `emptyRun`: while storage can't record each look, the page's own count
+ *  of them stands in (a sighting it could not record would leave the stored count too high). */
 export function nextBtcRecord(
   prev: StoredOrder['btc'], seen: { payments: { txid: string; confirmations: number }[]; totalSats: bigint }, now: number,
   emptyRun?: number,
 ): StoredOrder['btc'] {
   if (!seen.payments.length) {
-    if (!prev?.txid || prev.missing) return prev; // nothing more to record once it is missing
+    // Nothing more to record once it is missing; a confirmed payment is never "missing".
+    if (!prev?.txid || prev.missing || btcConfirmed(prev)) return prev;
     const emptyChecks = emptyRun ?? (prev.emptyChecks ?? 0) + 1;
     return { ...prev, emptyChecks, ...(emptyChecks >= BTC_MISSING_AFTER ? { missing: true } : {}) };
   }
   const confirmations = Math.min(...seen.payments.map(p => p.confirmations));
+  const confirmed = btcConfirmed(prev) || seen.payments.some(p => p.confirmations > 0);
   // First seen already confirmed: the page was not watching when it was sent.
   const seenLate = prev?.firstSeenAt ? prev.seenLate : confirmations > 0;
   return {
     txid: seen.payments[0].txid, confirmations, firstSeenAt: prev?.firstSeenAt ?? now, totalSats: seen.totalSats.toString(),
-    payments: seen.payments.length, ...(seenLate ? { seenLate: true } : {}),
+    payments: seen.payments.length, ...(seenLate ? { seenLate: true } : {}), ...(confirmed ? { confirmed: true } : {}),
   };
 }
 
@@ -130,7 +137,23 @@ export function nextBtcRecord(
  *  that a stored count of empty answers can't outlive it (once per outage: the carried count is then empty). */
 export const btcSightingChanged = (a: StoredOrder['btc'], b: StoredOrder['btc']) =>
   a?.txid !== b?.txid || !!a?.missing !== !!b?.missing || a?.totalSats !== b?.totalSats || a?.payments !== b?.payments
-  || (a?.confirmations ?? 0) > 0 !== (b?.confirmations ?? 0) > 0 || (!!a?.emptyChecks && !b?.emptyChecks);
+  || btcConfirmed(a) !== btcConfirmed(b) || (!!a?.emptyChecks && !b?.emptyChecks);
+
+/** One look at a Bitcoin deposit address, as the order card takes it: when, whether storage was refusing writes
+ *  then, the page's own count of empty answers in a row, and the record (JSON) that count was made against. */
+export interface BtcLook { at: number; failing: boolean; run: number; counted: string }
+
+/** The change a look makes to an order's Bitcoin record (OrderTracker.tsx applies it; a change storage refused is
+ *  applied again later, over newer records). While storage refuses writes, only a change in what was seen is
+ *  recorded, and the page's own count of empty answers decides "missing", but only over the record it was
+ *  counted against: over one another tab has changed since (a newer sighting), the stored count decides. */
+export function btcLookPatch(
+  prev: StoredOrder['btc'], seen: { payments: { txid: string; confirmations: number }[]; totalSats: bigint }, look: BtcLook,
+): Pick<StoredOrder, 'btc'> | Record<string, never> {
+  const own = look.failing && JSON.stringify(prev ?? null) === look.counted;
+  const btc = nextBtcRecord(prev, seen, look.at, own ? look.run : undefined);
+  return btc === prev || (look.failing && !btcSightingChanged(prev, btc)) ? {} : { btc };
+}
 
 /** Rift expired the order after its Bitcoin payment went missing (most likely dropped or replaced). The user may
  *  clear it, but it is never dropped automatically: only their wallet can say the payment didn't go through. */
@@ -248,9 +271,13 @@ export function sanitizeOrder(x: unknown): StoredOrder | null {
       if (isNum(btc.firstSeenAt)) b.firstSeenAt = btc.firstSeenAt;
       if (isStr(btc.totalSats) && UINT_RE.test(btc.totalSats)) b.totalSats = btc.totalSats;
       if (isNum(btc.payments)) b.payments = btc.payments;
-      if (btc.missing === true) b.missing = true;
       if (btc.seenLate === true) b.seenLate = true;
-      if (isNum(btc.emptyChecks)) b.emptyChecks = btc.emptyChecks;
+      if (btc.confirmed === true) b.confirmed = true;
+      // A confirmed payment is never missing (btcConfirmed): an older version could mark it so.
+      if (!btcConfirmed(b)) {
+        if (btc.missing === true) b.missing = true;
+        if (isNum(btc.emptyChecks)) b.emptyChecks = btc.emptyChecks;
+      }
       clean.btc = b;
     }
   }

@@ -11,6 +11,20 @@ const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.Modu
 const owner = '0x2222222222222222222222222222222222222222';
 const key = 'iaero.rift.orders.v1';
 const HASH = `0x${'ab'.repeat(32)}`;
+const BTC_DEPOSIT = 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq';
+const btcOrder = (over = {}) => ({
+  ...order(), sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' }, fromAmount: '0.001', fromAmountRaw: '100000',
+  depositAddress: BTC_DEPOSIT, route: [{ venue: 'garden', from: 'bitcoin.btc', to: 'base.cbbtc' }], ...over,
+});
+/** Bitcoin looks as the order card takes them (OrderTracker.tsx 2b), with its own count of empty answers. */
+const trackerLook = (t, id, empties = 0) => {
+  return d => {
+    empties = d.payments.length ? 0 : empties + 1;
+    const failing = t.storageFailing();
+    const look = { at: Date.now(), failing, run: empties, counted: failing ? JSON.stringify(t.loadOrders().find(o => o.id === id)?.btc ?? null) : '' };
+    return t.patchOrder(id, prev => orderState.btcLookPatch(prev.btc, d, look));
+  };
+};
 const order = () => {
   const now = Date.now();
   return {
@@ -38,8 +52,14 @@ function harness(saved, { locksAvailable = true, lockRejects = false, lockError 
     tail = task.then(() => {}, () => {});
     return task;
   } };
-  const tab = () => {
+  /** A tab; `own`: its storage can be blocked on its own (blockMe), as when only its larger write is refused. */
+  const tab = ({ own = false } = {}) => {
     const exports = {};
+    const me = { blocked: false };
+    const store = !own ? localStorage : {
+      getItem: localStorage.getItem, removeItem: localStorage.removeItem,
+      setItem: (k, v) => { if (me.blocked) throw new Error('quota'); localStorage.setItem(k, v); },
+    };
     vm.runInNewContext(compiled, {
       exports, require: name => {
         if (name === 'react') return { useCallback() {}, useEffect() {}, useState() {} };
@@ -47,12 +67,12 @@ function harness(saved, { locksAvailable = true, lockRejects = false, lockError 
         if (name === './keys') return { ORDERS_KEY: key };
         throw new Error(`unexpected import ${name}`);
       },
-      window: { localStorage, dispatchEvent: () => { for (const listener of listeners) listener(); } },
+      window: { localStorage: store, dispatchEvent: () => { for (const listener of listeners) listener(); } },
       navigator: { locks }, Event: class {}, crypto: { randomUUID },
       setTimeout: fn => timers.push(fn), clearTimeout() {},
       Date, JSON, Promise, Set, Map,
     });
-    return exports;
+    return Object.assign(exports, { blockMe: () => { me.blocked = true; }, unblockMe: () => { me.blocked = false; } });
   };
   return {
     tab, read: () => JSON.parse(data.get(key))[0], all: () => JSON.parse(data.get(key)),
@@ -152,12 +172,12 @@ test('a signed HyperCore transfer is posted only by the attempt that saved it', 
   assert.equal((await a.beginHyperPost(x.id, claimed.payAttemptId, action))?.postedBefore, true, 'a refusal of it now is not read as nothing sent');
 });
 
-test('payments are refused up front without Web Locks or working storage; unreadable records are listed', () => {
-  assert.equal(harness(order()).tab().paymentStorageProblem(), null);
-  assert.match(harness(order(), { locksAvailable: false }).tab().paymentStorageProblem(), /Web Locks/);
+test('orders and payments are refused up front without Web Locks or working storage; unreadable records are listed', () => {
+  assert.equal(harness(order()).tab().orderStorageProblem(), null);
+  assert.match(harness(order(), { locksAvailable: false }).tab().orderStorageProblem(), /Web Locks/);
   const blocked = harness(order());
   blocked.block();
-  assert.match(blocked.tab().paymentStorageProblem(), /storage is full or blocked/);
+  assert.match(blocked.tab().orderStorageProblem(), /storage is full or blocked/);
   const foreignId = randomUUID();
   const mixed = harness([order(), { id: foreignId, from: 'a newer version' }]).tab();
   mixed.loadOrders();
@@ -338,21 +358,12 @@ test('while storage refuses writes, Bitcoin looks record what was seen and not t
   const TXID = 'ef'.repeat(32);
   const seen = c => ({ payments: [{ txid: TXID, confirmations: c }], totalSats: 100_000n });
   const empty = { payments: [], totalSats: 0n };
-  let empties = 0;
-  // As the order card looks (OrderTracker.tsx 2b).
-  const look = d => {
-    empties = d.payments.length ? 0 : empties + 1;
-    const at = Date.now(), failing = a.storageFailing(), run = empties;
-    return a.patchOrder(x.id, prev => {
-      const btc = orderState.nextBtcRecord(prev.btc, d, at, failing ? run : undefined);
-      return btc === prev.btc || (failing && !orderState.btcSightingChanged(prev.btc, btc)) ? {} : { btc };
-    });
-  };
+  const look = trackerLook(a, x.id);
   h.block();
   await look(seen(0)); // first seen: a change
   await a.patchOrder(x.id, { notify: true }); // storage is now known to be failing
-  for (let i = 0; i < 100; i++) await look(i % 2 ? empty : seen(Math.min(i, 6)));
-  assert.ok(a.unsavedChanges() <= 4, `bounded: ${a.unsavedChanges()}`);
+  for (let i = 0; i < 100; i++) await look(i % 2 ? empty : seen(0)); // an unconfirmed payment, flapping
+  assert.ok(a.unsavedChanges() <= 3, `bounded: ${a.unsavedChanges()}`);
   assert.equal(a.loadOrders()[0].btc.txid, TXID);
   assert.equal(a.loadOrders()[0].btc.missing, undefined, 'a flapping answer is not "missing"');
   for (let i = 0; i < 3; i++) await look(empty);
@@ -361,6 +372,14 @@ test('while storage refuses writes, Bitcoin looks record what was seen and not t
   await a.patchOrder(x.id, {});
   assert.equal(h.read().btc.missing, true);
   assert.equal(h.read().btc.txid, TXID);
+  // Confirmations climbing during an outage: the first confirmation is recorded, the count is not.
+  const y = h.tab();
+  const lookY = trackerLook(y, x.id);
+  h.block();
+  await y.patchOrder(x.id, { notify: false });
+  for (let c = 0; c <= 30; c++) await lookY(seen(c));
+  assert.ok(y.unsavedChanges() <= 3, `bounded: ${y.unsavedChanges()}`);
+  assert.equal(y.loadOrders()[0].btc.confirmed, true);
 });
 
 test('a refused save that carried nothing is noticed as fixed by the next poll, or by the retry', async () => {
@@ -397,15 +416,7 @@ test('a Bitcoin payment seen again during an outage clears the empty count, so o
   };
   const h = harness(x);
   const a = h.tab();
-  let empties = 2;
-  const look = d => { // as the order card looks (OrderTracker.tsx 2b)
-    empties = d.payments.length ? 0 : empties + 1;
-    const at = Date.now(), failing = a.storageFailing(), run = empties;
-    return a.patchOrder(x.id, prev => {
-      const btc = orderState.nextBtcRecord(prev.btc, d, at, failing ? run : undefined);
-      return btc === prev.btc || (failing && !orderState.btcSightingChanged(prev.btc, btc)) ? {} : { btc };
-    });
-  };
+  const look = trackerLook(a, x.id, 2); // two empty answers in a row before the outage
   h.block();
   await a.patchOrder(x.id, { notify: true }); // storage is now known to be failing
   await look({ payments: [{ txid: TXID, confirmations: 0 }], totalSats: 100_000n });
@@ -416,6 +427,28 @@ test('a Bitcoin payment seen again during an outage clears the empty count, so o
   await look({ payments: [], totalSats: 0n });
   assert.equal(h.read().btc.emptyChecks, 1);
   assert.equal(h.read().btc.missing, undefined, 'one empty answer is not enough');
+});
+
+test('a "missing" change carried through an outage does not undo another tab\u2019s newer record of the payment', async () => {
+  // Another audit, High 2: tab A's page-counted "missing", replayed after recovery, overwrote tab B's newer sighting.
+  const TXID = 'ab'.repeat(32);
+  const x = btcOrder({ btc: { txid: TXID, confirmations: 0, firstSeenAt: Date.now() - 600_000, totalSats: '100000', payments: 1 } });
+  const h = harness(x);
+  const a = h.tab({ own: true }), b = h.tab();
+  const empty = { payments: [], totalSats: 0n };
+  const lookA = trackerLook(a, x.id);
+  a.blockMe();
+  await a.patchOrder(x.id, { notify: true }); // tab A now knows its writes fail
+  for (let i = 0; i < 3; i++) await lookA(empty);
+  assert.equal(a.loadOrders()[0].btc.missing, true, 'tab A shows it missing, by its own count');
+  // Tab B, whose writes work, records a newer sighting: a second payment to the address.
+  await trackerLook(b, x.id)({ payments: [{ txid: TXID, confirmations: 0 }, { txid: 'cd'.repeat(32), confirmations: 0 }], totalSats: 150_000n });
+  assert.equal(h.read().btc.payments, 2);
+  a.unblockMe();
+  await a.patchOrder(x.id, {}); // tab A saves what it carried
+  assert.equal(a.storageFailing(), false);
+  assert.equal(h.read().btc.missing, undefined, 'B\u2019s newer record stands');
+  assert.equal(h.read().btc.payments, 2);
 });
 
 test('poll stamps hold while storage refuses writes', () => {
@@ -431,10 +464,17 @@ test('a refused lock says nothing was sent, whatever the browser\u2019s own mess
   await assert.rejects(h.tab().claimPayment(h.read().id, owner), /Could not coordinate this payment across tabs\. Nothing was sent/);
 });
 
-test('a Bitcoin order needs storage but not Web Locks; up to 100 newer-version records are kept', async () => {
-  const noLocks = harness(order(), { locksAvailable: false }).tab();
-  assert.equal(noLocks.orderStorageProblem(), null);
-  assert.match(noLocks.paymentStorageProblem(), /Web Locks/);
+test('two tabs creating orders at once keep both; without Web Locks nothing is written; newer records are kept', async () => {
+  // Another audit, High 1: without the lock, a Bitcoin order was saved unlocked and another tab's write dropped it.
+  const h0 = harness([]);
+  const [x, y] = [btcOrder(), btcOrder()];
+  assert.deepEqual(await Promise.all([h0.tab().upsertOrder(x, { keepOnFailure: false }), h0.tab().upsertOrder(y, { keepOnFailure: false })]), ['saved', 'saved']);
+  assert.deepEqual(h0.all().map(o => o.id).sort(), [x.id, y.id].sort());
+  const bare = harness([], { locksAvailable: false });
+  const noLocks = bare.tab();
+  assert.match(noLocks.orderStorageProblem(), /Web Locks/, 'a Bitcoin order is refused too');
+  assert.equal(await noLocks.upsertOrder(btcOrder(), { keepOnFailure: false }), 'failed');
+  assert.equal(bare.all().length, 0, 'nothing written without the lock');
   const blocked = harness(order());
   blocked.block();
   assert.match(blocked.tab().orderStorageProblem(), /storage is full or blocked/);

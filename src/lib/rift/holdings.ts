@@ -40,6 +40,13 @@ export const MIN_VALUE_USD = 1;
  *  any number; a huge one would make the string arithmetic below allocate hundreds of megabytes, or throw. */
 export const validDecimals = (d: unknown): d is number => typeof d === 'number' && Number.isInteger(d) && d >= 0 && d <= 36;
 
+/** Decimals as Blockscout gives them (digits, sometimes a number), or null when missing or odd: `Number('')` and
+ *  `Number(null)` are 0, which would size every amount wrongly. */
+export function parseDecimals(v: unknown): number | null {
+  const d = typeof v === 'number' ? v : typeof v === 'string' && /^\d{1,2}$/.test(v) ? Number(v) : NaN;
+  return validDecimals(d) ? d : null;
+}
+
 /** Whether a multicall read nothing: every result at `at` (the balance reads, not the decimals reads) failed,
  *  which is what a refused aggregate call looks like (an RPC down, or one token answering with megabytes). */
 export const wholeReadFailed = (results: readonly { status: string }[], at: readonly number[]) =>
@@ -124,8 +131,8 @@ export function parseTokenBalances(chain: HoldingChain, json: unknown, exclude: 
     const address = tokenRowAddress(row);
     if (!t || t.type !== 'ERC-20' || !/^0x[0-9a-f]{40}$/.test(address)) continue;
     if (t.reputation && t.reputation !== 'ok') continue; // flagged as scam
-    const decimals = Number(t.decimals ?? '');
-    if (!validDecimals(decimals)) continue;
+    const decimals = parseDecimals(t.decimals);
+    if (decimals === null) continue;
     const balanceRaw = String(row.value ?? '0');
     if (!/^\d+$/.test(balanceRaw) || balanceRaw === '0') continue;
     const asset = `${chain}.${address}`;
@@ -228,8 +235,8 @@ export function blockscoutCandidates(json: unknown, exclude: string[] = [], onTr
     if (!t || t.type !== 'ERC-20' || !/^0x[0-9a-f]{40}$/.test(address)) continue;
     if (t.reputation && t.reputation !== 'ok') continue;
     if (exclude.some(e => e.endsWith(`.${address}`))) continue;
-    const decimals = Number(t.decimals ?? '');
-    if (!validDecimals(decimals)) continue;
+    const decimals = parseDecimals(t.decimals);
+    if (decimals === null) continue;
     if (seen.has(address)) continue; // a balance changing during pagination can appear on two pages
     const symbol = ((t.symbol ?? '').trim() || `${address.slice(0, 6)}…`).slice(0, 16);
     const quotedPrice = Number(t.exchange_rate ?? 0);

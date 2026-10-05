@@ -55,7 +55,7 @@ import {
 } from '@/lib/rift/cost';
 import { PAY_HEARTBEAT_MS, canPay, isOutOfDate, isTerminalStatus, needsAttention, sourceKindOf } from '@/lib/rift/order-state';
 import {
-  beginHyperPost, claimPayment, loadOrders, orderStorageProblem, patchOrder, patchPaymentAttempt, paymentStorageProblem, removeOrders,
+  beginHyperPost, claimPayment, loadOrders, orderStorageProblem, patchOrder, patchPaymentAttempt, removeOrders,
   storageFailing, unreadableOrderIds, upsertOrder, useStoredOrders,
 } from '@/lib/rift/storage';
 import { accountNonce, hyperDepositEvidence, postHyperTransfer, transferDeliversInFull } from '@/lib/rift/payment-io';
@@ -220,14 +220,14 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   const [autoText, setAutoText] = useState<string | null>(null);
   /** Why this browser can't pay orders here (no Web Locks, storage blocked), or can't keep a Bitcoin order
    *  (storage blocked), checked when the page opens. */
-  const [payBlock, setPayBlock] = useState<string | null>(null);
-  const [keepBlock, setKeepBlock] = useState<string | null>(null);
+  /** Why this browser can't keep orders (and so can't buy here), or null. */
+  const [storeBlock, setStoreBlock] = useState<string | null>(null);
   const startingRef = useRef(false);
   const payingRef = useRef(new Set<string>());
   const formRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setTolerance(loadTolerance()); setDecimalSep(localeDecimalSep()); setPayBlock(paymentStorageProblem()); setKeepBlock(orderStorageProblem());
+    setTolerance(loadTolerance()); setDecimalSep(localeDecimalSep()); setStoreBlock(orderStorageProblem());
   }, []);
   const chooseTolerance = (v: number) => {
     setTolerance(v);
@@ -809,8 +809,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     };
     try {
       if (settlementAckKey !== quoteKey) throw new Error('Confirm that Rift cannot guarantee a minimum amount of iAERO before creating this order.');
-      // An order must be kept (and an EVM or HyperCore payment needs Web Locks too): checked before it exists.
-      const storageProblem = chain.kind === 'bitcoin' ? orderStorageProblem() : paymentStorageProblem();
+      // An order must be kept, under the cross-tab lock: checked before it exists.
+      const storageProblem = orderStorageProblem();
       if (storageProblem) throw new Error(`${storageProblem} Nothing was sent.`);
       const refund = chain.kind === 'bitcoin' ? normalizeBtcAddress(btcRefund) : owner;
       if (chain.kind === 'bitcoin' && !isBtcAddress(refund)) {
@@ -843,6 +843,16 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       if (chain.kind === 'evm' && token.address) {
         setBusy('Checking the token…');
         if (!sourcePublic) throw new Error(`Could not reach ${chain.name} to check this token. Nothing was sent; try again in a moment.`);
+        // Its decimals decide how much is sent: confirmed on-chain unless it is one of ours (fixed in config.ts).
+        if (!CURATED_TOKENS.some(t => t.asset === want.asset)) {
+          let onChain: number;
+          try { onChain = Number(await sourcePublic.readContract({ address: token.address as Address, abi: erc20Abi, functionName: 'decimals' })); } catch {
+            throw new Error(`Could not check ${token.symbol}’s decimals on ${chain.name}. Nothing was sent; try again in a moment.`);
+          }
+          if (onChain !== want.decimals) {
+            throw new Error(`${token.symbol}’s amounts could not be confirmed (its decimals on-chain differ from the list). Nothing was sent; refresh your balances and try again.`);
+          }
+        }
         const delivers = await transferDeliversInFull(sourcePublic as PublicClient, token.address as Address, owner, amountState.raw);
         if (delivers !== true) {
           throw new Error(delivers === false
@@ -1022,7 +1032,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       };
     }
     if (chain.kind === 'bitcoin' && !isBtcAddress(btcRefund)) return { text: 'Enter a valid BTC refund address', disabled: true };
-    if (chain.kind === 'bitcoin' ? keepBlock || storageFailing() : payBlock || storageFailing()) {
+    if (storeBlock || storageFailing()) {
       return { text: chain.kind === 'bitcoin' ? 'This browser can’t keep orders here' : 'This browser can’t make payments here', disabled: true };
     }
     if (tooSmall) return { text: 'Amount too small for Rift’s gas charge', disabled: true };
@@ -1343,8 +1353,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
               This browser isn’t saving your orders (its storage is full or blocked), so paying from this page is paused. Note the order ID
               shown on the right, and refresh once storage works again.
             </div>
-          ) : isConnected && (chain.kind === 'bitcoin' ? keepBlock : payBlock) && (
-            <div role="status" className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">{chain.kind === 'bitcoin' ? keepBlock : payBlock}</div>
+          ) : isConnected && storeBlock && (
+            <div role="status" className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">{storeBlock}</div>
           )}
           {error && <div role="alert" className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{error}</div>}
 

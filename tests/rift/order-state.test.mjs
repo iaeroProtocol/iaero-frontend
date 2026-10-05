@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PAY_WINDOW_MS, canMoveTo, canPay, capOrders, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowOpen, phaseInput,
-  BTC_MISSING_AFTER, btcSightingChanged, canHide, isOutOfDate, missingButExpired, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
+  BTC_MISSING_AFTER, btcConfirmed, btcSightingChanged, canHide, isOutOfDate, missingButExpired, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
 } from '../../src/lib/rift/order-state.ts';
 
 const T0 = 1_790_930_000_000;
@@ -210,8 +210,9 @@ test('while storage refuses writes, a Bitcoin look records what was seen, not it
   assert.equal(btcSightingChanged(one, nextBtcRecord(one, empty, T0 + 4, 1)), false, 'one empty answer: a counter');
   assert.equal(btcSightingChanged({ ...one, emptyChecks: 2 }, nextBtcRecord({ ...one, emptyChecks: 2 }, seen(1), T0 + 4)), true,
     'seen again after empty answers: recorded, so the stored count can\u2019t outlive it');
-  // The page's own count stands in for the stored one, which a sighting it could not record left too high.
-  const high = { ...one, emptyChecks: 2 };
+  // The page's own count stands in for the stored one, which a sighting it could not record left too high
+  // (an unconfirmed payment: a confirmed one is never missing).
+  const high = { ...first, emptyChecks: 2 };
   assert.equal(nextBtcRecord(high, empty, T0 + 5, 1).missing, undefined);
   const gone = nextBtcRecord(high, empty, T0 + 6, BTC_MISSING_AFTER);
   assert.equal(gone.missing, true);
@@ -225,4 +226,28 @@ test('an expired order whose Bitcoin payment went missing can be cleared, but is
   assert.equal(paidButExpired(o, late), false);
   const others = Array.from({ length: 3 }, (_, i) => order({ id: String(i), status: 'delivered' }));
   assert.ok(capOrders([o, ...others], 1, late).includes(o));
+});
+
+test('a confirmed Bitcoin payment is never "missing", whatever the API answers', () => {
+  // Another audit, High 3: three empty answers put a six-confirmation payment's QR code back on screen.
+  const seen = (...c) => ({ payments: c.map((n, i) => ({ txid: String(i).repeat(64), confirmations: n })), totalSats: 1_000_000n });
+  const empty = { payments: [], totalSats: 0n };
+  let btc = nextBtcRecord(undefined, seen(6), T0);
+  assert.equal(btc.confirmed, true);
+  for (let i = 1; i <= 5; i++) btc = nextBtcRecord(btc, empty, T0 + i, i);
+  assert.equal(btc.missing, undefined);
+  assert.equal(btc.emptyChecks, undefined, 'not even counted');
+  btc = nextBtcRecord(btc, seen(6, 0), T0 + 10); // then a second, unconfirmed payment
+  assert.equal(btc.confirmations, 0);
+  assert.equal(btcConfirmed(btc), true, 'still confirmed');
+  assert.equal(nextBtcRecord(btc, empty, T0 + 11, 3), btc);
+  // An older version could mark one missing: it reads back as seen.
+  const legacy = sanitizeOrder(order({
+    sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' }, fromAmount: '0.001', fromAmountRaw: '100000',
+    depositAddress: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
+    btc: { txid: 'ab'.repeat(32), confirmations: 6, firstSeenAt: T0, missing: true, emptyChecks: 3 },
+  }));
+  assert.equal(legacy.btc.missing, undefined);
+  assert.equal(legacy.btc.emptyChecks, undefined);
+  assert.equal(phaseInput(legacy, 'bitcoin').btcSeenAt, T0, 'no QR code');
 });
