@@ -23,7 +23,7 @@ import { classifyRiftError, fetchQuote, riftBudget, riftPricing, RiftApiError } 
 import { CURATED_TOKENS, RIFT_DESTINATION } from './config';
 import { RIFT_LISTED } from './rift-tokens';
 import { probeAmount, PROBE_USD, type Holding } from './holdings';
-import { checkQuote, unresolvedNames } from './quote-check';
+import { checkQuote, NameLookupPending } from './quote-check';
 import { decimalToRaw } from './validate';
 
 export type Support = 'supported' | 'unsupported' | 'checking';
@@ -145,7 +145,7 @@ export function useRiftSupport(holdings: Holding[], enabled = true): Record<stri
           } catch (e) {
             if (e instanceof RiftApiError) throw e;
             settle(asset, 'unsupported');
-            if (unresolvedNames(json, h.asset, RIFT_DESTINATION).length) {
+            if (e instanceof NameLookupPending) {
               // A token name not resolved yet (no room in the budget for the lookup): asked again later, not cached.
               askLater(asset);
               queue.push(asset);

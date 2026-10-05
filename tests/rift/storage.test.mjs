@@ -231,7 +231,7 @@ test('a sent payment hash stays visible through more than fifty failed later wri
   assert.equal(h.read().depositTxHash, HASH, 'the hash is saved when storage recovers');
 });
 
-test('routine changes refused by storage replace each other; payment changes are all kept', async () => {
+test('while storage refuses writes, polls that only stamp their time are not kept; payment changes all are', async () => {
   const x = order();
   const h = harness(x);
   const a = h.tab();
@@ -245,6 +245,40 @@ test('routine changes refused by storage replace each other; payment changes are
   assert.equal(await a.patchOrder(x.id, { notify: true }), 'saved');
   assert.equal(h.read().depositTxHash, HASH);
   assert.equal(a.unsavedChanges(), 0);
+});
+
+test('a Bitcoin payment first seen while storage refuses writes survives later empty answers', async () => {
+  // Review 6, High 1: a later observation is applied on top of the first sighting, never in place of it.
+  const x = {
+    ...order(), sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' }, fromAmount: '0.001', fromAmountRaw: '100000',
+    depositAddress: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq', route: [{ venue: 'garden', from: 'bitcoin.btc', to: 'base.cbbtc' }],
+  };
+  const h = harness(x);
+  const a = h.tab();
+  const TXID = 'cd'.repeat(32);
+  const seen = { payments: [{ txid: TXID, confirmations: 0 }], totalSats: 100_000n };
+  const empty = { payments: [], totalSats: 0n };
+  const observe = (d, at) => a.patchOrder(x.id, prev => {
+    const btc = orderState.nextBtcRecord(prev.btc, d, at);
+    return btc === prev.btc ? {} : { btc };
+  });
+  const t = Date.now();
+  h.block();
+  assert.equal(await observe(seen, t), 'failed');
+  assert.equal(await observe(empty, t + 20_000), 'failed');
+  assert.equal(a.loadOrders()[0].btc.txid, TXID);
+  assert.equal(a.loadOrders()[0].btc.missing, undefined, 'one empty answer is not enough');
+  for (let i = 2; i <= 6; i++) await observe(empty, t + i * 20_000);
+  const btc = a.loadOrders()[0].btc;
+  assert.equal(btc.txid, TXID, 'the payment is never forgotten');
+  assert.equal(btc.missing, true);
+  assert.equal(btc.emptyChecks, orderState.BTC_MISSING_AFTER, 'nothing more is counted once it is missing');
+  assert.ok(a.unsavedChanges() <= 1 + orderState.BTC_MISSING_AFTER, `bounded: ${a.unsavedChanges()}`);
+  assert.equal(orderState.isAbandoned({ ...a.loadOrders()[0], createdAt: t - 2 * 3600_000 }, t + 3600_000), false);
+  h.unblock();
+  assert.equal(await a.patchOrder(x.id, { notify: true }), 'saved');
+  assert.equal(h.read().btc.txid, TXID, 'saved once storage recovers');
+  assert.equal(h.read().btc.missing, true);
 });
 
 test('a refused lock says nothing was sent, whatever the browser\u2019s own message', async () => {

@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyLlamaPrices, candidatesToHoldings, parseNative, parseTokenBalances, probeAmount, rankHoldings, rawToNumber, validDecimals, wholeReadFailed,
+  applyLlamaPrices, candidatesToHoldings, parseNative, parseTokenBalances, probeAmount, rankHoldings, rawToNumber, splitRead, validDecimals, wholeReadFailed,
 } from '../../src/lib/rift/holdings.ts';
 
 const IAERO = 'base.0x81034fb34009115f215f5d5f564aac9ffa46a1dc';
@@ -122,4 +122,24 @@ test('a multicall refused as a whole is told apart from single calls failing', (
   const ok = { status: 'success' }, fail = { status: 'failure' };
   assert.equal(wholeReadFailed([fail, fail, fail, ok], 3), true, 'only the balance reads count, not the decimals reads after them');
   assert.equal(wholeReadFailed([fail, ok, fail], 3), false);
+});
+
+test('a refused multicall is read again in halves until the call that breaks it fails alone', async () => {
+  // Review 6, Low 5: viem's own chunks are by calldata size, so a retry could repeat the identical call.
+  const calls = Array.from({ length: 240 }, (_, i) => i);
+  const bad = new Set([37, 200]); // e.g. one token's balanceOf() and decimals(), both answering megabytes
+  const reads = [];
+  const read = async part => { reads.push(part.length); return part.some(c => bad.has(c)) ? part.map(() => ({ status: 'failure' })) : part.map(c => ({ status: 'success', result: c })); };
+  const failed = () => ({ status: 'failure' });
+  const out = await splitRead(calls, read, failed, { maxReads: 64, mayRead: () => true });
+  assert.equal(out.length, 240);
+  assert.deepEqual(out.map((r, i) => r.status === 'failure' ? i : null).filter(i => i !== null), [37, 200], 'only the bad calls fail');
+  assert.ok(out.every((r, i) => r.status === 'failure' || r.result === i), 'in order');
+  const capped = [];
+  const some = await splitRead(calls, async part => { capped.push(part.length); return read(part); }, failed, { maxReads: 16, mayRead: () => true });
+  assert.ok(capped.length <= 16, `at most 16 reads: ${capped.length}`);
+  assert.ok(some.filter(r => r.status === 'success').length >= 180, 'most balances still read');
+  assert.deepEqual(await splitRead(calls.slice(0, 4), read, failed, { maxReads: 16, mayRead: () => false }), calls.slice(0, 4).map(failed), 'no time: no reads');
+  const thrown = await splitRead([1, 2], async () => { throw new Error('out of time'); }, failed, { maxReads: 16, mayRead: () => true });
+  assert.deepEqual(thrown, [failed(), failed()], 'a read that throws fails its calls');
 });

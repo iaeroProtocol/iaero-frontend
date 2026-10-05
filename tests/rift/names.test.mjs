@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canonicalToAsset, mismatchedNames, namesToLearn, unknownNames } from '../../src/lib/rift/names.ts';
+import { canonicalToAsset, guessNames, learnedNames, namesToLearn, rememberNames, unknownNames } from '../../src/lib/rift/names.ts';
 
 const IAERO = 'base.0x81034fb34009115f215f5d5f564aac9ffa46a1dc';
 const USDT0 = 'arbitrum.0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9';
@@ -55,10 +55,26 @@ test('Rift\u2019s real raw ids for native ETH and HyperCore sources let the dest
     { from: 'arbitrum.eth', to: IAERO }), null, 'the native coin of another chain');
 });
 
-test('a known name that stands for another address than asked needs a lookup (Rift may reassign names)', () => {
-  const names = { 'arbitrum.newtok': '0x1111111111111111111111111111111111111111' };
-  assert.deepEqual(mismatchedNames({ from: 'arbitrum.newtok', to: IAERO }, { from: 'arbitrum.0x2222222222222222222222222222222222222222', to: IAERO }, names),
-    ['arbitrum.newtok']);
-  assert.deepEqual(mismatchedNames({ from: 'arbitrum.newtok', to: IAERO }, { from: 'arbitrum.0x1111111111111111111111111111111111111111', to: IAERO }, names), []);
-  assert.deepEqual(mismatchedNames({ from: 'arbitrum.eth', to: IAERO }, { from: 'arbitrum.eth', to: IAERO }, names), [], 'native coins and addresses are not names');
+test('only unknown names on the chain of the token asked for in their place are worth a lookup', () => {
+  const known = { 'base.usdc': '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', 'arbitrum.usdt0': USDT0.slice(9) };
+  assert.deepEqual(guessNames({ from: 'arbitrum.newtok', to: 'base.iaero' }, { from: USDT0, to: IAERO }, known),
+    { 'arbitrum.newtok': USDT0.slice(9), 'base.iaero': IAERO.slice(5) });
+  assert.deepEqual(guessNames({ from: 'arbitrum.usdt0', to: 'base.usdc' }, { from: USDT0, to: IAERO }, known), {}, 'a known name is never guessed');
+  assert.deepEqual(guessNames({ from: 'base.newtok', to: IAERO }, { from: USDT0, to: IAERO }, known), {}, 'a name on another chain');
+  assert.deepEqual(guessNames({ from: 'arbitrum.weth2', to: IAERO }, { from: 'arbitrum.eth', to: IAERO }, known), {}, 'a native coin has no name to learn');
+  assert.deepEqual(guessNames({ from: 'base.newtok', to: 'base.newtok' }, { from: 'base.0x1111111111111111111111111111111111111111', to: IAERO }, {}),
+    { 'base.newtok': '0x1111111111111111111111111111111111111111' }, 'one name cannot stand for both tokens');
+});
+
+test('a learned name is never re-pointed while in date, and is forgotten after a week', () => {
+  const A = '0x1111111111111111111111111111111111111111', B = '0x2222222222222222222222222222222222222222';
+  const t0 = 1_800_000_000_000, DAY = 86_400_000;
+  rememberNames({ 'base.ttltok': A }, t0);
+  assert.equal(learnedNames(t0 + DAY)['base.ttltok'], A);
+  rememberNames({ 'base.ttltok': B }, t0 + DAY);
+  assert.equal(learnedNames(t0 + 2 * DAY)['base.ttltok'], A, 'not re-pointed');
+  assert.equal(learnedNames(t0 + 7 * DAY)['base.ttltok'], undefined, 'expired after a week');
+  rememberNames({ 'base.ttltok': B }, t0 + 8 * DAY);
+  assert.equal(learnedNames(t0 + 8 * DAY + 1)['base.ttltok'], B, 'learned again once expired');
+  assert.equal(learnedNames(t0 - 1)['base.ttltok'], undefined, 'a time in the future (the clock moved back) is not trusted');
 });

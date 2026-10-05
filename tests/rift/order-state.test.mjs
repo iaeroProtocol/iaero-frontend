@@ -176,9 +176,13 @@ test('a Bitcoin payment seen once survives empty answers, and is marked missing 
   const o = order({ sourceChain: 'bitcoin', btc, token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' } });
   assert.equal(phaseInput(o, 'bitcoin').btcSeenAt, undefined, 'the QR code returns');
   assert.equal(isAbandoned(o, T0 + 2 * 3600_000), false, 'not removable while the payment may still confirm');
+  assert.equal(nextBtcRecord(btc, empty, T0 + 11), btc, 'nothing more is recorded once missing');
   const back = nextBtcRecord(btc, seen, T0 + 20);
   assert.equal(back.missing, undefined);
   assert.equal(back.firstSeenAt, T0, 'first seen keeps its time');
+  // An older version could leave only `{ missing: true }`: still a payment seen, never "nothing was sent".
+  const legacy = order({ sourceChain: 'bitcoin', btc: { missing: true }, token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' } });
+  assert.equal(isAbandoned(legacy, T0 + 2 * 3600_000), false);
 });
 
 test('an expired order this browser saw paid needs Rift\u2019s support, so it is never cleared', () => {
@@ -187,6 +191,9 @@ test('an expired order this browser saw paid needs Rift\u2019s support, so it is
   assert.equal(paidButExpired(paid, late), true);
   assert.equal(paidButExpired(order({ status: 'expired' }), late), false);
   assert.equal(paidButExpired(order({ status: 'expired', depositSentAt: T0, depositFailed: true, depositFailReason: 'reverted' }), late), false);
+  // A Bitcoin payment seen and then gone (dropped or replaced) is not one Rift was paid: the order can be cleared.
+  assert.equal(paidButExpired(order({ status: 'expired', sourceChain: 'bitcoin', btc: { txid: 'ab'.repeat(32) } }), late), true);
+  assert.equal(paidButExpired(order({ status: 'expired', sourceChain: 'bitcoin', btc: { txid: 'ab'.repeat(32), missing: true } }), late), false);
   const others = Array.from({ length: 3 }, (_, i) => order({ id: String(i), status: 'delivered' }));
   assert.ok(capOrders([paid, ...others], 1, late).includes(paid));
 });

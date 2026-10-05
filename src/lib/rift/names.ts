@@ -4,12 +4,16 @@
 // address. rift-tokens.ts is a snapshot of that list; a name it lacks (a token Rift listed later, or iAERO itself
 // if Rift lists it) would make every answer for that token look like the wrong token. Such a name is resolved
 // with one "raw" quote for the same request, which answers with canonical ids (`evm:42161.0x…`), and remembered
-// in this browser (quote-check.ts). Only a name Rift gave to exactly the address asked for is learned. Rift says
-// names "may be reassigned": a known name that stands for another address than the one asked for is resolved
-// the same way, and the raw answer re-points it.
+// in this browser (quote-check.ts). Only a name Rift gave to exactly the address asked for is learned, and only a
+// name nobody knows yet: a known name is never re-pointed (a formatted answer naming a known token for another
+// address is refused), and Rift's published list always wins. Rift says names "may be reassigned": a learned name
+// is forgotten after a week, so a reassignment heals itself, and a reassigned listed name waits for the list to
+// be regenerated.
 // Pure, with no imports, so `node --test` can run it (tests/rift/).
 
-const KEY = 'iaero.rift.names.v1';
+const KEY = 'iaero.rift.names.v2';
+/** A learned name is used this long, then looked up again if Rift still uses it. */
+const LEARNED_TTL_MS = 7 * 24 * 3600_000;
 const CHAIN_IDS: Readonly<Record<string, number>> = { ethereum: 1, arbitrum: 42161, base: 8453 };
 /** A token name on a chain this app pays from or delivers to (not an address, not the native coin). */
 const NAME_RE = /^(ethereum|arbitrum|base)\.(?!0x[0-9a-f]{40}$)(?!eth$)[a-z0-9][a-z0-9._-]{0,40}$/;
@@ -44,20 +48,6 @@ export function canonicalToAsset(id: unknown): string | null {
   return chain ? `${chain}.${m[2].toLowerCase()}` : null;
 }
 
-/** The names in a formatted answer's `from` and `to` that `names` knows, but for another address than the one
- *  asked for (`asked`: source and destination as `<chain>.<id>`): Rift may have reassigned them. */
-export function mismatchedNames(answer: unknown, asked: { from: string; to: string }, names: Readonly<Record<string, string>>): string[] {
-  const a = (answer && typeof answer === 'object' ? answer : {}) as { from?: unknown; to?: unknown };
-  const out: string[] = [];
-  for (const [v, want] of [[a.from, asked.from], [a.to, asked.to]] as const) {
-    if (typeof v !== 'string') continue;
-    const n = v.toLowerCase(), w = want.toLowerCase();
-    if (!NAME_RE.test(n) || names[n] === undefined) continue;
-    if (`${chainOf(n)}.${names[n]}` !== w) out.push(n);
-  }
-  return out;
-}
-
 /** The names in a formatted answer's `from` and `to` that `names` does not know. */
 export function unknownNames(answer: unknown, names: Readonly<Record<string, string>>): string[] {
   const a = (answer && typeof answer === 'object' ? answer : {}) as { from?: unknown; to?: unknown };
@@ -65,6 +55,20 @@ export function unknownNames(answer: unknown, names: Readonly<Record<string, str
     .filter((v): v is string => typeof v === 'string')
     .map(v => v.toLowerCase())
     .filter(v => NAME_RE.test(v) && names[v] === undefined);
+}
+
+/** What the unknown names in a formatted answer would have to stand for to make it the quote asked for
+ *  (`asked`: source and destination as `<chain>.<id>`): each the token asked for in its place, when it is on that
+ *  token's chain. If the answer fails even with these, no lookup could make it pass. */
+export function guessNames(answer: unknown, asked: { from: string; to: string }, names: Readonly<Record<string, string>>): Record<string, string> {
+  const a = (answer && typeof answer === 'object' ? answer : {}) as { from?: unknown; to?: unknown };
+  const out: Record<string, string> = {};
+  for (const [v, want] of [[a.from, asked.from], [a.to, asked.to]] as const) {
+    if (typeof v !== 'string') continue;
+    const n = v.toLowerCase(), w = want.toLowerCase(), id = w.slice(w.indexOf('.') + 1);
+    if (NAME_RE.test(n) && names[n] === undefined && out[n] === undefined && chainOf(n) === chainOf(w) && ADDRESS_RE.test(id)) out[n] = id;
+  }
+  return out;
 }
 
 /**
@@ -88,24 +92,34 @@ export function namesToLearn(formatted: unknown, raw: unknown, asked: { from: st
   return out;
 }
 
+type Learned = Record<string, { a: string; at: number }>;
 /** Learned on this page, for when storage is blocked. */
-let memo: Record<string, string> = {};
+let memo: Learned = {};
 
-/** Names learned in this browser (checked entry by entry). */
-export function learnedNames(): Record<string, string> {
-  const out: Record<string, string> = {};
+/** Learned names still in date, with when they were learned (checked entry by entry). */
+function learned(now = Date.now()): Learned {
+  const out: Learned = {};
   try {
     const raw = JSON.parse(window.localStorage.getItem(KEY) ?? '{}');
     if (raw && typeof raw === 'object') {
-      for (const [k, v] of Object.entries(raw)) if (NAME_RE.test(k) && typeof v === 'string' && ADDRESS_RE.test(v)) out[k] = v;
+      for (const [k, v] of Object.entries(raw as Record<string, { a?: unknown; at?: unknown }>)) {
+        if (NAME_RE.test(k) && v && typeof v.a === 'string' && ADDRESS_RE.test(v.a) && typeof v.at === 'number') out[k] = { a: v.a, at: v.at };
+      }
     }
   } catch { /* storage blocked: this page's own */ }
-  return { ...out, ...memo };
+  const all = { ...out, ...memo };
+  return Object.fromEntries(Object.entries(all).filter(([, v]) => v.at <= now && now - v.at < LEARNED_TTL_MS));
 }
 
-/** Adds or re-points names. Every pair comes from a raw answer for exactly the asset asked for (namesToLearn),
- *  which is newer than any copy of Rift's list. */
-export function rememberNames(pairs: Record<string, string>) {
-  memo = { ...memo, ...pairs };
-  try { window.localStorage.setItem(KEY, JSON.stringify(learnedNames())); } catch { /* this page only */ }
+/** Names learned in this browser and still in date: name -> address. */
+export function learnedNames(now = Date.now()): Record<string, string> {
+  return Object.fromEntries(Object.entries(learned(now)).map(([k, v]) => [k, v.a]));
+}
+
+/** Adds names nobody knows yet (pairs come from namesToLearn); a name in date is never re-pointed. */
+export function rememberNames(pairs: Record<string, string>, now = Date.now()) {
+  const known = learned(now);
+  const fresh = Object.fromEntries(Object.entries(pairs).filter(([k]) => !known[k]).map(([k, a]) => [k, { a, at: now }]));
+  memo = { ...memo, ...fresh };
+  try { window.localStorage.setItem(KEY, JSON.stringify({ ...known, ...fresh })); } catch { /* this page only */ }
 }

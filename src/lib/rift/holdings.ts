@@ -45,6 +45,32 @@ export const validDecimals = (d: unknown): d is number => typeof d === 'number' 
 export const wholeReadFailed = (results: readonly { status: string }[], count: number) =>
   results.slice(0, count).every(r => r.status === 'failure');
 
+/**
+ * `calls` read again after a batch of all of them was refused as a whole: in halves, and any half whose every
+ * call failed in halves again, down to single calls, so a call that breaks its batch (a token answering with
+ * megabytes of data) fails alone. At most `maxReads` reads; a half is read only while `mayRead()` (time is left).
+ * A read that throws, or answers for other calls, counts as every call in it failing (`failed`).
+ */
+export async function splitRead<C, R extends { status: string }>(
+  calls: readonly C[], read: (part: readonly C[]) => Promise<readonly R[]>, failed: () => R,
+  { maxReads, mayRead }: { maxReads: number; mayRead: () => boolean },
+): Promise<R[]> {
+  let reads = 0;
+  const split = async (part: readonly C[]): Promise<R[]> => {
+    if (part.length < 2 || reads + 2 > maxReads || !mayRead()) return part.map(failed);
+    reads += 2;
+    const mid = Math.ceil(part.length / 2);
+    const halves = await Promise.all([part.slice(0, mid), part.slice(mid)].map(async half => {
+      let out: readonly R[] = [];
+      try { out = await read(half); } catch { /* every call in it failed */ }
+      if (out.length !== half.length) out = half.map(failed);
+      return wholeReadFailed(out, half.length) ? split(half) : [...out];
+    }));
+    return halves.flat();
+  };
+  return split(calls);
+}
+
 /** Base units -> number, precise enough for display and sorting; 0 for decimals no real token has. */
 export function rawToNumber(raw: string, decimals: number): number {
   if (!/^\d+$/.test(raw) || !validDecimals(decimals)) return 0;

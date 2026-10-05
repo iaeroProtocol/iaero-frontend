@@ -31,7 +31,7 @@ import { EVM_ADDRESS_RE, badRequest } from '@/lib/rift/server';
 import { parseLlamaPrices } from '@/lib/rift/cost';
 import {
   HOLDING_CHAINS, MAX_UNPRICED_CANDIDATES, applyLlamaPrices, blockscoutCandidates, candidatesToHoldings, mergeTokenRows, nativeHolding,
-  parseNative, parseTokenBalances, rankHoldings, rawToNumber, validDecimals, wholeReadFailed, type EvmHoldingChain, type Holding,
+  parseNative, parseTokenBalances, rankHoldings, rawToNumber, splitRead, validDecimals, wholeReadFailed, type EvmHoldingChain, type Holding,
   type TokenCandidate,
 } from '@/lib/rift/holdings';
 import { HL_API, HYPERCORE_TOKENS, hyperCoreHoldings, parseSpotBalances, usdcForFee } from '@/lib/rift/hypercore';
@@ -58,10 +58,13 @@ const PER_IP_PER_MINUTE = 30;
 const MAX_TRACKED = 5_000;
 const MAX_LLAMA_LOOKUPS = 80;
 const MAX_CHAIN_CANDIDATES = 120;
-/** Calldata per chunk when a refused multicall is read again in pieces (about 55 balance reads each). */
-const RETRY_CHUNK_BYTES = 2_048;
-/** A refused multicall is read again in pieces only with at least this much time left. */
+/** A refused multicall is read again in halves only with at least this much time left. */
 const RETRY_MIN_MS = 2_000;
+/** Reads to find the calls that break a refused multicall: enough to narrow one among the most a chain reads
+ *  (1 + 120 balances + 120 decimals) down to itself. */
+const MAX_SPLIT_READS = 16;
+/** Kept back from those reads for Blockscout's numbers, used when the chain can't be read after all. */
+const FALLBACK_RESERVE_MS = 3_000;
 const VIEM_CHAINS = { 1: mainnet, 42161: arbitrum, 8453: base } as const;
 const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11' as const;
 const GET_ETH_BALANCE = [{
@@ -138,13 +141,16 @@ const MAJOR = new Set(CURATED_TOKENS.map(t => t.asset.toLowerCase()));
 
 const DECIMALS = [{ type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint8' }] }] as const;
 
+type CallResult = { status: 'success'; result: unknown } | { status: 'failure'; error?: unknown };
+const notRead = (): CallResult => ({ status: 'failure', error: new Error('not read') });
+
 /** ETH and token balances in one multicall, plus decimals() for tokens outside our list (an amount typed by
  *  the user is converted with them, so they come from the chain, not the indexer, and only an integer from 0
- *  to 36 is taken). Short timeouts, nothing past `until`; the fallback list is the retry, except that a
- *  multicall refused as a whole (one token answering with megabytes of data can do that) is read once more in
- *  small chunks, so such a token fails only its own chunk. null when the read as a whole failed, which is when
- *  every call failed (a token's own revert fails only its call). Errors are never logged: they may carry
- *  provider URLs. */
+ *  to 36 is taken). Short timeouts, nothing past `until`; the fallback list is the retry. A multicall refused
+ *  as a whole while the chain still answers a plain balance read broke on something in it (one token answering
+ *  with megabytes of data can do that): the rest is read again in halves (splitRead), so such a token fails
+ *  alone, leaving time for Blockscout's numbers if that fails too. null when nothing was read (a token's own
+ *  revert fails only its call). Errors are never logged: they may carry provider URLs. */
 async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: TokenCandidate[], until: number) {
   const timeout = Math.max(1, Math.min(RPC_TIMEOUT_MS, until - Date.now()));
   const client = createPublicClient({
@@ -157,9 +163,19 @@ async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: T
     ...tokens.map(t => ({ address: t.address, abi: erc20Abi, functionName: 'balanceOf', args: [owner] })),
     ...unlisted.map(t => ({ address: t.address, abi: DECIMALS, functionName: 'decimals', args: [] })),
   ] as unknown as Parameters<typeof client.multicall>[0]['contracts'];
-  const read = (batchSize: number) => beforeDeadline(client.multicall({ contracts, allowFailure: true, batchSize }), until);
-  let results = await read(0);
-  if (wholeReadFailed(results, 1 + tokens.length) && until - Date.now() > RETRY_MIN_MS) results = await read(RETRY_CHUNK_BYTES);
+  // One aggregate call per read (batchSize 0: viem would otherwise split by calldata size, not by call).
+  const read = (part: readonly unknown[], by: number) =>
+    beforeDeadline(client.multicall({ contracts: part as typeof contracts, allowFailure: true, batchSize: 0 }), by) as Promise<CallResult[]>;
+  let results = await read(contracts, until);
+  if (wholeReadFailed(results, 1 + tokens.length)) {
+    const by = until - FALLBACK_RESERVE_MS;
+    const mayRead = () => by - Date.now() > RETRY_MIN_MS;
+    const eth = mayRead() ? await beforeDeadline(client.getBalance({ address: owner }), by).catch(() => null) : null;
+    if (eth !== null) {
+      const rest = await splitRead(contracts.slice(1), part => read(part, by), notRead, { maxReads: MAX_SPLIT_READS, mayRead });
+      if (!wholeReadFailed(rest, tokens.length)) results = [{ status: 'success', result: eth }, ...rest];
+    }
+  }
   const balanceReads = results.slice(0, 1 + tokens.length);
   if (wholeReadFailed(results, 1 + tokens.length)) return null;
   const eth = results[0];

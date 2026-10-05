@@ -66,7 +66,8 @@ export function canPay(o: StoredOrder, kind: SourceKind, now: number): boolean {
 /** An unpaid order past its pay window: nothing was sent, and it can only expire. Safe to remove. */
 export function isAbandoned(o: StoredOrder, now: number): boolean {
   const kind = KIND_OF[o.sourceChain];
-  if (o.status !== 'awaiting_deposit' || payWindowOpen(o, kind, now) || o.btc?.txid) return false;
+  // A Bitcoin payment was seen (an older version could keep only `missing` of it): never "nothing was sent".
+  if (o.status !== 'awaiting_deposit' || payWindowOpen(o, kind, now) || o.btc?.txid || o.btc?.missing) return false;
   const s = payState(o, now);
   return s === 'none' || s === 'failed';
 }
@@ -107,7 +108,7 @@ export function nextBtcRecord(
   prev: StoredOrder['btc'], seen: { payments: { txid: string; confirmations: number }[]; totalSats: bigint }, now: number,
 ): StoredOrder['btc'] {
   if (!seen.payments.length) {
-    if (!prev?.txid) return prev;
+    if (!prev?.txid || prev.missing) return prev; // nothing more to record once it is missing
     const emptyChecks = (prev.emptyChecks ?? 0) + 1;
     return { ...prev, emptyChecks, ...(emptyChecks >= BTC_MISSING_AFTER ? { missing: true } : {}) };
   }
@@ -123,7 +124,7 @@ export function nextBtcRecord(
 /** Rift closed the order as expired although this browser saw a payment go to it: it needs Rift's support (and its
  *  order ID), so it is never cleared like an order that simply ran out. */
 export const paidButExpired = (o: StoredOrder, now: number) =>
-  o.status === 'expired' && (payState(o, now) === 'sent' || !!o.depositConfirmedAt || !!o.btc?.txid);
+  o.status === 'expired' && (payState(o, now) === 'sent' || !!o.depositConfirmedAt || (!!o.btc?.txid && !o.btc.missing));
 
 /** Frozen orders are not moving (Rift's operators decide), but they can still be refunded or delivered. */
 export const isTerminalStatus = (s: RiftOrderStatus) => FINAL.includes(s) || s === 'frozen';

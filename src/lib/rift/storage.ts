@@ -33,15 +33,15 @@ const LATE_AFTER_MS = 150_000;
 const PROBE_KEY = 'iaero.rift.probe';
 
 type Change = (list: StoredOrder[]) => StoredOrder[] | null;
-/** A change storage refused. `routine`: one that a later change of the same kind replaces (a status poll, a scan
- *  stamp), so a long outage does not pile them up; every other change (payments, claims, removals) is kept. */
-interface Unsaved { change: Change; routine?: string }
 
 let memory: StoredOrder[] | null = null;
 let foreign: unknown[] = [];
 let writeFailed = false;
-/** Changes this page could not save, in order (storage full or blocked). */
-let unsaved: Unsaved[] = [];
+/** Changes this page could not save, in order (storage full or blocked). Every one is kept: a later change is
+ *  computed on top of the earlier ones, so dropping one could lose what it recorded (a payment seen, a hash). The
+ *  list stays small because changes that record nothing new are not made while storage is failing (a poll that
+ *  only stamps its time) or are no-ops (an observation that matches what is shown). */
+let unsaved: Change[] = [];
 
 function readStorage(): StoredOrder[] | null {
   try {
@@ -65,7 +65,7 @@ function current(): StoredOrder[] | null {
   const stored = readStorage();
   if (!stored) return null;
   let list = stored;
-  for (const u of unsaved) list = u.change(list) ?? list;
+  for (const c of unsaved) list = c(list) ?? list;
   return list;
 }
 
@@ -128,7 +128,7 @@ export type WriteResult = 'saved' | 'unchanged' | 'failed';
 /** Read, change and save the list under the cross-tab lock. `change` returns null for "nothing to save".
  *  The change is applied to what storage holds now (with this page's unsaved changes); this page's copy is used
  *  only when storage can't be read. */
-function mutate(change: Change, { keepOnFailure = true, routine }: { keepOnFailure?: boolean; routine?: string } = {}): Promise<WriteResult> {
+function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: boolean } = {}): Promise<WriteResult> {
   const run = (): WriteResult => {
     const base = current() ?? memory ?? [];
     const next = change(base);
@@ -145,10 +145,8 @@ function mutate(change: Change, { keepOnFailure = true, routine }: { keepOnFailu
       window.dispatchEvent(new Event(EVENT));
       return 'failed';
     }
-    // Never drop a payment change (it may hold a sent payment's hash); a routine one replaces its predecessor.
-    // These changes live only for this page's lifetime and are cleared by the next successful save.
-    if (routine !== undefined) unsaved = unsaved.filter(u => u.routine !== routine);
-    unsaved.push({ change, routine });
+    // Kept for this page's lifetime, and cleared by the next successful save.
+    unsaved.push(change);
     window.dispatchEvent(new Event(EVENT));
     return 'failed';
   };
@@ -167,10 +165,8 @@ export function upsertOrder(order: StoredOrder, opts: { keepOnFailure?: boolean 
 }
 
 /** Change one order. Nothing is written when nothing changes, and statuses only move forward (a late poll
- *  from another tab can land after a newer one): order-state.ts canMoveTo. `routine`: see Unsaved. */
-export function patchOrder(
-  id: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>), opts: { routine?: string } = {},
-): Promise<WriteResult> {
+ *  from another tab can land after a newer one): order-state.ts canMoveTo. */
+export function patchOrder(id: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>)): Promise<WriteResult> {
   return mutate(list => {
     const i = list.findIndex(o => o.id === id);
     if (i < 0) return null;
@@ -182,7 +178,7 @@ export function patchOrder(
     const copy = list.slice();
     copy[i] = next;
     return copy;
-  }, opts);
+  });
 }
 
 /** A refusal raised here, whose message already says that nothing was sent. */
@@ -264,9 +260,9 @@ export async function beginHyperPost(id: string, attemptId: string, action: { ti
 /** Record a status poll: the status, when it was first seen (and whether that was live), the amount out. */
 export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()): Promise<WriteResult> {
   markPolled(id, now);
-  // While storage refuses writes, only the latest poll per status is kept (statuses only move forward).
   return patchOrder(id, prev => {
-    const stamp = !prev.lastPolledAt || now - prev.lastPolledAt > POLL_STAMP_MS ? now : prev.lastPolledAt;
+    // While storage refuses writes, a poll that only stamps its time records nothing worth carrying (see unsaved).
+    const stamp = writeFailed ? prev.lastPolledAt : !prev.lastPolledAt || now - prev.lastPolledAt > POLL_STAMP_MS ? now : prev.lastPolledAt;
     if (!u.status) return { rawStatus: u.rawStatus, lastPolledAt: stamp };
     // An answer older than what is stored (two pollers, out of order): keep the newer status.
     if (!canMoveTo(prev.status, u.status)) return { lastPolledAt: stamp };
@@ -283,7 +279,7 @@ export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()):
       // Rift has seen a deposit: whether the last payment attempt went out is no longer in doubt.
       ...(u.status !== 'awaiting_deposit' ? { payUnknown: false, payRequestedAt: undefined } : {}),
     };
-  }, { routine: `status:${id}:${u.status ?? u.rawStatus}` });
+  });
 }
 
 export function removeOrders(ids: string[]): Promise<WriteResult> {

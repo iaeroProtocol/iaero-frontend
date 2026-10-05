@@ -229,7 +229,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
           await patchOrder(order.id, prev => {
             const btc = nextBtcRecord(prev.btc, d, at);
             return btc === prev.btc ? {} : { btc };
-          }, { routine: `btc:${order.id}` });
+          });
         }
       } catch {
         errors++;
@@ -271,7 +271,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
           from = to + 1n;
         }
       } catch { /* the link is optional */ }
-      if (!stop) await patchOrder(order.id, { deliveryScannedTo: String(from) }, { routine: `scan:${order.id}` });
+      if (!stop) await patchOrder(order.id, { deliveryScannedTo: String(from) });
       if (!stop && ++tries < 8) timer = setTimeout(scan, 20000);
     };
     scan();
@@ -477,7 +477,10 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
           )}
           {phase === 'expired' && (paidButExpired(order, now)
             ? <div className="text-sm text-red-200">Rift closed this order, but a payment was sent to its deposit address. Please {supportLink} with the order ID below.</div>
-            : <div className="text-sm text-slate-300">No payment arrived before the deadline, so this order closed. Nothing was taken.</div>)}
+            : order.btc?.missing
+              // Seen, then gone (dropped or replaced): most likely nothing reached Rift, but only the wallet can say.
+              ? <div className="text-sm text-amber-200">Rift closed this order. The Bitcoin payment seen earlier is no longer visible, so it was most likely dropped or replaced. If your wallet shows it as confirmed, please {supportLink} with the order ID below.</div>
+              : <div className="text-sm text-slate-300">No payment arrived before the deadline, so this order closed. Nothing was taken.</div>)}
           {phase === 'frozen' && <div className="text-sm text-red-200">Rift put this order on hold (a compliance or safety check). Please {supportLink} with the order ID below. This page keeps checking it.</div>}
           {phase === 'underfunded' && (
             <div className="text-sm text-red-200">
@@ -610,8 +613,9 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
           </>
         ) : (
           <div className="space-y-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-sm text-slate-200">
-            {order.btc?.txid ? (
-              // A payment was seen and has gone missing: the order stays (it completes if that payment confirms).
+            {order.btc?.txid || order.btc?.missing ? (
+              // A payment was seen and has gone missing (an older version kept only `missing`): the order stays (it
+              // completes if that payment confirms).
               <>
                 <div>The Bitcoin payment seen earlier is no longer visible. If your wallet shows it as sent, this order completes when it confirms; otherwise start a new order. Don’t send to this order’s address again.</div>
                 <Button onClick={() => onReorder(order)} className="bg-gradient-to-r from-indigo-600 to-purple-600">New order at today’s price</Button>
