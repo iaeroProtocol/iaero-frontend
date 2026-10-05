@@ -261,16 +261,18 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       freshRef.current = false;
       try {
         const res = await fetch(`/api/rift/holdings?address=${address}${fresh ? '&fresh=1' : ''}`, { signal: controller.signal });
-        if (res.status === 429) throw new Error('Too many balance requests from this connection. Wait a minute, then refresh.');
+        if (res.status === 429) throw Object.assign(new Error('Too many balance requests from this connection. Wait a minute, then refresh.'), { retry: false });
         if (!res.ok) throw new Error(`Could not load your tokens (HTTP ${res.status})`);
         return res.json();
       } catch (e) {
-        if (controller.signal.aborted && !signal.aborted) throw new Error('Loading your tokens took too long. Refresh to try again.');
+        if (controller.signal.aborted && !signal.aborted) throw Object.assign(new Error('Loading your tokens took too long. Refresh to try again.'), { retry: false });
         throw e;
       } finally {
         clearTimeout(timer);
       }
     },
+    // A rate limit or the 45 s timeout is not tried again at once (that only adds load); anything else, once.
+    retry: (count, e) => count < 1 && (e as { retry?: boolean }).retry !== false,
     refetchInterval: 60_000,
     staleTime: 30_000,
   });

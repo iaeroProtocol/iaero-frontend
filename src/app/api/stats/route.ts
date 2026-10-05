@@ -4,6 +4,7 @@ export const runtime = 'edge';
 export const revalidate = 300;
 import { ethers } from 'ethers';
 import { getLIQinUSDC, getPegIAEROinAERO, getAEROinUSDC } from '@/lib/amm';
+import { safeErrorText } from '@/lib/safe-error';
 
 // Contract ABIs (minimal)
 const VAULT_ABI = [
@@ -179,7 +180,8 @@ export async function GET() {
     });
 
   } catch (error) {
-    console.error('Stats API error:', error);
+    // Sanitized: an RPC_URL with a key in it would otherwise be logged and returned (viem errors repeat it).
+    console.error('Stats API error:', safeErrorText(error));
     
     // Return cached data if available, even if stale
     if (cache) {
@@ -190,7 +192,7 @@ export async function GET() {
     return NextResponse.json(
       { 
         error: 'Failed to fetch stats',
-        message: error instanceof Error ? error.message : 'Unknown error'
+        message: safeErrorText(error)
       },
       { status: 500 }
     );

@@ -9,6 +9,7 @@ import { base } from 'viem/chains';
 
 // --- Your central address book (adjust import path to your monorepo)
 import { CONTRACTS } from '@/components/contracts/addresses';
+import { safeErrorText } from '@/lib/safe-error';
 
 // Minimal pair ABI
 const PAIR_ABI = parseAbi([
@@ -195,7 +196,8 @@ export async function GET(req: Request) {
 
     return NextResponse.json({ prices: out });
   } catch (err: any) {
-    console.error('prices/token error:', err?.message || err);
+    // Never the raw message: viem errors repeat the RPC URL, which carries the Alchemy key.
+    console.error('prices/token error:', safeErrorText(err));
     return NextResponse.json({ prices: {} }, { status: 500 });
   }
 }

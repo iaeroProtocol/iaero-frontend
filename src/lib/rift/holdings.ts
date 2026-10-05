@@ -36,9 +36,18 @@ export const HOLDING_CHAINS: { chain: EvmHoldingChain; chainId: 1 | 42161 | 8453
 /** Below this a holding is dust and not worth listing. */
 export const MIN_VALUE_USD = 1;
 
-/** Base units -> number, precise enough for display and sorting. */
+/** Decimals a real token has: an integer from 0 to 36. A token's own decimals() is untrusted and can answer
+ *  any number; a huge one would make the string arithmetic below allocate hundreds of megabytes, or throw. */
+export const validDecimals = (d: unknown): d is number => typeof d === 'number' && Number.isInteger(d) && d >= 0 && d <= 36;
+
+/** Whether a multicall read nothing: the first `count` results all failed, which is what a refused aggregate
+ *  call looks like (an RPC down, or one token answering with megabytes of data). */
+export const wholeReadFailed = (results: readonly { status: string }[], count: number) =>
+  results.slice(0, count).every(r => r.status === 'failure');
+
+/** Base units -> number, precise enough for display and sorting; 0 for decimals no real token has. */
 export function rawToNumber(raw: string, decimals: number): number {
-  if (!/^\d+$/.test(raw)) return 0;
+  if (!/^\d+$/.test(raw) || !validDecimals(decimals)) return 0;
   const s = raw.padStart(decimals + 1, '0');
   return Number(`${s.slice(0, s.length - decimals)}.${s.slice(s.length - decimals)}`);
 }
@@ -79,7 +88,7 @@ export function parseTokenBalances(chain: HoldingChain, json: unknown, exclude: 
     if (!t || t.type !== 'ERC-20' || !/^0x[0-9a-f]{40}$/.test(address)) continue;
     if (t.reputation && t.reputation !== 'ok') continue; // flagged as scam
     const decimals = Number(t.decimals ?? '');
-    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) continue;
+    if (!validDecimals(decimals)) continue;
     const balanceRaw = String(row.value ?? '0');
     if (!/^\d+$/.test(balanceRaw) || balanceRaw === '0') continue;
     const asset = `${chain}.${address}`;
@@ -183,7 +192,7 @@ export function blockscoutCandidates(json: unknown, exclude: string[] = [], onTr
     if (t.reputation && t.reputation !== 'ok') continue;
     if (exclude.some(e => e.endsWith(`.${address}`))) continue;
     const decimals = Number(t.decimals ?? '');
-    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) continue;
+    if (!validDecimals(decimals)) continue;
     if (seen.has(address)) continue; // a balance changing during pagination can appear on two pages
     const symbol = ((t.symbol ?? '').trim() || `${address.slice(0, 6)}…`).slice(0, 16);
     const quotedPrice = Number(t.exchange_rate ?? 0);

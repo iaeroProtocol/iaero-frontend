@@ -1,7 +1,9 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyLlamaPrices, parseNative, parseTokenBalances, probeAmount, rankHoldings, rawToNumber } from '../../src/lib/rift/holdings.ts';
+import {
+  applyLlamaPrices, candidatesToHoldings, parseNative, parseTokenBalances, probeAmount, rankHoldings, rawToNumber, validDecimals, wholeReadFailed,
+} from '../../src/lib/rift/holdings.ts';
 
 const IAERO = 'base.0x81034fb34009115f215f5d5f564aac9ffa46a1dc';
 const tok = (address, symbol, decimals, value, rate, extra = {}) => ({
@@ -100,4 +102,24 @@ test('a list cut short by a failed page keeps its fresh rows and takes the rest 
   const merged = mergeTokenRows(fresh, older);
   assert.deepEqual(merged.map(r => r.token.symbol), ['A-NOW', 'C-NEW', 'B'], 'fresh rows win; older rows fill the gap; rows without an address are dropped');
   assert.deepEqual(mergeTokenRows([], older).map(r => r.token.symbol), ['A-THEN', 'B']);
+});
+
+test('a decimals() no real token answers is never used in arithmetic', () => {
+  assert.equal(rawToNumber('123', 1e9), 0, 'would otherwise throw RangeError: Invalid string length');
+  assert.equal(rawToNumber('123', 1e8), 0, 'would otherwise allocate a 100 MB string');
+  assert.equal(rawToNumber('123', -1), 0);
+  assert.equal(rawToNumber('123', 2.5), 0);
+  assert.equal(rawToNumber('1500000', 6), 1.5);
+  for (const d of [0, 6, 18, 36]) assert.equal(validDecimals(d), true, String(d));
+  for (const d of [-1, 37, 255, 1e9, 2.5, NaN, '18', undefined]) assert.equal(validDecimals(d), false, String(d));
+  const started = Date.now();
+  const out = candidatesToHoldings('base', [{ address: `0x${'11'.repeat(20)}`, symbol: 'BAD', name: 'Bad', decimals: 1e9, priceUsd: 1 }], [10n ** 30n]);
+  assert.equal(out[0].valueUsd, 0, 'valued at nothing, not thrown');
+  assert.ok(Date.now() - started < 200);
+});
+
+test('a multicall refused as a whole is told apart from single calls failing', () => {
+  const ok = { status: 'success' }, fail = { status: 'failure' };
+  assert.equal(wholeReadFailed([fail, fail, fail, ok], 3), true, 'only the balance reads count, not the decimals reads after them');
+  assert.equal(wholeReadFailed([fail, ok, fail], 3), false);
 });

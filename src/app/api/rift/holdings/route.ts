@@ -31,7 +31,8 @@ import { EVM_ADDRESS_RE, badRequest } from '@/lib/rift/server';
 import { parseLlamaPrices } from '@/lib/rift/cost';
 import {
   HOLDING_CHAINS, MAX_UNPRICED_CANDIDATES, applyLlamaPrices, blockscoutCandidates, candidatesToHoldings, mergeTokenRows, nativeHolding,
-  parseNative, parseTokenBalances, rankHoldings, rawToNumber, type EvmHoldingChain, type Holding, type TokenCandidate,
+  parseNative, parseTokenBalances, rankHoldings, rawToNumber, validDecimals, wholeReadFailed, type EvmHoldingChain, type Holding,
+  type TokenCandidate,
 } from '@/lib/rift/holdings';
 import { HL_API, HYPERCORE_TOKENS, hyperCoreHoldings, parseSpotBalances, usdcForFee } from '@/lib/rift/hypercore';
 import { collectTokenPages, type TokenPages } from '@/lib/rift/blockscout-pages';
@@ -57,6 +58,10 @@ const PER_IP_PER_MINUTE = 30;
 const MAX_TRACKED = 5_000;
 const MAX_LLAMA_LOOKUPS = 80;
 const MAX_CHAIN_CANDIDATES = 120;
+/** Calldata per chunk when a refused multicall is read again in pieces (about 55 balance reads each). */
+const RETRY_CHUNK_BYTES = 2_048;
+/** A refused multicall is read again in pieces only with at least this much time left. */
+const RETRY_MIN_MS = 2_000;
 const VIEM_CHAINS = { 1: mainnet, 42161: arbitrum, 8453: base } as const;
 const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11' as const;
 const GET_ETH_BALANCE = [{
@@ -111,8 +116,7 @@ async function cachePut(key: Request, body: string, seconds: number, extra: Reco
   await edgeCache()?.put(key, new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${seconds}`, ...extra } })).catch(() => {});
 }
 
-// --- Per-instance limits: a loop over addresses would otherwise hammer Blockscout and the public RPCs, and
-//     reach the server key once they fail. ---
+// --- Per-instance limits: a loop over addresses would otherwise hammer Blockscout and the public RPCs. ---
 
 const limiter = new RateLimiter(PER_IP_PER_MINUTE, 60_000, MAX_TRACKED);
 const lastFresh = new Map<string, number>();
@@ -135,10 +139,12 @@ const MAJOR = new Set(CURATED_TOKENS.map(t => t.asset.toLowerCase()));
 const DECIMALS = [{ type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint8' }] }] as const;
 
 /** ETH and token balances in one multicall, plus decimals() for tokens outside our list (an amount typed by
- *  the user is converted with them, so they come from the chain, not the indexer). No retries (the fallback
- *  list is the retry), short timeouts, nothing past `until`. null when the read as a whole failed, which is
- *  when every call failed (a token's own revert fails only its call). Errors are never logged: the server
- *  errors may carry provider URLs. */
+ *  the user is converted with them, so they come from the chain, not the indexer, and only an integer from 0
+ *  to 36 is taken). Short timeouts, nothing past `until`; the fallback list is the retry, except that a
+ *  multicall refused as a whole (one token answering with megabytes of data can do that) is read once more in
+ *  small chunks, so such a token fails only its own chunk. null when the read as a whole failed, which is when
+ *  every call failed (a token's own revert fails only its call). Errors are never logged: they may carry
+ *  provider URLs. */
 async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: TokenCandidate[], until: number) {
   const timeout = Math.max(1, Math.min(RPC_TIMEOUT_MS, until - Date.now()));
   const client = createPublicClient({
@@ -151,14 +157,18 @@ async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: T
     ...tokens.map(t => ({ address: t.address, abi: erc20Abi, functionName: 'balanceOf', args: [owner] })),
     ...unlisted.map(t => ({ address: t.address, abi: DECIMALS, functionName: 'decimals', args: [] })),
   ] as unknown as Parameters<typeof client.multicall>[0]['contracts'];
-  const results = await beforeDeadline(client.multicall({ contracts, allowFailure: true, batchSize: 0 }), until);
+  const read = (batchSize: number) => beforeDeadline(client.multicall({ contracts, allowFailure: true, batchSize }), until);
+  let results = await read(0);
+  if (wholeReadFailed(results, 1 + tokens.length) && until - Date.now() > RETRY_MIN_MS) results = await read(RETRY_CHUNK_BYTES);
   const balanceReads = results.slice(0, 1 + tokens.length);
-  if (balanceReads.every(r => r.status === 'failure')) return null;
+  if (wholeReadFailed(results, 1 + tokens.length)) return null;
   const eth = results[0];
   const balanceResults = results.slice(1, 1 + tokens.length);
   const decimals = new Map(unlisted.map((t, i) => {
     const r = results[1 + tokens.length + i];
-    return [t.address, r.status === 'success' ? Number(r.result) : null] as const;
+    // Untrusted: a decimals() no real token answers counts as a failed read.
+    const d = r.status === 'success' ? Number(r.result) : NaN;
+    return [t.address, validDecimals(d) ? d : null] as const;
   }));
   return {
     incomplete: balanceReads.some(r => r.status === 'failure') || [...decimals.values()].some(d => d === null),
@@ -281,12 +291,21 @@ export async function GET(request: NextRequest) {
   const balancesUntil = deadline - PRICE_RESERVE_MS;
   const report: Report = { warnings: [], notes: [] };
   const [evm, hyperJson] = await Promise.all([
-    Promise.all(HOLDING_CHAINS.map(c => chainHoldings(c.chain, c.chainId, c.blockscout, owner, fresh, report, balancesUntil))),
+    // A chain that fails in an unexpected way is reported as unavailable; the other chains are still answered.
+    Promise.all(HOLDING_CHAINS.map(c => chainHoldings(c.chain, c.chainId, c.blockscout, owner, fresh, report, balancesUntil)
+      .catch((): Holding[] => { report.warnings.push(`${c.chain}: balances unavailable`); return []; }))),
     getJson(`${HL_API}/info`, { body: { type: 'spotClearinghouseState', user: owner }, until: balancesUntil })
       .catch(() => { report.warnings.push('hyperliquid: balances unavailable'); return null; }),
   ]);
   let holdings = evm.flat();
-  const hyperBalances = hyperJson ? parseSpotBalances(hyperJson) : [];
+  let hyperBalances: ReturnType<typeof parseSpotBalances> = [];
+  let hyperliquidUsdc: string | undefined;
+  try {
+    if (hyperJson) { hyperBalances = parseSpotBalances(hyperJson); hyperliquidUsdc = String(usdcForFee(hyperJson)); }
+  } catch {
+    hyperBalances = [];
+    report.warnings.push('hyperliquid: balances unavailable');
+  }
 
   // One DeFiLlama call: HyperCore tokens, ETH and the unpriced tokens. Blockscout's ETH price is asked at the
   // same time, and used only when DeFiLlama has none.
@@ -317,7 +336,7 @@ export async function GET(request: NextRequest) {
   const { warnings, notes } = report;
   const body = JSON.stringify({
     holdings: rankHoldings(holdings), warnings, notes,
-    hyperliquidUsdc: hyperJson ? String(usdcForFee(hyperJson)) : undefined,
+    hyperliquidUsdc,
   });
   await cachePut(key, body, warnings.length ? WARNED_CACHE_SECONDS : CACHE_SECONDS);
   return new NextResponse(body, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
