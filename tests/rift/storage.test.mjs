@@ -241,6 +241,12 @@ test('while storage refuses writes, polls that only stamp their time are not kep
   for (let i = 0; i < 200; i++) await a.applyStatusUpdate(x.id, { status: 'awaiting_deposit', rawStatus: 'awaiting_deposit', amountOut: null }, Date.now() + i * 40_000);
   assert.ok(a.unsavedChanges() <= 3, `bounded: ${a.unsavedChanges()}`);
   assert.equal(a.loadOrders()[0].depositTxHash, HASH, 'the payment change is still applied');
+  // The page kept polling, so a status it first sees now was watched live, although no stamp was saved.
+  await a.applyStatusUpdate(x.id, { status: 'funded', rawStatus: 'funded', amountOut: null }, Date.now() + 200 * 40_000);
+  assert.equal(a.loadOrders()[0].statusLate?.funded, undefined, 'not "noticed late"');
+  const fresh = h.tab();
+  await fresh.applyStatusUpdate(x.id, { status: 'executing', rawStatus: 'executing', amountOut: null }, Date.now() + 400 * 40_000);
+  assert.equal(fresh.loadOrders()[0].statusLate?.executing, true, 'a page that was not watching still says so');
   h.unblock();
   assert.equal(await a.patchOrder(x.id, { notify: true }), 'saved');
   assert.equal(h.read().depositTxHash, HASH);

@@ -257,9 +257,15 @@ export async function beginHyperPost(id: string, attemptId: string, action: { ti
   return holds && r !== 'failed' ? { postedBefore } : null;
 }
 
+/** This page's latest poll of each order. Polls that only stamp their time are not saved while storage refuses
+ *  writes, so `lastPolledAt` alone would make a status first seen after a long outage look noticed late. */
+const pagePolledAt = new Map<string, number>();
+
 /** Record a status poll: the status, when it was first seen (and whether that was live), the amount out. */
 export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()): Promise<WriteResult> {
   markPolled(id, now);
+  const pagePolled = pagePolledAt.get(id);
+  pagePolledAt.set(id, Math.max(pagePolled ?? 0, now));
   return patchOrder(id, prev => {
     // While storage refuses writes, a poll that only stamps its time records nothing worth carrying (see unsaved).
     const stamp = writeFailed ? prev.lastPolledAt : !prev.lastPolledAt || now - prev.lastPolledAt > POLL_STAMP_MS ? now : prev.lastPolledAt;
@@ -268,7 +274,8 @@ export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()):
     if (!canMoveTo(prev.status, u.status)) return { lastPolledAt: stamp };
     const isNew = !prev.statusTimes[u.status];
     // Not watched live: no poll before (orders saved by older versions), or a long gap since the last one.
-    const late = isNew && (!prev.lastPolledAt || now - prev.lastPolledAt > LATE_AFTER_MS);
+    const polledBefore = Math.max(prev.lastPolledAt ?? 0, pagePolled ?? 0);
+    const late = isNew && (!polledBefore || now - polledBefore > LATE_AFTER_MS);
     return {
       status: u.status,
       rawStatus: undefined,
