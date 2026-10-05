@@ -88,3 +88,16 @@ test('on-chain balances replace stale Blockscout ones; curated tokens fill its g
   assert.equal(blockscoutCandidates(longTail, [], () => { truncated = true; }).length, 60);
   assert.equal(truncated, true, 'an incomplete token scan must be disclosed');
 });
+
+test('a list cut short by a failed page keeps its fresh rows and takes the rest from an older list', async () => {
+  const { mergeTokenRows, tokenRowAddress } = await import('../../src/lib/rift/holdings.ts');
+  const A = '0x' + 'a'.repeat(40), B = '0x' + 'b'.repeat(40), C = '0x' + 'c'.repeat(40);
+  assert.equal(tokenRowAddress(tok(A.toUpperCase().replace('0X', '0x'), 'A', 18, '1', '1')), A);
+  assert.equal(tokenRowAddress({ token: { address: B } }), B, 'older rows name it `address`');
+  assert.equal(tokenRowAddress(null), '');
+  const fresh = [tok(A, 'A-NOW', 18, '5', '2'), tok(C, 'C-NEW', 18, '1', '1')];
+  const older = [tok(A, 'A-THEN', 18, '9', '2'), tok(B, 'B', 18, '3', '1'), { token: null }];
+  const merged = mergeTokenRows(fresh, older);
+  assert.deepEqual(merged.map(r => r.token.symbol), ['A-NOW', 'C-NEW', 'B'], 'fresh rows win; older rows fill the gap; rows without an address are dropped');
+  assert.deepEqual(mergeTokenRows([], older).map(r => r.token.symbol), ['A-THEN', 'B']);
+});

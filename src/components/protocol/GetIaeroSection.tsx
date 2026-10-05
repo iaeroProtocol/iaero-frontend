@@ -149,10 +149,15 @@ function warningText(w: string): string {
   if (/some balances could not be checked/.test(w)) return `${name}: some balances could not be checked`;
   if (/token list unavailable/.test(w)) return `${name}: only major tokens checked`;
   if (/token list incomplete/.test(w)) return `${name}: some tokens may be missing`;
-  if (/only the first/.test(w)) return `${name}: token scan limit reached`;
   if (/on-chain/.test(w)) return `${name}: balances may be out of date`;
   if (chain === 'prices') return 'some prices unavailable';
   return w;
+}
+
+/** The server's notes (a token list longer than its scan reads) as one quiet line: a limit, not a failure. */
+function noteText(notes: string[]): string | null {
+  const chains = [...new Set(notes.map(n => n.split(':')[0]).filter(Boolean))].map(c => c.charAt(0).toUpperCase() + c.slice(1));
+  return chains.length ? `Long token lists are checked up to a limit, most valuable first (${chains.join(', ')}).` : null;
 }
 
 const toSourceToken = (h: Holding): SourceToken => ({ chain: h.chain, symbol: h.symbol, name: h.name, decimals: h.decimals, address: h.address, asset: h.asset });
@@ -241,13 +246,15 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   const holdingsQuery = useQuery({
     queryKey: ['rift-holdings', address],
     enabled: !!address && active,
-    queryFn: async ({ signal }): Promise<{ holdings: Holding[]; warnings: string[]; hyperliquidUsdc?: string }> => {
+    queryFn: async ({ signal }): Promise<{ holdings: Holding[]; warnings: string[]; notes?: string[]; hyperliquidUsdc?: string }> => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), HOLDINGS_TIMEOUT_MS);
       signal.addEventListener('abort', () => controller.abort());
+      // A Refresh asks for one fresh read, whether or not it succeeds; the next poll uses the cache again.
+      const fresh = freshRef.current;
+      freshRef.current = false;
       try {
-        const res = await fetch(`/api/rift/holdings?address=${address}${freshRef.current ? '&fresh=1' : ''}`, { signal: controller.signal });
-        freshRef.current = false;
+        const res = await fetch(`/api/rift/holdings?address=${address}${fresh ? '&fresh=1' : ''}`, { signal: controller.signal });
         if (res.status === 429) throw new Error('Too many balance requests from this connection. Wait a minute, then refresh.');
         if (!res.ok) throw new Error(`Could not load your tokens (HTTP ${res.status})`);
         return res.json();
@@ -969,6 +976,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   };
 
   const warnings = [...new Set((holdingsQuery.data?.warnings ?? []).map(warningText))];
+  const holdingsNote = noteText(holdingsQuery.data?.notes ?? []);
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -1024,6 +1032,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
             {warnings.length > 0 && (
               <div className="text-xs text-amber-300/90">Some balances may be incomplete ({warnings.join('; ')}). Refresh to try again.</div>
             )}
+            {holdingsNote && <div className="text-xs text-slate-500">{holdingsNote}</div>}
             {isConnected && !holdingsQuery.isLoading && (
               <div className="flex items-center justify-between gap-2 text-xs text-slate-400">
                 <span>

@@ -51,6 +51,23 @@ interface BlockscoutTokenBalance {
   };
 }
 
+/** A Blockscout token row's contract address, lowercase ('' when it has none). */
+export function tokenRowAddress(row: unknown): string {
+  const t = (row as BlockscoutTokenBalance | null)?.token;
+  return String(t?.address_hash ?? t?.address ?? '').toLowerCase();
+}
+
+/** A token list cut short by a failed page, completed from an older one: every fresh row, then the older
+ *  rows for tokens the fresh pages did not reach. Balances are read on-chain afterwards, so the list only
+ *  decides which tokens are read. */
+export function mergeTokenRows(fresh: unknown[], older: unknown[]): unknown[] {
+  const have = new Set(fresh.map(tokenRowAddress).filter(Boolean));
+  return [...fresh, ...older.filter(row => {
+    const address = tokenRowAddress(row);
+    return !!address && !have.has(address);
+  })];
+}
+
 /** ERC-20 balances from Blockscout's /token-balances. Unpriced tokens get priceUsd 0 for now. */
 export function parseTokenBalances(chain: HoldingChain, json: unknown, exclude: string[] = []): Holding[] {
   if (!Array.isArray(json)) return [];
@@ -58,7 +75,7 @@ export function parseTokenBalances(chain: HoldingChain, json: unknown, exclude: 
   const seen = new Set<string>();
   for (const row of json as BlockscoutTokenBalance[]) {
     const t = row?.token;
-    const address = (t?.address_hash ?? t?.address ?? '').toLowerCase();
+    const address = tokenRowAddress(row);
     if (!t || t.type !== 'ERC-20' || !/^0x[0-9a-f]{40}$/.test(address)) continue;
     if (t.reputation && t.reputation !== 'ok') continue; // flagged as scam
     const decimals = Number(t.decimals ?? '');
@@ -161,7 +178,7 @@ export function blockscoutCandidates(json: unknown, exclude: string[] = [], onTr
   const seen = new Set<string>();
   for (const row of json as BlockscoutTokenBalance[]) {
     const t = row?.token;
-    const address = (t?.address_hash ?? t?.address ?? '').toLowerCase();
+    const address = tokenRowAddress(row);
     if (!t || t.type !== 'ERC-20' || !/^0x[0-9a-f]{40}$/.test(address)) continue;
     if (t.reputation && t.reputation !== 'ok') continue;
     if (exclude.some(e => e.endsWith(`.${address}`))) continue;
