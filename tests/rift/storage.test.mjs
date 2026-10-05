@@ -363,6 +363,61 @@ test('while storage refuses writes, Bitcoin looks record what was seen and not t
   assert.equal(h.read().btc.txid, TXID);
 });
 
+test('a refused save that carried nothing is noticed as fixed by the next poll, or by the retry', async () => {
+  // Review 8, Low 2: a refused payment claim or new-order save sets "not saving" without carrying a change.
+  const x = { ...order(), statusTimes: { awaiting_deposit: Date.now() - 1000 }, lastPolledAt: Date.now() - 1000 };
+  const h = harness(x);
+  const a = h.tab();
+  h.block();
+  await assert.rejects(a.claimPayment(x.id, owner), /Could not save the payment attempt/);
+  assert.equal(a.storageFailing(), true);
+  h.unblock();
+  assert.equal(await a.applyStatusUpdate(x.id, { status: 'awaiting_deposit', rawStatus: 'awaiting_deposit', amountOut: null }), 'unchanged');
+  assert.equal(a.storageFailing(), false, 'a poll that changed nothing noticed it');
+  assert.ok(await a.claimPayment(x.id, owner), 'the payment can be claimed again without a refresh');
+  const h2 = harness(order());
+  const b = h2.tab();
+  h2.block();
+  assert.equal(await b.upsertOrder(order(), { keepOnFailure: false }), 'failed');
+  assert.equal(h2.timers.length, 1, 'a retry is set although nothing is carried');
+  h2.unblock();
+  await h2.runTimers();
+  assert.equal(b.storageFailing(), false);
+  assert.equal(b.orderStorageProblem(), null, 'a new order can be made again');
+});
+
+test('a Bitcoin payment seen again during an outage clears the empty count, so one late empty answer is not "missing"', async () => {
+  // Review 8, Low 1: the stored count of 2 outlived a sighting the page could not record.
+  const TXID = 'cd'.repeat(32);
+  const x = {
+    ...order(), sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' }, fromAmount: '0.001', fromAmountRaw: '100000',
+    depositAddress: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq', route: [{ venue: 'garden', from: 'bitcoin.btc', to: 'base.cbbtc' }],
+    statusTimes: { awaiting_deposit: Date.now() - 1000 }, lastPolledAt: Date.now() - 1000,
+    btc: { txid: TXID, confirmations: 0, firstSeenAt: Date.now() - 600_000, totalSats: '100000', payments: 1, emptyChecks: 2 },
+  };
+  const h = harness(x);
+  const a = h.tab();
+  let empties = 2;
+  const look = d => { // as the order card looks (OrderTracker.tsx 2b)
+    empties = d.payments.length ? 0 : empties + 1;
+    const at = Date.now(), failing = a.storageFailing(), run = empties;
+    return a.patchOrder(x.id, prev => {
+      const btc = orderState.nextBtcRecord(prev.btc, d, at, failing ? run : undefined);
+      return btc === prev.btc || (failing && !orderState.btcSightingChanged(prev.btc, btc)) ? {} : { btc };
+    });
+  };
+  h.block();
+  await a.patchOrder(x.id, { notify: true }); // storage is now known to be failing
+  await look({ payments: [{ txid: TXID, confirmations: 0 }], totalSats: 100_000n });
+  assert.equal(a.loadOrders()[0].btc.emptyChecks, undefined, 'seen again: recorded');
+  h.unblock();
+  await a.applyStatusUpdate(x.id, { status: 'awaiting_deposit', rawStatus: 'awaiting_deposit', amountOut: null });
+  assert.equal(a.storageFailing(), false);
+  await look({ payments: [], totalSats: 0n });
+  assert.equal(h.read().btc.emptyChecks, 1);
+  assert.equal(h.read().btc.missing, undefined, 'one empty answer is not enough');
+});
+
 test('poll stamps hold while storage refuses writes', () => {
   const h = harness(order());
   const a = h.tab();

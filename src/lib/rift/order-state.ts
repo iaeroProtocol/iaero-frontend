@@ -125,11 +125,12 @@ export function nextBtcRecord(
 }
 
 /** Whether a new Bitcoin record changes what was seen (a payment, its amount, its first confirmation, missing or
- *  not) rather than only a counter. While storage refuses writes only such changes are recorded: each refused
- *  change is carried, and applied again, until a save works. */
+ *  not, seen again after empty answers) rather than only a counter. While storage refuses writes only such changes
+ *  are recorded: each refused change is carried, and applied again, until a save works. Seen again is recorded so
+ *  that a stored count of empty answers can't outlive it (once per outage: the carried count is then empty). */
 export const btcSightingChanged = (a: StoredOrder['btc'], b: StoredOrder['btc']) =>
   a?.txid !== b?.txid || !!a?.missing !== !!b?.missing || a?.totalSats !== b?.totalSats || a?.payments !== b?.payments
-  || (a?.confirmations ?? 0) > 0 !== (b?.confirmations ?? 0) > 0;
+  || (a?.confirmations ?? 0) > 0 !== (b?.confirmations ?? 0) > 0 || (!!a?.emptyChecks && !b?.emptyChecks);
 
 /** Rift expired the order after its Bitcoin payment went missing (most likely dropped or replaced). The user may
  *  clear it, but it is never dropped automatically: only their wallet can say the payment didn't go through. */

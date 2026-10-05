@@ -43,13 +43,13 @@ let writeFailed = false;
  *  only stamps its time, a Bitcoin look that only moves a counter) or are no-ops (an observation that matches
  *  what is shown). */
 let unsaved: Change[] = [];
-/** While changes are unsaved they are tried again this often, so the page notices storage working again even
- *  when nothing else writes. */
+/** While storage refuses writes (with changes carried or not: a refused payment claim or new order carries none),
+ *  saving is tried again this often, so the page notices storage working again even when nothing else writes. */
 const RETRY_SAVE_MS = 15_000;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
 function retryLater() {
-  if (retryTimer !== undefined || !unsaved.length || typeof setTimeout !== 'function') return;
+  if (retryTimer !== undefined || (!unsaved.length && !writeFailed) || typeof setTimeout !== 'function') return;
   retryTimer = setTimeout(() => { retryTimer = undefined; void mutate(() => null); }, RETRY_SAVE_MS);
 }
 
@@ -145,10 +145,11 @@ function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: bool
     const next = change(base);
     if (!next) {
       memory = base;
-      // Nothing new, but changes storage refused are waiting: try them again, over what storage holds now (never
-      // over this page's copy alone). While storage fails, a poll that only stamps its time changes nothing, so
-      // this is how the page notices storage working again, before a refresh could drop what it carries.
-      if (stored && unsaved.length) {
+      // Nothing new, but storage refused an earlier write: save again, over what storage holds now (never over
+      // this page's copy alone), with any changes this page carries. While storage fails, a poll that only stamps
+      // its time changes nothing, so this is how the page notices storage working again, before a refresh could
+      // drop what it carries.
+      if (stored && (unsaved.length || writeFailed)) {
         if (saveOrders(base)) {
           unsaved = [];
           window.dispatchEvent(new Event(EVENT));
@@ -240,6 +241,7 @@ export async function claimPayment(
       next[i] = attempt;
       if (!saveOrders(next)) {
         memory = list;
+        retryLater();
         window.dispatchEvent(new Event(EVENT));
         throw new ClaimRefused('Could not save the payment attempt. Nothing was sent; enable browser storage and try again.');
       }

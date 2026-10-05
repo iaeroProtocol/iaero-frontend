@@ -208,6 +208,8 @@ test('while storage refuses writes, a Bitcoin look records what was seen, not it
   assert.equal(btcSightingChanged(first, one), true, 'first confirmation');
   assert.equal(btcSightingChanged(one, nextBtcRecord(one, seen(2), T0 + 3)), false, 'more confirmations: a counter');
   assert.equal(btcSightingChanged(one, nextBtcRecord(one, empty, T0 + 4, 1)), false, 'one empty answer: a counter');
+  assert.equal(btcSightingChanged({ ...one, emptyChecks: 2 }, nextBtcRecord({ ...one, emptyChecks: 2 }, seen(1), T0 + 4)), true,
+    'seen again after empty answers: recorded, so the stored count can\u2019t outlive it');
   // The page's own count stands in for the stored one, which a sighting it could not record left too high.
   const high = { ...one, emptyChecks: 2 };
   assert.equal(nextBtcRecord(high, empty, T0 + 5, 1).missing, undefined);
