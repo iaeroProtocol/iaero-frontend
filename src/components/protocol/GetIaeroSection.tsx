@@ -33,10 +33,10 @@ import { Label } from '@/components/ui/label';
 import { useDebounce } from '@/components/lib/defi-utils';
 import RouteSteps from '@/components/rift/RouteSteps';
 import OrderTracker from '@/components/rift/OrderTracker';
-import RecentOrders, { clearable } from '@/components/rift/RecentOrders';
+import RecentOrders from '@/components/rift/RecentOrders';
 import RiftErrorBoundary from '@/components/rift/RiftErrorBoundary';
 import { CURATED_TOKENS, KNOWN_SYMBOLS, RIFT_DESTINATION, RIFT_SECURITY_URL, SOURCE_CHAINS } from '@/lib/rift/config';
-import { classifyRiftError, createOrder, explainRiftError, fetchQuote, riftPricing, RiftApiError } from '@/lib/rift/client';
+import { classifyRiftError, createOrder, explainRiftError, fetchQuote, riftPauseLeft, riftPricing, RiftApiError } from '@/lib/rift/client';
 import { decimalToRaw, isContractCode, normalizeDecimal, parseOrder } from '@/lib/rift/validate';
 import { estimateRoute, formatRange } from '@/lib/rift/timing';
 import { isBtcAddress, normalizeBtcAddress } from '@/lib/rift/bitcoin';
@@ -53,7 +53,9 @@ import {
   DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, assessCost, costNeedsTick, costText, formatPct, gasDeskChains,
   gasDeskUsd, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
-import { PAY_HEARTBEAT_MS, canPay, isOutOfDate, isTerminalStatus, needsAttention, sourceKindOf } from '@/lib/rift/order-state';
+import {
+  PAY_HEARTBEAT_MS, canPay, canRepostUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, payWindowOpen, sourceKindOf,
+} from '@/lib/rift/order-state';
 import {
   beginHyperPost, claimPayment, loadOrders, orderStorageProblem, patchOrder, patchPaymentAttempt, removeOrders,
   storageFailing, unreadableOrderIds, upsertOrder, useStoredOrders,
@@ -162,7 +164,12 @@ function noteText(notes: string[]): string | null {
   return chains.length ? `Long token lists are checked up to a limit, most valuable first (${chains.join(', ')}).` : null;
 }
 
-const toSourceToken = (h: Holding): SourceToken => ({ chain: h.chain, symbol: h.symbol, name: h.name, decimals: h.decimals, address: h.address, asset: h.asset });
+/** Our listed tokens by asset: their decimals are ours, whatever a balance source says. */
+const CURATED_BY_ASSET = new Map(CURATED_TOKENS.map(t => [t.asset.toLowerCase(), t]));
+const toSourceToken = (h: Holding): SourceToken => ({
+  chain: h.chain, symbol: h.symbol, name: h.name, decimals: CURATED_BY_ASSET.get(h.asset.toLowerCase())?.decimals ?? h.decimals,
+  address: h.address, asset: h.asset,
+});
 
 function TokenIcon({ src, symbol }: { src?: string; symbol: string }) {
   const [broken, setBroken] = useState(false);
@@ -370,7 +377,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       checkQuote(await fetchQuote({ from: token!.asset, from_amount: quoteAmount! }, signal), {
         destination: RIFT_DESTINATION, fromChain: chainKey, fromAmount: quoteAmount!, fromAsset: token!.asset,
       }, { rawAmount: decimalToRaw(quoteAmount!, token!.decimals), kind: 'user' }),
-    refetchInterval: moved || !active ? false : 30_000,
+    // Not while Rift's rate-limit pause lasts: the next refresh waits it out.
+    refetchInterval: () => (moved || !active ? false : Math.max(30_000, riftPauseLeft())),
     staleTime: 20_000,
     retry: (count, e) => classifyRiftError(e) === 'network' && count < 1,
     retryDelay: 3_000,
@@ -457,7 +465,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
    *  previous attempt might still be on its way, and only if Rift's price for it has not dropped by more than the
    *  tolerance since it was made (`quoteAt`: when a just-created order's quote was fetched; a quote that recent
    *  is not asked again). */
-  async function pay(o: StoredOrder, opts: { quoteAt?: number; fromStart?: boolean } = {}) {
+  async function pay(o: StoredOrder, opts: { quoteAt?: number; fromStart?: boolean; repost?: boolean } = {}) {
     const kind = sourceKindOf(o.sourceChain);
     // One purchase at a time: an order card can't open a second wallet prompt while Buy is still running.
     if (startingRef.current && !opts.fromStart) { setError('Finish the purchase in progress first.'); return; }
@@ -466,10 +474,10 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     setPayingId(o.id);
     setError(null);
     try {
-      if (!payableNow(o.id)) return;
+      if (!payableNow(o.id, opts.repost)) return;
       const problem = await walletProblem(o.toAddress as Address, o.sourceChain);
       if (problem) { setError(problem); return; }
-      if (kind === 'hypercore') await payHyperCore(o.id, opts.quoteAt);
+      if (kind === 'hypercore') await payHyperCore(o.id, opts.quoteAt, opts.repost);
       else await payEvm(o.id, opts.quoteAt);
     } catch (e) {
       const msg = errText(e);
@@ -482,15 +490,17 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     }
   }
 
-  /** The order as stored now (another tab may have paid it), if this wallet may pay it now; else says why. */
-  function payableNow(id: string): StoredOrder | null {
+  /** The order as stored now (another tab may have paid it), if this wallet may pay it now; else says why.
+   *  `repost`: a HyperCore order whose outcome is unknown may post its saved signed transfer again. */
+  function payableNow(id: string, repost = false): StoredOrder | null {
     const latest = loadOrders().find(x => x.id === id);
     if (!latest) return null;
     if (!addressRef.current || addressRef.current.toLowerCase() !== latest.toAddress.toLowerCase()) {
       setError(`This order delivers iAERO to ${short(latest.toAddress)}. Connect that wallet to pay it.`);
       return null;
     }
-    if (!canPay(latest, sourceKindOf(latest.sourceChain), Date.now())) {
+    const now = Date.now();
+    if (!canPay(latest, sourceKindOf(latest.sourceChain), now) && !(repost && canRepostUnknown(latest, now))) {
       setError('This order can’t be paid now: it is already paid, its payment is being checked, or its price is out of date.');
       return null;
     }
@@ -519,12 +529,12 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   }
 
   /** What happened when the wallet call failed: cancelled, failed before anything went out, or unknown. */
-  async function recordPayFailure(id: string, attemptId: string, e: unknown, where: string) {
+  async function recordPayFailure(id: string, attemptId: string, e: unknown, where: string, maybeSent = false) {
     if (isUserRejection(e)) {
       await patchPaymentAttempt(id, attemptId, { payRequestedAt: undefined, depositFailed: true, depositFailReason: 'cancelled' });
       const msg = 'Payment cancelled in your wallet. You can pay from the order card while its price is current.';
       setError(msg); showToast(msg, 'info');
-    } else if (isPreSend(e)) {
+    } else if (isPreSend(e) && !maybeSent) {
       await patchPaymentAttempt(id, attemptId, { payRequestedAt: undefined, depositFailed: true, depositFailReason: 'pre_send' });
       const msg = `Payment failed before anything was sent: ${errText(e)}`;
       setError(msg); showToast(msg, 'error');
@@ -614,7 +624,13 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       }
     } catch (e) {
       stopWaiting();
-      await recordPayFailure(id, claimed.payAttemptId!, e, 'was sent');
+      // A wallet can report one RPC's refusal after broadcasting through another: "nothing was sent" holds only if
+      // the account's pending nonce has not moved since the prompt.
+      let maybeSent = false;
+      if (!isUserRejection(e) && isPreSend(e)) {
+        try { maybeSent = await accountNonce(client, o.toAddress, 'pending') > payNonce; } catch { maybeSent = true; }
+      }
+      await recordPayFailure(id, claimed.payAttemptId!, e, 'was sent', maybeSent);
     }
   }
 
@@ -622,8 +638,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
    *  domain names), posted to Hyperliquid. Accepted means final; there is no transaction hash. The signed
    *  transfer is saved before it is posted: a retry re-posts that same transfer, which Hyperliquid accepts at
    *  most once, and the payer's ledger settles any doubt. */
-  async function payHyperCore(id: string, quoteAt?: number) {
-    let o = payableNow(id);
+  async function payHyperCore(id: string, quoteAt?: number, repost = false) {
+    let o = payableNow(id, repost);
     if (!o) return;
     const t = hyperCoreToken(o.token.asset);
     if (!t) return;
@@ -701,6 +717,13 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         await patchPaymentAttempt(id, attemptId, { payRequestedAt: undefined });
         throw new Error('Your wallet account changed while signing. Nothing was sent; reconnect the order’s receiving wallet and try again.');
       }
+      // A signature back from a prompt left open past the pay window, or after this page stopped waiting, is never
+      // sent: the user may have bought again meanwhile.
+      const latest = loadOrders().find(x => x.id === id);
+      if (!latest || !payWindowOpen(latest, 'hypercore', Date.now()) || Date.now() - (claimed.payAttemptAt ?? 0) > MAX_PROMPT_MS) {
+        await patchPaymentAttempt(id, attemptId, { payRequestedAt: undefined });
+        throw new Error('Your wallet answered after this order’s pay window had closed. Nothing was sent; start a new order if you still want iAERO.');
+      }
       // A signature is posted only once it is saved as the order's current attempt: one that another tab has
       // taken over, or that could not be saved, could become a second transfer.
       const saved = await patchPaymentAttempt(id, attemptId, { hlAction: action, payRequestedAt: Date.now() });
@@ -719,7 +742,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       }
     } else {
       if (await priceCheck(o, quoteAt) !== 'ok') return;
-      const claimed = await claimPayment(id, addressRef.current!, { hlAction: action }, holds(action));
+      const claimed = await claimPayment(id, addressRef.current!, { hlAction: action }, holds(action), { repost });
       if (!claimed) { changedElsewhere(); return; }
       o = claimed;
       // A transfer signed earlier, whose outcome was not known: if the ledger shows it, it went through.
@@ -843,15 +866,13 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       if (chain.kind === 'evm' && token.address) {
         setBusy('Checking the token…');
         if (!sourcePublic) throw new Error(`Could not reach ${chain.name} to check this token. Nothing was sent; try again in a moment.`);
-        // Its decimals decide how much is sent: confirmed on-chain unless it is one of ours (fixed in config.ts).
-        if (!CURATED_TOKENS.some(t => t.asset === want.asset)) {
-          let onChain: number;
-          try { onChain = Number(await sourcePublic.readContract({ address: token.address as Address, abi: erc20Abi, functionName: 'decimals' })); } catch {
-            throw new Error(`Could not check ${token.symbol}’s decimals on ${chain.name}. Nothing was sent; try again in a moment.`);
-          }
-          if (onChain !== want.decimals) {
-            throw new Error(`${token.symbol}’s amounts could not be confirmed (its decimals on-chain differ from the list). Nothing was sent; refresh your balances and try again.`);
-          }
+        // Its decimals decide how much is sent: confirmed on-chain, ours included (a balance source can be wrong).
+        let onChain: number;
+        try { onChain = Number(await sourcePublic.readContract({ address: token.address as Address, abi: erc20Abi, functionName: 'decimals' })); } catch {
+          throw new Error(`Could not check ${token.symbol}’s decimals on ${chain.name}. Nothing was sent; try again in a moment.`);
+        }
+        if (onChain !== want.decimals) {
+          throw new Error(`${token.symbol}’s amounts could not be confirmed (its decimals on-chain differ from the list). Nothing was sent; refresh your balances and try again.`);
         }
         const delivers = await transferDeliversInFull(sourcePublic as PublicClient, token.address as Address, owner, amountState.raw);
         if (delivers !== true) {
@@ -1004,12 +1025,13 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   /** An out-of-date order that was never paid (or is past saving), removed from this browser. Never one whose
    *  payment may still be on its way: its order ID is how it is tracked. */
   const dismiss = (o: StoredOrder) => {
-    const latest = loadOrders().find(x => x.id === o.id) ?? o;
-    if (clearable(latest, Date.now())) remove(o);
+    // Checked again when the removal is applied, against the record as it is then.
+    void removeOrders([o.id], clearable);
+    if (activeId === o.id && clearable(loadOrders().find(x => x.id === o.id) ?? o, Date.now())) setActiveId(null);
   };
   /** Removed from this browser whatever its state: a damaged record this page can't show. */
   const remove = (o: StoredOrder) => {
-    void removeOrders([o.id]);
+    void removeOrders([o.id], () => true);
     if (activeId === o.id) setActiveId(null);
   };
 
@@ -1154,7 +1176,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
               </div>
               {amountState.ambiguous && amountState.normalized && amountText !== autoText && (
                 <div className="text-xs text-amber-300/90">
-                  Read as <span className="font-medium text-white">{fmt(amountState.normalized, token.decimals)} {token.symbol}</span>. If you meant something else, type it with a {decimalSep === '.' ? 'dot' : 'comma'} as the decimal point.
+                  {/* Without grouping: "1,500" read as fifteen hundred shows as 1500, not as the same text. */}
+                  Read as <span className="font-medium text-white">{amountState.normalized.replace('.', decimalSep)} {token.symbol}</span>. If you meant something else, type it with a {decimalSep === '.' ? 'dot' : 'comma'} as the decimal point.
                 </div>
               )}
             </div>
@@ -1390,7 +1413,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
             <OrderTracker
               key={activeOrder.id}
               order={activeOrder} account={address} walletChainId={walletChainId}
-              onPay={o => { void pay(o); }} paying={payingId === activeOrder.id} onReorder={reorder} onDismiss={dismiss} onGoToStake={onGoToStake} showToast={showToast}
+              onPay={(o, opts) => { void pay(o, opts); }} paying={payingId === activeOrder.id} onReorder={reorder} onDismiss={dismiss} onGoToStake={onGoToStake} showToast={showToast}
             />
           </RiftErrorBoundary>
         ) : (
@@ -1419,7 +1442,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
             onClearFinished={() => {
               const now = Date.now();
               const done = orders.filter(o => clearable(o, now)).map(o => o.id);
-              void removeOrders(done);
+              void removeOrders(done, clearable);
               if (activeId && done.includes(activeId)) setActiveId(null);
             }}
           />

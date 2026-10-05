@@ -42,16 +42,16 @@ function load(chain, rows = []) {
 }
 
 /** A chain where token i holds 1000+i and has decimals 8+(i%10). `hostile` tokens break any batch they are in;
- *  `failFirst`: the first multicall rejects (out of time); `tokensFail`: every multicall fails. */
-function chain({ hostile = new Set(), failFirst = false, tokensFail = false } = {}) {
+ *  `failFirst`: the first multicall rejects (out of time); `tokensFail`: every multicall fails; `down`: nothing answers. */
+function chain({ hostile = new Set(), failFirst = false, tokensFail = false, down = false } = {}) {
   const log = [];
   return {
     log,
-    getBalance: async () => 777n,
+    getBalance: async () => { if (down) throw new Error('down'); return 777n; },
     multicall: async ({ contracts }) => {
       log.push(contracts.length);
       if (failFirst && log.length === 1) throw new Error('out of time');
-      const breaks = tokensFail || contracts.some(c => hostile.has(c.address));
+      const breaks = tokensFail || down || contracts.some(c => hostile.has(c.address));
       return contracts.map(c => {
         if (breaks) return { status: 'failure', error: new Error('response too large') };
         if (c.functionName === 'getEthBalance') return { status: 'success', result: 777n };
@@ -66,10 +66,10 @@ function chain({ hostile = new Set(), failFirst = false, tokensFail = false } = 
 const tokens = n => Array.from({ length: n }, (_, i) => ({ address: addr(i), symbol: `T${i}`, name: `T${i}`, decimals: 18, priceUsd: 0 }));
 const soon = () => Date.now() + 20_000;
 
-test('one multicall: every token gets its own balance and decimals', async () => {
+test('two multicalls, ours and the rest: every token gets its own balance and decimals', async () => {
   const c = chain();
   const r = await load(c).readBalances(8453, owner, tokens(40), soon());
-  assert.equal(c.log.length, 1);
+  assert.deepEqual([...c.log].sort((a, b) => a - b), [4, 74], 'ETH with our 3 tokens; 37 others, balance and decimals each');
   assert.equal(r.native, 777n);
   assert.equal(r.incomplete, false);
   r.tokens.forEach((t, i) => assert.equal(t.decimals, i < 3 ? 18 : 8 + (i % 10), `decimals of token ${i}`));
@@ -108,6 +108,37 @@ test('ETH read on its own is kept when every token read fails, and for a wallet 
   const rows = [{ value: '5000000', token: { type: 'ERC-20', address_hash: addr(50), symbol: 'BLK', name: 'Blk', decimals: '6', exchange_rate: '1' } }];
   const report = { warnings: [], notes: [] };
   const out = await load(chain({ tokensFail: true }), rows).chainHoldings('base', 8453, 'https://blockscout.invalid', owner, true, report, soon());
-  assert.deepEqual(out.map(h => [h.symbol, h.balanceRaw]).sort(), [['BLK', '5000000'], ['ETH', '777']]);
+  assert.deepEqual([...out].map(h => [h.symbol, h.balanceRaw]).sort(), [['BLK', '5000000'], ['ETH', '777']]);
   assert.ok(report.warnings.some(w => /could not be checked on-chain and may be out of date/.test(w)), report.warnings.join(' | '));
+});
+
+test('airdropped tokens that break their batch can never hide ours, nor ETH', async () => {
+  // Round 2, Medium: two batch-breakers among the unlisted tokens dropped every major token on the chain.
+  for (const breakers of [[3, 22], [3, 4], [10, 60, 110]]) {
+    const r = await load(chain({ hostile: new Set(breakers.map(addr)) })).readBalances(8453, owner, tokens(120), soon());
+    assert.equal(r.native, 777n);
+    [0, 1, 2].forEach(i => assert.equal(r.balances[i], BigInt(1000 + i), `our token ${i}, breakers ${breakers}`));
+  }
+});
+
+test('our tokens are always sized with our decimals, even from Blockscout\u2019s numbers', async () => {
+  // Round 2, High: with the on-chain read failing, Blockscout's (wrong) decimals reached a curated token, and the
+  // page then sent many times the amount ordered.
+  const rows = [{ value: '10000000000000000000000', token: { type: 'ERC-20', address_hash: addr(0), symbol: 'M0', name: 'M0', decimals: '8', exchange_rate: '1' } }];
+  for (const c of [chain({ tokensFail: true }), chain({ down: true })]) {
+    const out = await load(c, rows).chainHoldings('base', 8453, 'https://blockscout.invalid', owner, true, { warnings: [], notes: [] }, soon());
+    const m0 = out.find(h => h.symbol === 'M0');
+    assert.equal(m0?.decimals, 18, 'config decimals, not Blockscout\u2019s 8');
+  }
+});
+
+test('a damaged Blockscout row never drops the chain', async () => {
+  const rows = [
+    { value: '5', token: { type: 'ERC-20', address_hash: addr(70), symbol: 5, name: { x: 1 }, decimals: '6', exchange_rate: '1' } },
+    { value: '6', token: { type: 'ERC-20', address_hash: addr(71), symbol: 'OK', name: 'Ok', decimals: '6', exchange_rate: '1' } },
+  ];
+  const report = { warnings: [], notes: [] };
+  const out = await load(chain(), rows).chainHoldings('base', 8453, 'https://blockscout.invalid', owner, true, report, soon());
+  assert.ok(out.some(h => h.symbol === 'ETH'));
+  assert.ok(!report.warnings.some(w => /unavailable/.test(w)), report.warnings.join(' | '));
 });

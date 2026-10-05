@@ -24,3 +24,23 @@ test('a Hyperliquid answer whose body stalls ends as "unknown" at the timeout in
   assert.deepEqual({ ...(await exports.postHyperTransfer(action)) }, { kind: 'unknown' });
   await assert.rejects(exports.hyperDepositEvidence({ toAddress: '0x2', depositAddress: '0x3', fromAmount: '1', createdAt: 0 }, 'USDC'));
 });
+
+test('the HyperCore payment check does not depend on this computer\u2019s clock', async () => {
+  // Round 2, Low: the ledger was read from createdAt - 60 s; with a clock 90 s fast, a transfer that went through
+  // was never found, and "Check payment" said nothing had arrived.
+  const exports = {};
+  const createdAt = 1_800_000_000_000; // this computer's clock, 90 s fast
+  const transferAt = createdAt - 90_000 + 5_000; // Hyperliquid's clock
+  let startTime;
+  vm.runInNewContext(compiled, {
+    exports, require: n => ({ viem: { erc20Abi: [] }, './hypercore': hypercore, './evidence': evidence })[n],
+    fetch: async (_url, init) => {
+      startTime = JSON.parse(init.body).startTime;
+      const entry = { time: transferAt, hash: '0xab', delta: { type: 'send', user: '0x2', destination: '0x3', token: 'USDC', amount: '1' } };
+      return { ok: true, status: 200, text: async () => JSON.stringify(startTime <= transferAt ? [entry] : []) };
+    },
+    AbortController, setTimeout, clearTimeout, JSON,
+  });
+  const r = await exports.hyperDepositEvidence({ toAddress: '0x2', depositAddress: '0x3', fromAmount: '1', createdAt }, 'USDC');
+  assert.equal(r.evidence, 'arrived');
+});

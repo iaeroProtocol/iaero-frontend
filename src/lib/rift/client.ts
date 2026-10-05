@@ -76,6 +76,12 @@ export function riftBudget(kind: Exclude<RiftCallKind, 'user'>, now = Date.now()
   return log.t.length < LIMIT[kind];
 }
 
+/** How long calls that are not the user's must still wait after a 429 (ms; 0 when they may go). */
+export function riftPauseLeft(now = Date.now()): number {
+  if (typeof window === 'undefined') return 0;
+  return Math.max(0, readLog(now).pausedUntil - now);
+}
+
 function logCall(kind: RiftCallKind, now: number) {
   if (typeof window === 'undefined') return;
   const log = readLog(now);

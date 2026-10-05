@@ -41,10 +41,14 @@ export async function evmDepositEvidence(
   return judgeEvmDeposit({ balance, need: BigInt(o.fromAmountRaw), nonce, code });
 }
 
-/** The payer's HyperCore transfers to the deposit address since the order was made. Throws if Hyperliquid
- *  cannot be read. */
+/** HyperCore ledger entries are read from this long before the order was made: `createdAt` is this computer's
+ *  clock, which can run ahead of Hyperliquid's. The deposit address is new for each order, so nothing older can
+ *  match it anyway. */
+const LEDGER_LOOKBACK_MS = 24 * 3600_000;
+
+/** The payer's HyperCore transfers to the deposit address. Throws if Hyperliquid cannot be read. */
 export async function hyperDepositEvidence(o: Pick<StoredOrder, 'toAddress' | 'depositAddress' | 'fromAmount' | 'createdAt'>, symbol: string) {
-  const since = o.createdAt - 60_000;
+  const since = o.createdAt - LEDGER_LOOKBACK_MS;
   const res = await hlPost('/info', { type: 'userNonFundingLedgerUpdates', user: o.toAddress, startTime: since });
   if (!res.ok) throw new Error(`Hyperliquid HTTP ${res.status}`);
   return judgeHyperLedger(JSON.parse(res.text), { owner: o.toAddress, deposit: o.depositAddress, symbol, need: Number(o.fromAmount), since });

@@ -8,17 +8,26 @@
 //   asked about recently is skipped, so a second tab adds no traffic. They also give way in Rift's call budget
 //   (client.ts).
 // - Notices are deduplicated across tabs by the order's `notifiedStatus` and the browser notification's tag.
+// - Bitcoin orders whose address still needs looking at (order-state.ts btcNeedsLook) are looked at every 5
+//   minutes when no order card is doing it: a payment made from another wallet must not go unseen just because
+//   its order isn't open on screen.
 
 'use client';
 
 import { useEffect, useRef } from 'react';
 import { getOrder, riftBudget } from './client';
 import { parseOrderUpdate } from './validate';
-import { applyStatusUpdate, markPolled, patchOrder, polledWithin, pollStamps } from './storage';
-import { isFinalStatus, isOutOfDate, isTerminalStatus, paidButExpired, pendingByLeastRecentPoll } from './order-state';
+import { applyStatusUpdate, markPolled, patchOrder, polledWithin, pollStamps, storageFailing } from './storage';
+import { findBtcDeposits } from './bitcoin';
+import {
+  btcCheckpoint, btcLookPatch, btcNeedsLook, btcUnchecked, isFinalStatus, isOutOfDate, isTerminalStatus, paidButExpired,
+  pendingByLeastRecentPoll,
+} from './order-state';
 import type { RiftOrderStatus, StoredOrder } from './types';
 
 const POLL_MS = 60_000;
+/** A Bitcoin address no order card is watching is looked at this often (shared across tabs, `btc:<id>` stamps). */
+const BTC_LOOK_MS = 5 * 60_000;
 /** Unpaid past the window (it can only expire) or on hold (Rift's operators decide): now and then. */
 const IDLE_POLL_MS = 10 * 60_000;
 /** The page's notification service worker (public/), registered only when notifications are turned on. */
@@ -38,7 +47,9 @@ function message(o: StoredOrder): string {
       ? 'Rift closed an order that a payment was sent to. Open it for the order ID to give Rift.'
       : o.btc?.missing
         ? 'An order expired after its Bitcoin payment disappeared from view. Check your wallet, and open the order for its ID.'
-        : 'An order expired before a payment arrived. Nothing was taken.';
+        : btcUnchecked(o)
+          ? 'An order expired. Its Bitcoin address is being checked for a payment: open the order to see.'
+          : 'An order expired before a payment arrived. Nothing was taken.';
     case 'frozen': return 'Rift put an order on hold. Open it for the order ID to give Rift.';
     case 'underfunded': return 'Rift received less than an order needs. Open it for what to do next.';
     default: return '';
@@ -102,6 +113,36 @@ export function useOrderWatcher(
       }
     };
     const t = setInterval(tick, 20_000);
+    tick();
+    return () => { stop = true; clearInterval(t); };
+  }, [any]);
+
+  // 1b. Bitcoin addresses no order card is watching, every 5 minutes, one at a time.
+  useEffect(() => {
+    if (!any) return;
+    let stop = false;
+    let running = false;
+    const tick = async () => {
+      if (running) return;
+      running = true;
+      try {
+        for (const o of ordersRef.current.filter(btcNeedsLook)) {
+          if (stop) break;
+          const key = `btc:${o.id}`;
+          if (polledWithin(key, BTC_LOOK_MS)) continue;
+          markPolled(key);
+          try {
+            const d = await findBtcDeposits(o.depositAddress);
+            if (stop) break;
+            const look = { at: Date.now(), failing: storageFailing(), checkpoint: btcCheckpoint(o) };
+            await patchOrder(o.id, prev => btcLookPatch(prev.btc, d, look));
+          } catch { /* mempool.space unreachable: next round */ }
+        }
+      } finally {
+        running = false;
+      }
+    };
+    const t = setInterval(tick, 60_000);
     tick();
     return () => { stop = true; clearInterval(t); };
   }, [any]);

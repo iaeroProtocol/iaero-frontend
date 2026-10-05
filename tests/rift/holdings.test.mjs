@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyLlamaPrices, candidatesToHoldings, parseNative, parseTokenBalances, probeAmount, rankHoldings, rawToNumber, splitRead, validDecimals, wholeReadFailed, callLayout, parseDecimals, blockscoutCandidates,
+  applyLlamaPrices, candidatesToHoldings, parseNative, parseTokenBalances, probeAmount, rankHoldings, rawToNumber, splitRead, validDecimals, parseDecimals, blockscoutCandidates,
 } from '../../src/lib/rift/holdings.ts';
 
 const IAERO = 'base.0x81034fb34009115f215f5d5f564aac9ffa46a1dc';
@@ -118,11 +118,7 @@ test('a decimals() no real token answers is never used in arithmetic', () => {
   assert.ok(Date.now() - started < 200);
 });
 
-test('a multicall refused as a whole is told apart from single calls failing', () => {
-  const ok = { status: 'success' }, fail = { status: 'failure' };
-  assert.equal(wholeReadFailed([fail, fail, ok, fail], [0, 1, 3]), true, 'only the balance reads count, not a decimals read among them');
-  assert.equal(wholeReadFailed([fail, ok, fail], [0, 1, 2]), false);
-});
+
 
 test('a refused multicall is read again in halves until the call that breaks it fails alone', async () => {
   // Review 6, Low 5: viem's own chunks are by calldata size, so a retry could repeat the identical call.
@@ -146,11 +142,10 @@ test('a refused multicall is read again in halves until the call that breaks it 
 
 test('each token\u2019s decimals() sits right after its balanceOf(), so a token that breaks a batch costs almost nothing else', async () => {
   // Review 7, Low 3: laid out apart, one token's two reads broke both halves, and 14-19 other tokens were lost.
-  assert.deepEqual(callLayout([false, true, true]), [{ balance: 1 }, { balance: 2, decimals: 3 }, { balance: 4, decimals: 5 }]);
-  const layout = callLayout(Array.from({ length: 120 }, (_, i) => i >= 3)); // 120 tokens, 117 outside our list
-  const total = 1 + layout.reduce((n, l) => n + (l.decimals ? 2 : 1), 0);
-  const calls = Array.from({ length: total }, (_, i) => i).slice(1);
-  for (const hostile of [0, 50, 119]) {
+  // 117 unlisted tokens, each read as balanceOf() then decimals() (route.ts readBalances).
+  const layout = Array.from({ length: 117 }, (_, i) => ({ balance: 2 * i, decimals: 2 * i + 1 }));
+  const calls = Array.from({ length: 2 * 117 }, (_, i) => i);
+  for (const hostile of [0, 50, 116]) {
     const bad = new Set([layout[hostile].balance, layout[hostile].decimals]);
     const read = async part => (part.some(c => bad.has(c)) ? part.map(() => ({ status: 'failure' })) : part.map(c => ({ status: 'success', result: c })));
     const out = await splitRead(calls, read, () => ({ status: 'failure' }), { maxReads: 16, mayRead: () => true });
@@ -169,4 +164,17 @@ test('decimals Blockscout leaves out or writes oddly are not taken as 0', () => 
     assert.deepEqual(blockscoutCandidates([row(decimals)]), [], `blockscoutCandidates, decimals ${decimals}`);
   }
   assert.equal(parseTokenBalances('base', [row('6')])[0].decimals, 6);
+});
+
+test('a Blockscout row with a field of the wrong type is skipped or read safely, never thrown on', () => {
+  // Round 2, Low: a number or array symbol, or an object name, threw a TypeError and dropped the whole chain.
+  const row = token => ({ value: '5000000', token: { type: 'ERC-20', address_hash: `0x${'55'.repeat(20)}`, decimals: '6', exchange_rate: '1', ...token } });
+  for (const bad of [{ symbol: 5 }, { symbol: ['X'] }, { name: 7 }, { name: { x: 1 } }, { icon_url: 3 }, { exchange_rate: ['9'] }]) {
+    const [h] = parseTokenBalances('base', [row(bad)]);
+    assert.equal(typeof h.symbol, 'string', JSON.stringify(bad));
+    assert.equal(typeof h.name, 'string');
+    assert.ok(h.icon === undefined || typeof h.icon === 'string');
+    assert.equal(blockscoutCandidates([row(bad)]).length, 1, JSON.stringify(bad));
+  }
+  assert.equal(parseTokenBalances('base', [row({ exchange_rate: ['9'] })])[0].priceUsd, 0, 'an array is not a price');
 });

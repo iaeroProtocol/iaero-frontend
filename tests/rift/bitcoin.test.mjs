@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { btcToSats, isBtcAddress, normalizeBtcAddress } from '../../src/lib/rift/bitcoin.ts';
+import { btcToSats, findBtcDeposits, isBtcAddress, normalizeBtcAddress } from '../../src/lib/rift/bitcoin.ts';
 
 test('Bitcoin addresses are checked with their checksums', () => {
   // BIP-173 / BIP-350 / BIP-86 / Bitcoin wiki examples.
@@ -30,4 +30,25 @@ test('Bitcoin addresses are checked with their checksums', () => {
   assert.equal(normalizeBtcAddress(' BC1QAR0SRRR7XFKVY5L643LYDNW9RE59GTZZWF5MDQ '), 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq');
   assert.equal(btcToSats('0.00012345'), 12345n);
   assert.equal(btcToSats('1.5'), 150000000n);
+});
+
+test('a confirmed payment counts at least one confirmation, and a capitalised bech32 address is matched', async () => {
+  // Round 2, Low: with the tip height refused (a 429), a confirmed payment read as 0 confirmations and could then
+  // be marked missing. Suspected: Rift writing a deposit address in capitals would never be matched.
+  const address = 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq';
+  const real = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = async url => {
+    asked.push(String(url));
+    if (String(url).endsWith('/blocks/tip/height')) return { ok: false, status: 429, text: async () => '' };
+    return { ok: true, status: 200, json: async () => [{ txid: 'ab'.repeat(32), status: { confirmed: true, block_height: 900000 }, vout: [{ scriptpubkey_address: address, value: 100000 }] }] };
+  };
+  try {
+    const d = await findBtcDeposits(address.toUpperCase());
+    assert.equal(d.payments.length, 1, 'matched');
+    assert.equal(d.payments[0].confirmations, 1);
+    assert.ok(asked[0].includes(`/address/${address}/txs`), 'asked in lower case');
+  } finally {
+    globalThis.fetch = real;
+  }
 });

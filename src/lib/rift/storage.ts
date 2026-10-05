@@ -15,7 +15,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { canMoveTo, canPay, capOrders, sanitizeOrder, sourceKindOf } from './order-state';
+import { canMoveTo, canPay, canRepostUnknown, capOrders, payWindowOpen, sanitizeOrder, sourceKindOf } from './order-state';
 import { ORDERS_KEY } from './keys';
 import type { OrderUpdate } from './validate';
 import type { StoredOrder } from './types';
@@ -53,21 +53,28 @@ function retryLater() {
   retryTimer = setTimeout(() => { retryTimer = undefined; void mutate(() => null); }, RETRY_SAVE_MS);
 }
 
+/** What storage holds, or null if it can't be read. One damaged record is set aside on its own (unreadableOrderIds);
+ *  a value that isn't a list at all is copied to `<key>.unreadable` first, never written over unseen. */
 function readStorage(): StoredOrder[] | null {
-  try {
-    const raw = window.localStorage.getItem(KEY);
-    const list: unknown = raw ? JSON.parse(raw) : [];
-    const orders: StoredOrder[] = [];
-    const others: unknown[] = [];
-    for (const x of Array.isArray(list) ? list : []) {
-      const o = sanitizeOrder(x);
-      if (o) orders.push(o); else others.push(x);
+  let raw: string | null;
+  try { raw = window.localStorage.getItem(KEY); } catch { return null; }
+  let list: unknown = [];
+  if (raw) {
+    try { list = JSON.parse(raw); } catch { list = null; }
+    if (!Array.isArray(list)) {
+      try { window.localStorage.setItem(`${KEY}.unreadable`, raw); } catch { return null; }
+      list = [];
     }
-    foreign = others.slice(0, MAX_FOREIGN);
-    return orders;
-  } catch {
-    return null;
   }
+  const orders: StoredOrder[] = [];
+  const others: unknown[] = [];
+  for (const x of list as unknown[]) {
+    let o: StoredOrder | null = null;
+    try { o = sanitizeOrder(x); } catch { /* damaged: kept aside, as it is */ }
+    if (o) orders.push(o); else others.push(x);
+  }
+  foreign = others.slice(0, MAX_FOREIGN);
+  return orders;
 }
 
 /** What storage holds, with this page's unsaved changes applied again; null if storage can't be read. */
@@ -144,8 +151,8 @@ function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: bool
       // this page's copy alone), with any changes this page carries. While storage fails, a poll that only stamps
       // its time changes nothing, so this is how the page notices storage working again, before a refresh could
       // drop what it carries.
-      if (stored && (unsaved.length || writeFailed)) {
-        if (saveOrders(base)) {
+      if (unsaved.length || writeFailed) {
+        if (stored && saveOrders(base)) {
           unsaved = [];
           window.dispatchEvent(new Event(EVENT));
         } else retryLater();
@@ -210,6 +217,7 @@ class ClaimRefused extends Error {}
  *  `expect`: what the stored order must still be like (compare-and-set), or there is no claim. */
 export async function claimPayment(
   id: string, owner: string, extra: Partial<StoredOrder> = {}, expect?: (stored: StoredOrder) => boolean,
+  { repost = false }: { repost?: boolean } = {},
 ): Promise<StoredOrder | null> {
   const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
   if (!locks?.request) throw new Error('This browser cannot safely coordinate payments across tabs. Use a browser with Web Locks support.');
@@ -222,7 +230,10 @@ export async function claimPayment(
       const i = list.findIndex(o => o.id === id);
       if (i < 0) return null;
       const prev = list[i];
-      if (prev.toAddress.toLowerCase() !== owner.toLowerCase() || !canPay(prev, sourceKindOf(prev.sourceChain), Date.now())) return null;
+      const now = Date.now();
+      // `repost`: a HyperCore transfer whose outcome is unknown, posted again (order-state.ts canRepostUnknown).
+      const may = canPay(prev, sourceKindOf(prev.sourceChain), now) || (repost && canRepostUnknown(prev, now));
+      if (prev.toAddress.toLowerCase() !== owner.toLowerCase() || !may) return null;
       if (expect && !expect(prev)) return null;
       const attempt: StoredOrder = {
         ...prev,
@@ -272,7 +283,9 @@ export async function patchPaymentAttempt(id: string, attemptId: string, patch: 
 export async function beginHyperPost(id: string, attemptId: string, action: { time: number; r: string }): Promise<{ postedBefore: boolean } | null> {
   let holds = false, postedBefore = false;
   const r = await patchOrder(id, prev => {
-    holds = prev.payAttemptId === attemptId && prev.hlAction?.time === action.time && prev.hlAction.r === action.r;
+    // Never once the order's pay window has closed (a signature can come back from a forgotten wallet prompt).
+    holds = prev.payAttemptId === attemptId && prev.hlAction?.time === action.time && prev.hlAction.r === action.r
+      && payWindowOpen(prev, 'hypercore', Date.now());
     postedBefore = prev.hlPostedAt !== undefined;
     return holds ? { hlPostedAt: prev.hlPostedAt ?? Date.now() } : {};
   });
@@ -311,8 +324,15 @@ export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()):
   });
 }
 
-export function removeOrders(ids: string[]): Promise<WriteResult> {
-  return mutate(list => (list.some(o => ids.includes(o.id)) ? list.filter(o => !ids.includes(o.id)) : null));
+/** Remove orders from this browser, each only if `canRemove` still holds for it when the change is applied (another
+ *  tab may have recorded a payment since it was asked). Never carried through a storage outage: applied later, a
+ *  removal could drop an order that has been paid in the meantime. */
+export function removeOrders(ids: string[], canRemove: (o: StoredOrder, now: number) => boolean): Promise<WriteResult> {
+  return mutate(list => {
+    const now = Date.now();
+    const next = list.filter(o => !(ids.includes(o.id) && canRemove(o, now)));
+    return next.length === list.length ? null : next;
+  }, { keepOnFailure: false });
 }
 
 // --- Poll stamps: when any tab last asked Rift about an order, so tabs and pollers do not repeat each other ---

@@ -19,10 +19,12 @@ export type RiftErrorKind =
   | 'unsupported'   // Rift does not know the asset: an answer
   | 'unavailable'   // Rift could not evaluate routes right now (pricing outage, timeouts): try later
   | 'rate_limited'  // too many requests from this browser
-  | 'quote_used' | 'quote_expired' | 'sanctions' | 'screening' | 'network' | 'bad_request' | 'other';
+  | 'quote_used' | 'quote_expired' | 'sanctions' | 'screening' | 'forbidden' | 'network' | 'bad_request' | 'other';
 
 /** Rift's pricing-outage text. It contains "no route", so it is matched before the no-route texts. */
 const OUTAGE_RE = /could not be priced|not evaluated in full/;
+/** A 403 is Rift's sanctions refusal only if it says so: a CDN or firewall block is a 403 too. */
+const SANCTIONS_RE = /sanction|screen|ofac|compliance|restricted address|blocked address/;
 const NO_ROUTE_RE = /no venue returned an executable quote|no route/;
 const UNSUPPORTED_RE = /not a valid asset|not a known asset|unknown asset|unknown chain|unsupported/;
 
@@ -34,7 +36,7 @@ export function classifyRiftError(e: unknown): RiftErrorKind {
     case 429: return 'rate_limited';
     case 409: return 'quote_used';
     case 410: return 'quote_expired';
-    case 403: return 'sanctions';
+    case 403: return SANCTIONS_RE.test(m) ? 'sanctions' : 'forbidden';
     case 503: return /screen/.test(m) ? 'screening' : 'unavailable';
     case 422:
       if (OUTAGE_RE.test(m)) return 'unavailable';
@@ -61,6 +63,7 @@ export function explainRiftError(e: unknown): string {
     case 'quote_expired': return 'The quote expired. A fresh one is being fetched.';
     case 'sanctions': return 'Rift declined this address after its sanctions screening.';
     case 'screening': return 'Rift’s address screening is briefly unavailable. Please try again in a minute.';
+    case 'forbidden': return 'Rift refused this request (it may be blocking this network or browser). Nothing was sent; try again later or from another connection.';
     case 'network': return 'Could not reach Rift. Check your connection and try again.';
     case 'bad_request': return `Rift rejected the request: ${e.message}`;
     default: return e.message;

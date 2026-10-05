@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { badgeStyle } from './status';
 import { phaseOf } from '@/lib/rift/timing';
 import { SOURCE_CHAINS } from '@/lib/rift/config';
-import { isAbandoned, isFinalStatus, isOutOfDate, isTerminalStatus, needsAttention, paidButExpired, phaseInput } from '@/lib/rift/order-state';
+import { clearable, isFinalStatus, isOutOfDate, isTerminalStatus, needsAttention, phaseInput } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
 const ago = (ts: number) => {
@@ -29,11 +29,6 @@ interface Props {
   onSelect: (id: string) => void;
   onClearFinished: () => void;
 }
-
-/** Orders "Clear finished" removes: finished ones, and unpaid ones past their pay window. Frozen and underpaid
- *  orders stay, and so does an expired one this browser saw paid: their ID is what Rift support needs. */
-export const clearable = (o: StoredOrder, now: number) =>
-  (isFinalStatus(o.status) && !needsAttention(o.status) && !paidButExpired(o, now)) || isAbandoned(o, now);
 
 export default function RecentOrders({ orders, activeId, onSelect, onClearFinished }: Props) {
   if (!orders.length) return null;

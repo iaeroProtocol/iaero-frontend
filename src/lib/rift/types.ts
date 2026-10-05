@@ -126,6 +126,8 @@ export interface StoredOrder {
     emptyChecks?: number;
     /** A payment was seen with a confirmation: it is never treated as missing (order-state.ts btcConfirmed). */
     confirmed?: boolean;
+    /** When a look past the order's checkpoint found nothing at the address (order-state.ts btcUnchecked). */
+    emptyAt?: number;
   };
 
   // --- Rift's status ---

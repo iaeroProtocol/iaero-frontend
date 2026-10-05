@@ -20,3 +20,10 @@ test("Rift's real error texts are told apart", () => {
   assert.equal(new RiftApiError(422, 'x').status, 422);
   assert.match(explainRiftError(new RiftApiError(422, 'execution costs could not be priced, so no route was evaluated in full')), /can’t price routes right now/);
 });
+
+test('a 403 is a sanctions refusal only if Rift says so', () => {
+  // Round 2, suspected: a CDN or firewall 403 ("error code: 1020") was shown as "declined after sanctions screening".
+  assert.equal(classifyRiftError(new RiftApiError(403, 'address failed sanctions screening')), 'sanctions');
+  assert.equal(classifyRiftError(new RiftApiError(403, 'error code: 1020')), 'forbidden');
+  assert.match(explainRiftError(new RiftApiError(403, 'Forbidden')), /refused this request/);
+});

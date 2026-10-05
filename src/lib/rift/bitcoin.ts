@@ -94,8 +94,10 @@ interface MempoolTx {
 export interface BtcPayment { txid: string; sats: bigint; confirmations: number }
 export interface BtcDeposits { payments: BtcPayment[]; totalSats: bigint }
 
-/** Every transaction paying `address` (oldest first) with its confirmations, and their total. */
-export async function findBtcDeposits(address: string, signal?: AbortSignal): Promise<BtcDeposits> {
+/** Every transaction paying `address` (oldest first) with its confirmations, and their total. A bech32 address may
+ *  be written in capitals (BIP-173); mempool.space writes it in lower case. */
+export async function findBtcDeposits(given: string, signal?: AbortSignal): Promise<BtcDeposits> {
+  const address = /^bc1/i.test(given) ? given.toLowerCase() : given;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), MEMPOOL_TIMEOUT_MS);
   const onAbort = () => controller.abort();
@@ -115,7 +117,8 @@ export async function findBtcDeposits(address: string, signal?: AbortSignal): Pr
     }
     const payments = paying.map(({ tx, sats }) => ({
       txid: tx.txid, sats,
-      confirmations: tx.status.confirmed && tx.status.block_height && tip ? Math.max(1, tip - tx.status.block_height + 1) : 0,
+      // Confirmed is at least one confirmation, even when the tip height can't be read.
+      confirmations: !tx.status.confirmed ? 0 : tx.status.block_height && tip ? Math.max(1, tip - tx.status.block_height + 1) : 1,
     }));
     return { payments, totalSats: payments.reduce((n, p) => n + p.sats, 0n) };
   } finally {

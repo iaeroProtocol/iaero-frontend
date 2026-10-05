@@ -16,14 +16,11 @@ const btcOrder = (over = {}) => ({
   ...order(), sourceChain: 'bitcoin', token: { symbol: 'BTC', decimals: 8, asset: 'bitcoin.btc' }, fromAmount: '0.001', fromAmountRaw: '100000',
   depositAddress: BTC_DEPOSIT, route: [{ venue: 'garden', from: 'bitcoin.btc', to: 'base.cbbtc' }], ...over,
 });
-/** Bitcoin looks as the order card takes them (OrderTracker.tsx 2b), with its own count of empty answers. */
-const trackerLook = (t, id, empties = 0) => {
-  return d => {
-    empties = d.payments.length ? 0 : empties + 1;
-    const failing = t.storageFailing();
-    const look = { at: Date.now(), failing, run: empties, counted: failing ? JSON.stringify(t.loadOrders().find(o => o.id === id)?.btc ?? null) : '' };
-    return t.patchOrder(id, prev => orderState.btcLookPatch(prev.btc, d, look));
-  };
+/** Bitcoin looks as the order card takes them (OrderTracker.tsx 2b). */
+const trackerLook = (t, id) => d => {
+  const o = t.loadOrders().find(x => x.id === id);
+  const look = { at: Date.now(), failing: t.storageFailing(), checkpoint: orderState.btcCheckpoint(o) };
+  return t.patchOrder(id, prev => orderState.btcLookPatch(prev.btc, d, look));
 };
 const order = () => {
   const now = Date.now();
@@ -78,7 +75,7 @@ function harness(saved, { locksAvailable = true, lockRejects = false, lockError 
     tab, read: () => JSON.parse(data.get(key))[0], all: () => JSON.parse(data.get(key)),
     onEvent: listener => listeners.push(listener),
     block: () => { storageBlocked = true; }, unblock: () => { storageBlocked = false; },
-    timers,
+    timers, setRaw: v => data.set(key, v), get: k => data.get(k),
     /** Fire the timers set so far (the page's 15 s retry), then let their writes finish. */
     runTimers: async () => { for (const fn of timers.splice(0)) fn(); await new Promise(r => setImmediate(r)); },
   };
@@ -153,7 +150,7 @@ test('a wallet result for a superseded or removed attempt is reported, not appli
   await b.patchOrder(x.id, { payAttemptId: randomUUID() });
   assert.equal(await a.patchPaymentAttempt(x.id, claimed.payAttemptId, { depositTxHash: HASH }), 'superseded');
   assert.equal(h.read().depositTxHash, undefined);
-  await b.removeOrders([x.id]);
+  await b.removeOrders([x.id], () => true);
   assert.equal(await a.patchPaymentAttempt(x.id, claimed.payAttemptId, { depositTxHash: HASH }), 'missing');
 });
 
@@ -366,11 +363,12 @@ test('while storage refuses writes, Bitcoin looks record what was seen and not t
   assert.ok(a.unsavedChanges() <= 3, `bounded: ${a.unsavedChanges()}`);
   assert.equal(a.loadOrders()[0].btc.txid, TXID);
   assert.equal(a.loadOrders()[0].btc.missing, undefined, 'a flapping answer is not "missing"');
-  for (let i = 0; i < 3; i++) await look(empty);
-  assert.equal(a.loadOrders()[0].btc.missing, true, 'three empty answers in a row, counted by the page');
+  for (let i = 0; i < 5; i++) await look(empty);
+  assert.equal(a.loadOrders()[0].btc.missing, undefined, 'never "missing" while storage refuses writes');
   h.unblock();
   await a.patchOrder(x.id, {});
-  assert.equal(h.read().btc.missing, true);
+  for (let i = 0; i < 3; i++) await look(empty);
+  assert.equal(h.read().btc.missing, true, 'three empty answers in a row, once storage works');
   assert.equal(h.read().btc.txid, TXID);
   // Confirmations climbing during an outage: the first confirmation is recorded, the count is not.
   const y = h.tab();
@@ -416,7 +414,7 @@ test('a Bitcoin payment seen again during an outage clears the empty count, so o
   };
   const h = harness(x);
   const a = h.tab();
-  const look = trackerLook(a, x.id, 2); // two empty answers in a row before the outage
+  const look = trackerLook(a, x.id); // two empty answers in a row before the outage (emptyChecks: 2)
   h.block();
   await a.patchOrder(x.id, { notify: true }); // storage is now known to be failing
   await look({ payments: [{ txid: TXID, confirmations: 0 }], totalSats: 100_000n });
@@ -439,8 +437,8 @@ test('a "missing" change carried through an outage does not undo another tab\u20
   const lookA = trackerLook(a, x.id);
   a.blockMe();
   await a.patchOrder(x.id, { notify: true }); // tab A now knows its writes fail
-  for (let i = 0; i < 3; i++) await lookA(empty);
-  assert.equal(a.loadOrders()[0].btc.missing, true, 'tab A shows it missing, by its own count');
+  for (let i = 0; i < 4; i++) await lookA(empty);
+  assert.equal(a.loadOrders()[0].btc.missing, undefined, 'tab A never decides "missing" while its writes fail');
   // Tab B, whose writes work, records a newer sighting: a second payment to the address.
   await trackerLook(b, x.id)({ payments: [{ txid: TXID, confirmations: 0 }, { txid: 'cd'.repeat(32), confirmations: 0 }], totalSats: 150_000n });
   assert.equal(h.read().btc.payments, 2);
@@ -449,6 +447,57 @@ test('a "missing" change carried through an outage does not undo another tab\u20
   assert.equal(a.storageFailing(), false);
   assert.equal(h.read().btc.missing, undefined, 'B\u2019s newer record stands');
   assert.equal(h.read().btc.payments, 2);
+});
+
+test('a removal is checked again when applied, and never carried through an outage', async () => {
+  // Round 2, High: a refused Dismiss, applied later by the 15 s retry, deleted an order that had been paid since.
+  const x = btcOrder({ createdAt: Date.now() - 3 * 3600_000, btc: { emptyAt: Date.now() - 1000 } });
+  const h = harness(x);
+  const a = h.tab({ own: true }), b = h.tab();
+  assert.equal(orderState.clearable(a.loadOrders()[0], Date.now()), true, 'abandoned: looked at well after its window');
+  a.blockMe();
+  assert.equal(await a.removeOrders([x.id], orderState.clearable), 'failed');
+  assert.equal(a.unsavedChanges(), 0, 'not carried');
+  assert.equal(a.loadOrders().length, 1, 'still shown');
+  await trackerLook(b, x.id)({ payments: [{ txid: 'ab'.repeat(32), confirmations: 0 }], totalSats: 100_000n }); // B sees a payment
+  a.unblockMe();
+  await h.runTimers();
+  await a.patchOrder(x.id, {});
+  assert.equal(h.all().length, 1, 'the paid order is still there');
+  assert.equal(await b.removeOrders([x.id], orderState.clearable), 'unchanged', 'and no longer removable');
+  assert.equal(h.all().length, 1);
+});
+
+test('one damaged record never makes the others unreadable; a value that is not a list is kept aside', async () => {
+  // Round 2, Low: a record whose token.address was an array made sanitizeOrder throw, and the next write wiped every order.
+  const good = btcOrder();
+  const bad = { ...order(), token: { symbol: 'X', decimals: 6, asset: 'base.0x1', address: ['0x1'] } };
+  const h = harness([good, bad]);
+  const t = h.tab();
+  assert.deepEqual([...t.loadOrders()].map(o => o.id), [good.id]);
+  assert.equal(await t.upsertOrder(order(), { keepOnFailure: false }), 'saved');
+  assert.equal(h.all().length, 3, 'the good, the new, and the damaged record kept as it was');
+  const odd = harness([]);
+  odd.setRaw('{"not":"a list"}');
+  const u = odd.tab();
+  assert.equal(u.loadOrders().length, 0);
+  assert.equal(odd.get('iaero.rift.orders.v1.unreadable'), '{"not":"a list"}', 'kept aside before anything is written');
+});
+
+test('a HyperCore transfer in doubt is re-posted only through a claim, and never after its window', async () => {
+  // Round 2, Lows: "Pay again" cleared "unknown" before its claim; a signature could be posted after the window.
+  const action = { destination: '0x1111111111111111111111111111111111111111', token: 'USDC:0x6d', amount: '1', time: 1000, r: '0x1', s: '0x2', v: 27 };
+  const x = { ...order(), sourceChain: 'hyperliquid', token: { symbol: 'USDC', decimals: 8, asset: 'hyperliquid.usdc' }, fromAmountRaw: '100000000', hlAction: action, hlPostedAt: Date.now() - 60_000, payUnknown: true };
+  const h = harness(x);
+  const t = h.tab();
+  assert.equal(orderState.payState(t.loadOrders()[0], Date.now()), 'unknown');
+  assert.equal(await t.claimPayment(x.id, owner, { hlAction: action }), null, 'not an ordinary claim');
+  const claimed = await t.claimPayment(x.id, owner, { hlAction: action }, o => o.hlAction?.r === action.r, { repost: true });
+  assert.ok(claimed, 'a re-post claim');
+  assert.equal(h.read().payUnknown, false);
+  assert.ok(await t.beginHyperPost(x.id, claimed.payAttemptId, action));
+  const late = harness({ ...x, createdAt: Date.now() - 11 * 60_000, payUnknown: false, payAttemptId: claimed.payAttemptId });
+  assert.equal(await late.tab().beginHyperPost(x.id, claimed.payAttemptId, action), null, 'not once the window has closed');
 });
 
 test('poll stamps hold while storage refuses writes', () => {

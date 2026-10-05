@@ -47,21 +47,6 @@ export function parseDecimals(v: unknown): number | null {
   return validDecimals(d) ? d : null;
 }
 
-/** Whether a multicall read nothing: every result at `at` (the balance reads, not the decimals reads) failed,
- *  which is what a refused aggregate call looks like (an RPC down, or one token answering with megabytes). */
-export const wholeReadFailed = (results: readonly { status: string }[], at: readonly number[]) =>
-  at.every(i => results[i]?.status !== 'success');
-
-/** Where each token's reads go in a chain's multicall, after ETH at 0: its balanceOf(), then its decimals() right
- *  after it when they are read. A token that breaks a batch then breaks one part of it, which splitRead narrows
- *  down; laid out apart, its two reads would break both halves. */
-export function callLayout(readsDecimals: readonly boolean[]): { balance: number; decimals?: number }[] {
-  let next = 1;
-  return readsDecimals.map(d => {
-    const balance = next++;
-    return d ? { balance, decimals: next++ } : { balance };
-  });
-}
 
 /**
  * `calls` read again after a batch of all of them was refused as a whole: in halves, and any half whose every
@@ -104,6 +89,11 @@ interface BlockscoutTokenBalance {
   };
 }
 
+/** A Blockscout field as text, or '' when it is anything else (a damaged row must not throw). */
+const text = (v: unknown) => (typeof v === 'string' ? v : '');
+/** A Blockscout number given as text or a number, or NaN. */
+const numeric = (v: unknown) => (typeof v === 'string' || typeof v === 'number' ? Number(v) : NaN);
+
 /** A Blockscout token row's contract address, lowercase ('' when it has none). */
 export function tokenRowAddress(row: unknown): string {
   const t = (row as BlockscoutTokenBalance | null)?.token;
@@ -138,13 +128,13 @@ export function parseTokenBalances(chain: HoldingChain, json: unknown, exclude: 
     const asset = `${chain}.${address}`;
     if (exclude.includes(asset) || seen.has(address)) continue;
     seen.add(address);
-    const quotedPrice = Number(t.exchange_rate ?? 0);
+    const quotedPrice = numeric(t.exchange_rate);
     const priceUsd = Number.isFinite(quotedPrice) && quotedPrice > 0 ? quotedPrice : 0;
-    const symbol = (t.symbol ?? '').trim() || `${address.slice(0, 6)}…`;
+    const symbol = text(t.symbol).trim() || `${address.slice(0, 6)}…`;
     out.push({
-      chain, asset, symbol: symbol.slice(0, 16), name: (t.name ?? symbol).slice(0, 48), decimals,
+      chain, asset, symbol: symbol.slice(0, 16), name: (text(t.name) || symbol).slice(0, 48), decimals,
       address: address as `0x${string}`, balanceRaw, priceUsd,
-      valueUsd: priceUsd * rawToNumber(balanceRaw, decimals), icon: t.icon_url ?? undefined,
+      valueUsd: priceUsd * rawToNumber(balanceRaw, decimals), icon: text(t.icon_url) || undefined,
     });
   }
   return out;
@@ -238,12 +228,12 @@ export function blockscoutCandidates(json: unknown, exclude: string[] = [], onTr
     const decimals = parseDecimals(t.decimals);
     if (decimals === null) continue;
     if (seen.has(address)) continue; // a balance changing during pagination can appear on two pages
-    const symbol = ((t.symbol ?? '').trim() || `${address.slice(0, 6)}…`).slice(0, 16);
-    const quotedPrice = Number(t.exchange_rate ?? 0);
+    const symbol = (text(t.symbol).trim() || `${address.slice(0, 6)}…`).slice(0, 16);
+    const quotedPrice = numeric(t.exchange_rate);
     const c: TokenCandidate = {
-      address: address as `0x${string}`, symbol, name: (t.name ?? symbol).slice(0, 48), decimals,
+      address: address as `0x${string}`, symbol, name: (text(t.name) || symbol).slice(0, 48), decimals,
       priceUsd: Number.isFinite(quotedPrice) && quotedPrice > 0 ? quotedPrice : 0,
-      icon: t.icon_url ?? undefined,
+      icon: text(t.icon_url) || undefined,
     };
     if (c.priceUsd > 0) { priced.push(c); seen.add(address); }
     else {

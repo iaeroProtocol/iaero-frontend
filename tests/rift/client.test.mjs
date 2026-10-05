@@ -56,3 +56,11 @@ test('the call budget holds while storage refuses writes', async () => {
   await assert.rejects(limited.fetchQuote({ from: 'base.0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', from_amount: '1' }));
   assert.equal(limited.riftBudget('poll'), false, 'a 429 pause is kept');
 });
+
+test('after a 429 the pause is known, so automatic refreshes wait it out', async () => {
+  const c = load({ status: 429 });
+  assert.equal(c.riftPauseLeft(), 0);
+  await assert.rejects(c.fetchQuote({ from: 'base.0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', from_amount: '1' }));
+  const left = c.riftPauseLeft();
+  assert.ok(left > 50_000 && left <= 60_000, String(left));
+});

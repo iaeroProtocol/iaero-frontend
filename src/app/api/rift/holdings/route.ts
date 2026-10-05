@@ -31,8 +31,7 @@ import { EVM_ADDRESS_RE, badRequest } from '@/lib/rift/server';
 import { parseLlamaPrices } from '@/lib/rift/cost';
 import {
   HOLDING_CHAINS, MAX_UNPRICED_CANDIDATES, applyLlamaPrices, blockscoutCandidates, candidatesToHoldings, mergeTokenRows, nativeHolding,
-  callLayout, parseNative, parseTokenBalances, rankHoldings, rawToNumber, splitRead, validDecimals, wholeReadFailed, type EvmHoldingChain,
-  type Holding,
+  parseNative, parseTokenBalances, rankHoldings, rawToNumber, splitRead, validDecimals, type EvmHoldingChain, type Holding,
   type TokenCandidate,
 } from '@/lib/rift/holdings';
 import { HL_API, HYPERCORE_TOKENS, hyperCoreHoldings, parseSpotBalances, usdcForFee } from '@/lib/rift/hypercore';
@@ -61,9 +60,11 @@ const MAX_LLAMA_LOOKUPS = 80;
 const MAX_CHAIN_CANDIDATES = 120;
 /** A refused multicall is read again in halves only with at least this much time left. */
 const RETRY_MIN_MS = 2_000;
-/** Reads to find the calls that break a refused multicall: enough to narrow one among the most a chain reads
- *  (1 + 120 balances + 120 decimals) down to itself. */
+/** Reads to find the calls that break a refused multicall of unlisted tokens: enough to narrow one among the most
+ *  a chain reads (120 balances and 120 decimals) down to itself. */
 const MAX_SPLIT_READS = 16;
+/** Reads of our own tokens again, when their batch (contracts we trust) failed while the chain answers. */
+const OUR_SPLIT_READS = 4;
 /** Kept back from those reads for Blockscout's numbers, used when the chain can't be read after all. */
 const FALLBACK_RESERVE_MS = 3_000;
 /** The first read's limit, leaving time to read again in halves: a token can make the whole read slow (an
@@ -142,73 +143,93 @@ const curatedFor = (chain: EvmHoldingChain): TokenCandidate[] =>
     address: t.address!.toLowerCase() as `0x${string}`, symbol: t.symbol, name: t.name, decimals: t.decimals, priceUsd: 0,
   }));
 const MAJOR = new Set(CURATED_TOKENS.map(t => t.asset.toLowerCase()));
+/** Our listed tokens' decimals: Blockscout's numbers never override them (its figure can be wrong). */
+const CURATED_DECIMALS = new Map(CURATED_TOKENS.filter(t => t.address).map(t => [t.asset.toLowerCase(), t.decimals]));
+/** Blockscout's own numbers for a chain's tokens, ours sized with our own decimals. */
+const blockscoutTokens = (chain: EvmHoldingChain, items: unknown[]): Holding[] =>
+  parseTokenBalances(chain, items, [RIFT_DESTINATION]).map(h => {
+    const d = CURATED_DECIMALS.get(h.asset);
+    return d === undefined || d === h.decimals ? h : { ...h, decimals: d, valueUsd: h.priceUsd * rawToNumber(h.balanceRaw, d) };
+  });
 
 const DECIMALS = [{ type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint8' }] }] as const;
 
 type CallResult = { status: 'success'; result: unknown } | { status: 'failure'; error?: unknown };
 const notRead = (): CallResult => ({ status: 'failure', error: new Error('not read') });
 
-/** ETH and token balances in one multicall, plus decimals() for tokens outside our list (an amount typed by
- *  the user is converted with them, so they come from the chain, not the indexer, and only an integer from 0
- *  to 36 is taken). Short timeouts, nothing past `until`; the fallback list is the retry. A multicall refused
- *  as a whole while the chain still answers a plain balance read broke on something in it (one token answering
- *  with megabytes of data can do that): the rest is read again in halves (splitRead), so such a token fails
- *  alone, leaving time for Blockscout's numbers if that fails too. null when nothing was read (a token's own
- *  revert fails only its call). Errors are never logged: they may carry provider URLs. */
+/** ETH and token balances read on-chain, plus decimals() for tokens outside our list (an amount typed by the user
+ *  is converted with them, so they come from the chain, not the indexer, and only an integer from 0 to 36 is
+ *  taken). Two multicalls: ETH with our own listed tokens (contracts we trust), and every other token apart, each
+ *  one's decimals() right after its balanceOf(), so an airdropped token that breaks its batch costs only other
+ *  unlisted tokens. A batch refused as a whole, or out of time, while the chain still answers (the other batch did,
+ *  or a plain balance read does) is read again in halves (splitRead), leaving time for Blockscout's numbers. Short
+ *  timeouts, nothing past `until`. null when nothing was read. Errors are never logged: they may carry provider
+ *  URLs. */
 async function readBalances(chainId: 1 | 42161 | 8453, owner: Address, tokens: TokenCandidate[], until: number) {
   const timeout = Math.max(1, Math.min(RPC_TIMEOUT_MS, until - Date.now()));
   const client = createPublicClient({
     chain: VIEM_CHAINS[chainId],
     transport: fallback(rpcUrls(chainId, { server: true }).map(url => http(url, { timeout, retryCount: 0 })), { retryCount: 0 }),
   });
+  type Calls = Parameters<typeof client.multicall>[0]['contracts'];
   const listed = (t: TokenCandidate) => MAJOR.has(`${chainKey(chainId)}.${t.address}`);
-  // ETH, then each token's balanceOf() with its decimals() right after it (callLayout).
-  const layout = callLayout(tokens.map(t => !listed(t)));
-  const contracts = [
+  const balanceOf = (t: TokenCandidate) => ({ address: t.address, abi: erc20Abi, functionName: 'balanceOf', args: [owner] });
+  const ourCalls = [
     { address: MULTICALL3, abi: GET_ETH_BALANCE, functionName: 'getEthBalance', args: [owner] },
-    ...tokens.flatMap(t => [
-      { address: t.address, abi: erc20Abi, functionName: 'balanceOf', args: [owner] },
-      ...(listed(t) ? [] : [{ address: t.address, abi: DECIMALS, functionName: 'decimals', args: [] }]),
-    ]),
-  ] as unknown as Parameters<typeof client.multicall>[0]['contracts'];
-  const balanceAt = [0, ...layout.map(l => l.balance)];
+    ...tokens.filter(listed).map(balanceOf),
+  ];
+  const theirCalls = tokens.filter(t => !listed(t)).flatMap(t => [balanceOf(t), { address: t.address, abi: DECIMALS, functionName: 'decimals', args: [] }]);
   // One aggregate call per read (batchSize 0: viem would otherwise split by calldata size, not by call).
-  const read = (part: readonly unknown[], by: number) =>
-    beforeDeadline(client.multicall({ contracts: part as typeof contracts, allowFailure: true, batchSize: 0 }), by) as Promise<CallResult[]>;
+  const read = async (part: readonly unknown[], by: number): Promise<CallResult[]> => {
+    if (!part.length) return [];
+    const r = await (beforeDeadline(client.multicall({ contracts: part as unknown as Calls, allowFailure: true, batchSize: 0 }), by) as Promise<CallResult[]>);
+    return r.length === part.length ? r : part.map(notRead);
+  };
   const by = until - FALLBACK_RESERVE_MS;
   const mayRead = () => by - Date.now() > RETRY_MIN_MS;
-  // A first read that fails as a whole, or runs out of time, is read again as below.
-  let results = await read(contracts, Math.min(by, Date.now() + FIRST_READ_MS)).catch((): CallResult[] => contracts.map(notRead));
-  if (wholeReadFailed(results, balanceAt)) {
-    const eth = mayRead() ? await beforeDeadline(client.getBalance({ address: owner }), by).catch(() => null) : null;
-    // Kept even if every token read fails after all (chainHoldings then uses Blockscout's token numbers).
-    if (eth !== null) {
-      results = [
-        { status: 'success', result: eth },
-        ...await splitRead(contracts.slice(1), part => read(part, by), notRead, { maxReads: MAX_SPLIT_READS, mayRead }),
-      ];
+  const firstBy = Math.min(by, Date.now() + FIRST_READ_MS);
+  const first = (calls: readonly unknown[]) => read(calls, firstBy).catch((): CallResult[] => calls.map(notRead));
+  const refused = (r: CallResult[]) => r.length > 0 && r.every(x => x.status === 'failure');
+  let [mine, others] = await Promise.all([first(ourCalls), first(theirCalls)]);
+  if (refused(mine) || refused(others)) {
+    const probe = refused(mine) && mayRead() ? await beforeDeadline(client.getBalance({ address: owner }), by).catch(() => null) : null;
+    if (!refused(mine) || probe !== null) {
+      const again = (calls: readonly unknown[], maxReads: number) => splitRead(calls, part => read(part, by), notRead, { maxReads, mayRead });
+      [mine, others] = await Promise.all([
+        refused(mine) ? again(ourCalls.slice(1), OUR_SPLIT_READS).then((r): CallResult[] => [{ status: 'success', result: probe }, ...r]) : mine,
+        refused(others) ? again(theirCalls, MAX_SPLIT_READS) : others,
+      ]);
     }
   }
-  if (wholeReadFailed(results, balanceAt)) return null;
-  const eth = results[0];
+  // Each token's reads, in the order the two batches were laid out.
+  let ourAt = 1, theirAt = 0;
+  const reads = tokens.map((t): { balance: CallResult; decimals?: CallResult } => {
+    if (listed(t)) return { balance: mine[ourAt++] };
+    const r = { balance: others[theirAt], decimals: others[theirAt + 1] };
+    theirAt += 2;
+    return r;
+  });
+  const eth = mine[0];
+  if (eth.status !== 'success' && reads.every(r => r.balance.status !== 'success')) return null;
   const decimals = new Map(tokens.flatMap((t, i) => {
-    const at = layout[i].decimals;
-    if (at === undefined) return [];
-    const r = results[at];
+    const r = reads[i].decimals;
+    if (!r) return [];
     // Untrusted: a decimals() no real token answers counts as a failed read.
     const d = r.status === 'success' ? Number(r.result) : NaN;
     return [[t.address, validDecimals(d) ? d : null] as const];
   }));
   return {
-    incomplete: balanceAt.some(i => results[i].status === 'failure') || [...decimals.values()].some(d => d === null),
+    incomplete: eth.status !== 'success' || reads.some(r => r.balance.status !== 'success') || [...decimals.values()].some(d => d === null),
     native: eth.status === 'success' ? (eth.result as bigint) : null,
     // A token whose decimals the chain does not confirm is left out rather than mis-sized.
     tokens: tokens.map(t => (decimals.has(t.address) ? { ...t, decimals: decimals.get(t.address) ?? -1 } : t)),
     balances: tokens.map((t, i) => {
-      const r = results[layout[i].balance];
+      const r = reads[i].balance;
       const d = decimals.get(t.address);
       return r.status === 'success' && d !== null ? (r.result as bigint) : null;
     }),
+    /** Tokens whose decimals() answered a number no real token has: never listed, not even from Blockscout. */
+    bogus: new Set(tokens.filter((t, i) => reads[i].decimals?.status === 'success' && decimals.get(t.address) === null).map(t => t.address)),
   };
 }
 
@@ -267,20 +288,21 @@ async function chainHoldings(chain: EvmHoldingChain, chainId: 1 | 42161 | 8453, 
     const items = list?.items;
     let native: Holding | null = null;
     try { native = parseNative(chain, await getJson(`${blockscout}/api/v2/addresses/${owner}`, { until })); } catch { /* none */ }
-    const out = [...(items ? parseTokenBalances(chain, items, [RIFT_DESTINATION]) : []), ...(native ? [native] : [])];
+    const out = [...(items ? blockscoutTokens(chain, items) : []), ...(native ? [native] : [])];
     report.warnings.push(!items && !native ? `${chain}: balances unavailable` : `${chain}: balances could not be checked on-chain and may be out of date`);
     return out;
   }
   if (!list) report.warnings.push(`${chain}: token list unavailable, major tokens only`);
-  let out: Holding[];
-  if (read.balances.length && read.balances.every(b => b === null) && list) {
-    // Only ETH could be read on-chain: the tokens are Blockscout's own numbers, flagged.
-    out = parseTokenBalances(chain, list.items, [RIFT_DESTINATION]);
-    report.warnings.push(`${chain}: token balances could not be checked on-chain and may be out of date`);
-  } else {
-    if (read.incomplete) report.warnings.push(`${chain}: some balances could not be checked on-chain`);
-    out = candidatesToHoldings(chain, read.tokens, read.balances);
+  // A token whose on-chain read failed (an airdropped token can break a batch) keeps Blockscout's numbers, flagged;
+  // one whose decimals() answered nonsense is left out.
+  const failed = new Set(read.tokens.filter((t, i) => read.balances[i] === null && !read.bogus.has(t.address)).map(t => `${chain}.${t.address}`));
+  const filled = failed.size && list ? blockscoutTokens(chain, list.items).filter(h => failed.has(h.asset)) : [];
+  if (read.incomplete) {
+    report.warnings.push(filled.length
+      ? `${chain}: some balances could not be checked on-chain and may be out of date`
+      : `${chain}: some balances could not be checked on-chain`);
   }
+  const out = [...candidatesToHoldings(chain, read.tokens, read.balances), ...filled];
   if (read.native !== null) { const n = nativeHolding(chain, read.native, 0); if (n) out.push(n); }
   return out;
 }
