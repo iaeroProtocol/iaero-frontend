@@ -95,7 +95,9 @@ export const QUOTE_FRESH_MS = 20_000;
  *  not within QUOTE_FRESH_MS of its last answer. An answer that was an error counts too: a quote with no data would
  *  otherwise be refetched on every return to the tab. */
 export function quoteMayRefresh(state: { dataUpdatedAt: number; errorUpdatedAt: number } | undefined, now = Date.now()): boolean {
-  return riftPauseLeft(now) === 0 && now - Math.max(state?.dataUpdatedAt ?? 0, state?.errorUpdatedAt ?? 0) > QUOTE_FRESH_MS;
+  const age = now - Math.max(state?.dataUpdatedAt ?? 0, state?.errorUpdatedAt ?? 0);
+  // An answer "from the future" (the clock ran ahead, then was put back) is not fresh either.
+  return riftPauseLeft(now) === 0 && (age > QUOTE_FRESH_MS || age < -1000);
 }
 
 function logCall(kind: RiftCallKind, now: number) {
@@ -194,7 +196,7 @@ let control: { at: number; up: boolean } | null = null;
  */
 export async function riftPricing(kind: 'user' | 'background' = 'background'): Promise<boolean | null> {
   const now = Date.now();
-  if (control && now - control.at < CONTROL_TTL_MS) return control.up;
+  if (control && now >= control.at && now - control.at < CONTROL_TTL_MS) return control.up;
   if (kind === 'background' && !riftBudget('poll', now)) return null;
   try {
     await fetchQuote({ ...CONTROL, quote_mode: 'fast' }, undefined, kind === 'user' ? 'user' : 'probe');

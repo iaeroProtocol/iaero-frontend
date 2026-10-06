@@ -15,7 +15,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { canMoveTo, canPay, canRetryUnknown, capOrders, payWindowOpen, sanitizeOrder, sourceKindOf } from './order-state';
+import { canMoveTo, canPay, canRetryUnknown, capOrders, isFinalStatus, payWindowOpen, sanitizeOrder, sourceKindOf } from './order-state';
 import { ORDERS_KEY } from './keys';
 import type { OrderUpdate } from './validate';
 import type { StoredOrder } from './types';
@@ -326,17 +326,27 @@ export async function beginHyperPost(
  *  writes, so `lastPolledAt` alone would make a status first seen after a long outage look noticed late. */
 const pagePolledAt = new Map<string, number>();
 
-/** Record a status poll: the status, when it was first seen (and whether that was live), the amount out. */
-export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()): Promise<WriteResult> {
+/** Record a status poll: the status, when it was first seen (and whether that was live), the amount out. `asked`:
+ *  when the poll was asked. Two pollers can be waiting at once (another tab, the background watcher): an answer asked
+ *  before the last one recorded is older, however late it arrives. */
+export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now(), asked = now): Promise<WriteResult> {
   markPolled(id, now);
   const pagePolled = pagePolledAt.get(id);
   pagePolledAt.set(id, Math.max(pagePolled ?? 0, now));
   return patchOrder(id, prev => {
     // While storage refuses writes, a poll that only stamps its time records nothing worth carrying (see unsaved).
     const stamp = writeFailed ? prev.lastPolledAt : !prev.lastPolledAt || now - prev.lastPolledAt > POLL_STAMP_MS ? now : prev.lastPolledAt;
-    if (!u.status) return { rawStatus: u.rawStatus, lastPolledAt: stamp };
+    if (prev.statusAskedAt !== undefined && asked < prev.statusAskedAt) return { lastPolledAt: stamp };
+    // A status this page doesn't know: never on a finished order (final statuses don't change, and it is no longer
+    // polled to clear it).
+    if (!u.status) {
+      return isFinalStatus(prev.status) || prev.rawStatus === u.rawStatus ? { lastPolledAt: stamp }
+        : { rawStatus: u.rawStatus, lastPolledAt: stamp, statusAskedAt: asked };
+    }
     // An answer older than what is stored (two pollers, out of order): keep the newer status.
     if (!canMoveTo(prev.status, u.status)) return { lastPolledAt: stamp };
+    // Recorded with the answer when it changes something (a poll that only stamps its time writes nothing new).
+    const changes = u.status !== prev.status || prev.rawStatus !== undefined || (u.amountOut != null && u.amountOut !== prev.amountOut);
     const isNew = !prev.statusTimes[u.status];
     // Not watched live: no poll before (orders saved by older versions), or a long gap since the last one.
     const polledBefore = Math.max(prev.lastPolledAt ?? 0, pagePolled ?? 0);
@@ -348,6 +358,7 @@ export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()):
       statusTimes: isNew ? { ...prev.statusTimes, [u.status]: now } : prev.statusTimes,
       statusLate: late ? { ...prev.statusLate, [u.status]: true } : prev.statusLate,
       lastPolledAt: isNew ? now : stamp,
+      ...(changes ? { statusAskedAt: asked } : {}),
       // Rift has seen a deposit: whether the last payment attempt went out is no longer in doubt. Not on "expired":
       // Rift saw none, which settles nothing about a payment in doubt (it must not read as "a payment was sent").
       ...(u.status !== 'awaiting_deposit' && u.status !== 'expired' ? { payUnknown: false, payRequestedAt: undefined } : {}),

@@ -99,3 +99,10 @@ test('round 7: an automatic quote refresh waits 20 s after any answer, an error 
   c.store.set('iaero.rift.calls.v1', JSON.stringify({ t: [], pausedUntil: now + 30_000, lastProbe: 0 }));
   assert.equal(c.quoteMayRefresh({ dataUpdatedAt: now - 60_000, errorUpdatedAt: 0 }, now), false, 'in a rate-limit pause');
 });
+
+test('round 8: a quote answer stamped in the future (the clock was put back) is not fresh: refreshes go on', () => {
+  const c = load();
+  const now = Date.now();
+  assert.equal(c.quoteMayRefresh({ dataUpdatedAt: now + 3600_000, errorUpdatedAt: 0 }, now), true);
+  assert.equal(c.quoteMayRefresh({ dataUpdatedAt: now + 500, errorUpdatedAt: 0 }, now), false, 'clocks a moment apart');
+});

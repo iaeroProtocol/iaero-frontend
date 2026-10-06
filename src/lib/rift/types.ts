@@ -125,6 +125,9 @@ export interface StoredOrder {
   /** The user hid this order once its pay window had closed and a check found no payment. It stays tracked, at
    *  the idle rate, and comes back if Rift reports a payment. */
   hiddenAt?: number;
+  /** Hidden after a check found a transaction from the account since the payment was requested, which may be this
+   *  payment (stuck on a low fee): Buy still asks before another order. */
+  hiddenPending?: boolean;
   /** Bitcoin payments to the deposit address, observed on mempool.space. `missing`: seen before, no longer
    *  found (dropped or replaced); `seenLate`: first seen already confirmed, so firstSeenAt is not the send time. */
   btc?: {
@@ -148,6 +151,9 @@ export interface StoredOrder {
   /** Statuses first seen after a gap of minutes: their time is when the page noticed, not when it happened. */
   statusLate?: Partial<Record<RiftOrderStatus, boolean>>;
   lastPolledAt?: number;
+  /** When the status poll last recorded here was asked (storage.ts applyStatusUpdate): an answer asked before it is
+   *  older, however late it arrives, and changes nothing. */
+  statusAskedAt?: number;
   /** A status this app does not know yet, as Rift wrote it. */
   rawStatus?: string;
   /** The order's terminal status this browser has already notified about. */

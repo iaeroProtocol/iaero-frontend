@@ -165,9 +165,11 @@ export function nextBtcRecord(
 export const btcPositive = (a: StoredOrder['btc'], b: StoredOrder['btc']) =>
   (!a?.txid && !!b?.txid) || (!btcConfirmed(a) && btcConfirmed(b)) || (!!a?.missing && !b?.missing) || (!!a?.emptyChecks && !b?.emptyChecks);
 
-/** One look at a Bitcoin deposit address (OrderTracker.tsx, watch.ts): when, whether storage was refusing writes
+/** One look at a Bitcoin deposit address (OrderTracker.tsx, watch.ts): when it was asked (`at`: what looks are
+ *  ordered and timed by: an answer asked before a newer sighting was recorded is older, however late it arrives) and
+ *  answered (`answeredAt`, `at` if not given: how fresh it is when applied), whether storage was refusing writes
  *  then, and from when a run of empty answers counts as evidence that nothing was sent (btcCheckpoint). */
-export interface BtcLook { at: number; failing: boolean; checkpoint: number }
+export interface BtcLook { at: number; answeredAt?: number; failing: boolean; checkpoint: number }
 
 /** What a look found: the address's payments, or 'known': it lists none, but mempool.space still knows the payment
  *  recorded earlier (its address index can lag behind), so nothing new (bitcoin.ts lookAtBtcAddress). */
@@ -179,7 +181,7 @@ export type BtcSeen = { payments: { txid: string; confirmations: number }[]; tot
  *  applied later, or made while storage refuses writes, keeps only what it saw (btcPositive): other tabs may have
  *  seen the payment since without recording it. */
 export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcLook): Pick<StoredOrder, 'btc'> | Record<string, never> {
-  const positiveOnly = look.failing || Date.now() - look.at > BTC_LOOK_FRESH_MS;
+  const positiveOnly = look.failing || Date.now() - (look.answeredAt ?? look.at) > BTC_LOOK_FRESH_MS;
   if (seen === 'known') {
     // The payment recorded is still there: a run of empty answers (or "missing") ends.
     if (!prev?.emptyChecks && !prev?.missing) return {};
@@ -352,7 +354,7 @@ function tokenMatchesSource(chain: SourceChainKey, token: StoredOrder['token']):
 /** Optional fields that must have their type when present; a wrong one is dropped, not the order. */
 const OPTIONAL_NUMBERS = [
   'payRequestedAt', 'payAttemptAt', 'payNonce', 'depositNonce', 'preSendNonce', 'preSendAt', 'hlNonce', 'depositSentAt', 'depositConfirmedAt', 'lastPolledAt',
-  'deliveredAtChain', 'marketUsdIn', 'marketIaeroUsd', 'gasDeskUsd', 'hlPostedAt', 'hiddenAt',
+  'deliveredAtChain', 'marketUsdIn', 'marketIaeroUsd', 'gasDeskUsd', 'hlPostedAt', 'hiddenAt', 'statusAskedAt',
 ] as const;
 const OPTIONAL_UINTS = ['depositReceivedRaw', 'baseFromBlock', 'deliveryScannedTo'] as const;
 const OPTIONAL_DECIMALS = ['expectedOut', 'amountOut'] as const;

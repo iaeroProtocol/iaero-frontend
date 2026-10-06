@@ -137,11 +137,12 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
       const every = Math.max(regular, document.hidden ? 60_000 : 0);
       if (!polledWithin(order.id, every - 1000) && riftBudget('track')) {
         try {
+          const asked = Date.now();
           const u = parseOrderUpdate(await getOrder(order.id, undefined, 'track'), order.id);
           if (stop) return;
           failures = 0;
           setPollFailures(0);
-          await applyStatusUpdate(order.id, u);
+          await applyStatusUpdate(order.id, u, Date.now(), asked);
           if (u.status && isFinalStatus(u.status)) return;
         } catch (e) {
           if (stop) return;
@@ -247,13 +248,14 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
       if (!shared) {
         try {
           markPolled(`btc:${order.id}`); // the background watcher (watch.ts) leaves it to this card too
+          const asked = Date.now();
           const seen = await lookAtBtcAddress(order.depositAddress, orderRef.current.btc?.txid);
           errors = 0;
           empties = seen !== 'known' && !seen.payments.length ? empties + 1 : 0;
           if (!stop) { setBtcErrors(0); setBtcUnseen(storageFailing() && empties >= BTC_MISSING_AFTER); }
           if (!stop) {
             // Taken here, not in the change (order-state.ts btcLookChange): a change storage refused is applied later.
-            const look = { at: Date.now(), failing: storageFailing() };
+            const look = { at: asked, answeredAt: Date.now(), failing: storageFailing() };
             await patchOrder(order.id, prev => btcLookChange(prev, seen, look));
           }
         } catch {
@@ -312,8 +314,9 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
   const [checking, setChecking] = useState(false);
   const [checkSaid, setCheckSaid] = useState<'nothing' | 'partial' | 'pending' | 'reverted' | 'error' | null>(null);
   async function judgePayment(): Promise<Verdict> {
+    const asked = Date.now();
     const u = parseOrderUpdate(await getOrder(order.id), order.id);
-    await applyStatusUpdate(order.id, u);
+    await applyStatusUpdate(order.id, u, Date.now(), asked);
     if (u.status !== 'awaiting_deposit') return 'moved';
     if (kind === 'evm') {
       if (!sourcePublic) throw new Error('no client');
@@ -343,8 +346,12 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
     }));
   };
   /** Out of the way once its window has closed and a check found nothing; still tracked, at the idle rate. */
-  const hide = () => { const at = Date.now(); void patchOrder(order.id, prev => (canHide(prev, at) ? { hiddenAt: at } : {})); };
-  const showChecks = () => { void patchOrder(order.id, { hiddenAt: undefined }); };
+  const hide = () => {
+    const at = Date.now();
+    const pending = checkSaid === 'pending' ? true : undefined;
+    void patchOrder(order.id, prev => (canHide(prev, at) ? { hiddenAt: at, hiddenPending: pending } : {}));
+  };
+  const showChecks = () => { void patchOrder(order.id, { hiddenAt: undefined, hiddenPending: undefined }); };
   async function checkPayment(thenPay = false) {
     if (thenPay && !settlementAck) return;
     setChecking(true);
@@ -581,7 +588,9 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
               <div>This order delivers iAERO to <span className="font-mono">{short(order.toAddress)}</span>. Connect that wallet to pay it.</div>
             ) : ps === 'unknown' && order.hiddenAt ? (
               <>
-                <div>You hid this order after a check found no payment. It is still tracked, but a wallet request may still be pending. Check your wallet before starting another order.</div>
+                <div>{order.hiddenPending
+                  ? 'You hid this order after a check found a transaction from your account that may be this payment. It is still tracked: if that transaction confirms, this order completes. Check your wallet before starting another order.'
+                  : 'You hid this order after a check found no payment. It is still tracked, but a wallet request may still be pending. Check your wallet before starting another order.'}</div>
                 {/* No Dismiss: its payment was never proven absent, so the order stays until Rift settles or expires it. */}
                 <div className="flex flex-wrap gap-2">
                   <Button variant="outline" onClick={showChecks} className="border-slate-600 text-slate-200">Show payment checks</Button>

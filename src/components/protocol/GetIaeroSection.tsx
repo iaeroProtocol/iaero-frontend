@@ -53,7 +53,7 @@ import {
 } from '@/lib/rift/hypercore';
 import {
   DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, assessCost, costNeedsTick, costText, ethereumGasDeskWei, formatPct,
-  gasDeskChains, gasDeskUsd, priceDropPct, type CostCheck, type CostLevel,
+  gasDeskChains, gasDeskUsd, gasSwallows, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
 import {
   btcLookChange, btcUnpaid, canPay, canRetryUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, PAY_HEARTBEAT_MS, paymentFacts, payState,
@@ -474,11 +474,15 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     const e = expectedFor(q, px, gasWei);
     const usdOut = e && px.iaeroUsd ? e.out * px.iaeroUsd : null;
     const atLeast = gasWei === undefined ? expectedFor(q, px, ETHEREUM_GAS_FLOOR_WEI) : e;
-    // Paid in ETH or WETH, the Ethereum gas charge is compared with the amount itself: no market price needed.
-    let swallowed = false;
+    // Without iAERO's price too (cost.ts gasSwallows): paid in ETH or WETH, the Ethereum charge against the amount;
+    // otherwise the charge in USD against what is paid.
+    let payWei: bigint | undefined;
     if (ETH_UNITS.has(token?.asset.toLowerCase() ?? '')) {
-      try { swallowed = decimalToRaw(q.from_amount, 18) <= ethereumGasDeskWei(gasDeskChains(q.route), gasWei ?? ETHEREUM_GAS_FLOOR_WEI); } catch { /* not a decimal: the quote check refuses it */ }
+      try { payWei = decimalToRaw(q.from_amount, 18); } catch { /* not a decimal: the quote check refuses it */ }
     }
+    const swallowed = gasSwallows({
+      chains: gasDeskChains(q.route), gasWei, ethUsd: px.ethUsd, payWei, payUsd: usdIn === null ? null : usdIn - hlFeeUsd,
+    });
     return { check: assessCost(usdIn, usdOut), usdIn, usdOut, tooSmall: swallowed || (usdOut !== null && usdOut <= 0) || (!!atLeast && atLeast.out <= 0) };
   };
   const renderNow = Date.now();
@@ -529,6 +533,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     // One purchase at a time: an order card can't open a second wallet prompt while Buy is still running.
     if (startingRef.current && !opts.fromStart) { setError('Finish the purchase in progress first.'); return; }
     if (payingRef.current.has(o.id)) return;
+    // One payment at a time across order cards too: two wallet prompts could both be approved (and a second card's
+    // network switch could disturb the first's).
+    if (payingRef.current.size) { setError('Finish the payment in progress first.'); return; }
     payingRef.current.add(o.id);
     setPayingId(o.id);
     setError(null);
@@ -571,7 +578,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   /** Rift fills at the price when the payment arrives, so its current price for this order must not be worse
    *  than when it was made by more than the tolerance. 'error': the price could not be checked right now. */
   async function priceCheck(o: StoredOrder, quoteAt?: number): Promise<'ok' | 'dropped' | 'error'> {
-    if (quoteAt !== undefined && Date.now() - quoteAt < FRESH_QUOTE_MS) return 'ok';
+    // (A quote "fetched in the future", by a clock since put back, is checked again.)
+    if (quoteAt !== undefined && Date.now() - quoteAt >= 0 && Date.now() - quoteAt < FRESH_QUOTE_MS) return 'ok';
     setBusy('Checking the latest price…');
     try {
       const q = await checkQuote(await fetchQuote({ from: o.token.asset, from_amount: o.fromAmount }), {
@@ -668,10 +676,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     // An order paid before: Rift's status, read now (the last attempt may have gone through after all).
     if (o.payAttemptAt) {
       let u: ReturnType<typeof parseOrderUpdate>;
+      const asked = Date.now();
       try { u = parseOrderUpdate(await getOrder(id), id); } catch {
         throw new Error('Couldn’t check this order with Rift. Nothing was sent; try again in a moment.');
       }
-      await applyStatusUpdate(id, u);
+      await applyStatusUpdate(id, u, Date.now(), asked);
       if (u.status !== 'awaiting_deposit') {
         throw new Error(u.status ? 'Rift already has a payment for this order, or has closed it. Nothing more was sent.'
           : 'Rift reports a status this page doesn’t know yet. Nothing was sent; the order card keeps checking.');
@@ -976,8 +985,10 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         }
       }
       // A payment this page couldn't confirm (a lost wallet answer) may have gone out: buying again could buy twice.
-      // Not for an order the user hid after a check found nothing.
-      const doubtful = mine.find(x => !x.hiddenAt && (payState(x, Date.now()) === 'unknown' || payState(x, Date.now()) === 'requesting'));
+      // Not for an order the user hid after a check found nothing (but still for one hidden after a check found a
+      // transaction that may be its payment).
+      const doubtful = mine.find(x => (!x.hiddenAt || x.hiddenPending)
+        && (payState(x, Date.now()) === 'unknown' || payState(x, Date.now()) === 'requesting'));
       if (doubtful && !window.confirm(`This page couldn’t confirm whether the payment for order ${doubtful.id} went out. If it did, another order buys twice. Create another order anyway?`)) {
         throw new Error('Kept the order whose payment is unconfirmed. Nothing was created: check that order first.');
       }
@@ -1070,7 +1081,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       const seenOut = accepted ? accepted.quote.estimated_amount_out : justChanged ? s!.prevOut! : quote.estimated_amount_out;
       let q = accepted?.quote ?? quote;
       let fetchedAt = accepted?.fetchedAt ?? quoteQuery.dataUpdatedAt;
-      if (Date.now() - fetchedAt > RECHECK_AFTER_MS || Date.parse(q.expires_at) - Date.now() < 60_000 || used(q.id)) {
+      if (Date.now() - fetchedAt > RECHECK_AFTER_MS || Date.now() < fetchedAt || Date.parse(q.expires_at) - Date.now() < 60_000 || used(q.id)) {
         setBusy('Checking the latest price…');
         // For the token and amount reviewed, not whatever the form shows now.
         q = await checkQuote(await fetchQuote({ from: want.asset, from_amount: want.amount }), {
@@ -1186,11 +1197,12 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     const o = loadOrders().find(x => x.id === rendered.id) ?? rendered; // as stored now
     if (!btcUnpaid(o)) return true;
     let seen: Awaited<ReturnType<typeof lookAtBtcAddress>>;
+    const asked = Date.now();
     try { seen = await lookAtBtcAddress(o.depositAddress, o.btc?.txid); } catch {
       setError(`Couldn’t check the Bitcoin address of order ${o.id} before removing it, so it stays. Try again in a moment.`);
       return false;
     }
-    const look = { at: Date.now(), failing: storageFailing() };
+    const look = { at: asked, answeredAt: Date.now(), failing: storageFailing() };
     await patchOrder(o.id, prev => btcLookChange(prev, seen, look));
     if (seen === 'known' || seen.payments.length) {
       setError(`A payment to the Bitcoin address of order ${o.id} was just found, so it stays, and is tracked here.`);
@@ -1643,11 +1655,13 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
           <RecentOrders
             orders={orders} activeId={activeId} onSelect={setActiveId}
             onClearFinished={async () => {
-              // Each order on its own: one whose Bitcoin address can't be checked, or has a payment, stays.
-              const ids: string[] = [];
-              for (const o of orders.filter(x => clearable(x, Date.now()))) if (await stillUnpaid(o)) ids.push(o.id);
-              void removeOrders(ids, clearable);
-              if (activeId && ids.includes(activeId)) setActiveId(null);
+              // Each order on its own, removed right after its own look: one whose Bitcoin address can't be checked,
+              // or has a payment, stays.
+              for (const o of orders.filter(x => clearable(x, Date.now()))) {
+                if (!(await stillUnpaid(o))) continue;
+                await removeOrders([o.id], clearable);
+                if (o.id === activeId && !loadOrders().some(x => x.id === o.id)) setActiveId(null);
+              }
             }}
           />
         </RiftErrorBoundary>

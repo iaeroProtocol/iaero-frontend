@@ -637,3 +637,36 @@ test('round 7: a status flipping while storage is full is carried once, not once
   assert.equal(saved.rawStatus, 'held_for_review');
   assert.equal(t.unsavedChanges(), 0);
 });
+
+// --- Round 8 ---
+
+const known = (status, amountOut = null) => ({ status, rawStatus: status, amountOut });
+const unknownStatus = raw => ({ status: null, rawStatus: raw, amountOut: null });
+
+test('round 8: a late answer with a status this page doesn\'t know never lands on a finished order', async () => {
+  const o = order();
+  const h = harness(o);
+  const t = h.tab();
+  const t0 = Date.now();
+  await t.applyStatusUpdate(o.id, known('delivered', '10'), t0 + 1000, t0);
+  // Asked even later than "delivered" (another poller): still, a final status doesn't change.
+  await t.applyStatusUpdate(o.id, unknownStatus('held_for_review'), t0 + 3000, t0 + 2000);
+  assert.equal(h.read().status, 'delivered');
+  assert.equal(h.read().rawStatus, undefined, 'no "it keeps checking" on an order nothing polls any more');
+});
+
+test('round 8: a status answer asked before the last one recorded changes nothing, however late it arrives', async () => {
+  const o = order();
+  const h = harness(o);
+  const t = h.tab();
+  const t0 = Date.now();
+  // The watcher asked at t0 + 5 s: a status this page doesn't know (the QR code / Pay pauses)...
+  await t.applyStatusUpdate(o.id, unknownStatus('held_for_review'), t0 + 6000, t0 + 5000);
+  // ...then the card's answer, asked at t0, arrives with the older "awaiting_deposit".
+  await t.applyStatusUpdate(o.id, known('awaiting_deposit'), t0 + 9000, t0);
+  assert.equal(h.read().rawStatus, 'held_for_review', 'the newer answer stands');
+  // An answer asked later still applies.
+  await t.applyStatusUpdate(o.id, known('awaiting_deposit'), t0 + 31_000, t0 + 30_000);
+  assert.equal(h.read().rawStatus, undefined);
+  assert.equal(h.read().statusAskedAt, t0 + 30_000);
+});

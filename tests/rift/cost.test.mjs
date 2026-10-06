@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { costLevel, costVsMarketPct, deliveredVsQuotedPct, formatPct, priceDropPct } from '../../src/lib/rift/cost.ts';
+import { costLevel, costVsMarketPct, deliveredVsQuotedPct, formatPct, gasSwallows, priceDropPct } from '../../src/lib/rift/cost.ts';
 
 test('cost against market prices, from a real quote', () => {
   // $500 in, 830 iAERO out at $0.5976: $496.01 of iAERO, so 0.8%.
@@ -118,4 +118,25 @@ test('cost check: zero output, unknown and disagreeing prices all need a tick', 
   assert.equal(assessCost(100, 125).kind, 'disagree', 'a 25% "gain" means a price is wrong');
   assert.equal(costNeedsTick(assessCost(100, 125)), true);
   assert.equal(assessCost(100, 101).kind, 'ok', 'within noise');
+});
+
+test('round 8: an order the gas charge would take whole is refused from what is known, without iAERO\'s price', () => {
+  const ETH = [1, 8453]; // a route that runs on Ethereum (and Base)
+  const gwei = n => BigInt(Math.round(n * 1e9));
+  // Paid in ETH or WETH: against the amount itself (1.6M gas at 2 gwei is 0.0032 ETH).
+  assert.equal(gasSwallows({ chains: ETH, gasWei: gwei(2), payWei: 500_000_000_000_000n }), true);
+  assert.equal(gasSwallows({ chains: ETH, gasWei: gwei(2), payWei: 10_000_000_000_000_000n }), false);
+  assert.equal(gasSwallows({ chains: [8453], gasWei: gwei(2), payWei: 1_000n }), false, 'no Ethereum step');
+  // Another token: the charge in USD against the payment's value. $20 of USDC at 5 gwei and ETH at $4,000: $32.
+  assert.equal(gasSwallows({ chains: ETH, gasWei: gwei(5), ethUsd: 4000, payUsd: 20 }), true);
+  assert.equal(gasSwallows({ chains: ETH, gasWei: gwei(5), ethUsd: 4000, payUsd: 50 }), false);
+  // Gas price unknown: at least the floor (0.5 gwei, $3.20 here).
+  assert.equal(gasSwallows({ chains: ETH, ethUsd: 4000, payUsd: 2 }), true);
+  assert.equal(gasSwallows({ chains: ETH, ethUsd: 4000, payUsd: 5 }), false);
+  // No ETH price, or no price for the payment: nothing to compare (the cost check asks for the tick instead).
+  assert.equal(gasSwallows({ chains: ETH, gasWei: gwei(5), payUsd: 20 }), false);
+  assert.equal(gasSwallows({ chains: ETH, gasWei: gwei(5), ethUsd: 4000, payUsd: null }), false);
+  // Layer 2 steps only: about $0.10 each.
+  assert.equal(gasSwallows({ chains: [42161, 8453], payUsd: 0.15 }), true);
+  assert.equal(gasSwallows({ chains: [42161, 8453], payUsd: 5 }), false);
 });

@@ -456,3 +456,21 @@ test('round 7: an answer older than the latest sighting recorded never sets that
   assert.equal(later.btc.confirmed, true);
   assert.equal(later.btc.lastSeenAt, t0 + 6000);
 });
+
+// --- Round 8 ---
+
+test('round 8: a look is timed and ordered by when it was asked, and judged fresh by when it was answered', () => {
+  const cp = T0 + 60 * 60_000 + BTC_GRACE_MS;
+  const t = cp + 4 * 60_000;
+  // A slow answer (asked at t, back 12 s later) applied as it arrives is fresh: its empty answer completes the run.
+  const run = { emptyChecks: 2, emptySince: cp + 60_000 };
+  const r = clockAt(t + 12_000, () => btcLookPatch(run, EMPTY, { at: t, answeredAt: t + 12_000, failing: false, checkpoint: cp }));
+  assert.equal(r.btc?.emptyChecks, 3);
+  assert.equal(r.btc?.emptyAt, t, 'proven as of when it was asked');
+  // An answer asked before a newer sighting was recorded is older, however late it arrives: it can't set it back
+  // (a fee bump's txid replaced by the old one, a payment count going down).
+  const A = 'ab'.repeat(32), B = 'cd'.repeat(32);
+  const newer = { txid: B, confirmations: 0, firstSeenAt: T0, totalSats: '100000', payments: 1, lastSeenAt: t + 3000 };
+  assert.deepEqual(clockAt(t + 12_000, () => btcLookPatch(newer, { payments: [{ txid: A, confirmations: 0 }], totalSats: 100000n },
+    { at: t, answeredAt: t + 12_000, failing: false, checkpoint: cp })), {});
+});

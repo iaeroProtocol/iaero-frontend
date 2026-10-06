@@ -78,8 +78,9 @@ export function useOrderWatcher(
           if (polledWithin(o.id, idle ? IDLE_POLL_MS : POLL_MS - 5000, now)) continue;
           if (!riftBudget('poll', now)) break;
           try {
+            const asked = Date.now();
             const u = parseOrderUpdate(await getOrder(o.id, undefined, 'poll'), o.id);
-            if (!stop) await applyStatusUpdate(o.id, u);
+            if (!stop) await applyStatusUpdate(o.id, u, Date.now(), asked);
           } catch {
             markPolled(o.id); // next round, not straight away from another tab
           }
@@ -109,9 +110,10 @@ export function useOrderWatcher(
           markPolled(key);
           try {
             const latest = loadOrders().find(x => x.id === o.id) ?? o; // the payment recorded as of now
+            const asked = Date.now();
             const seen = await lookAtBtcAddress(o.depositAddress, latest.btc?.txid);
             if (stop) break;
-            const look = { at: Date.now(), failing: storageFailing() };
+            const look = { at: asked, answeredAt: Date.now(), failing: storageFailing() };
             await patchOrder(o.id, prev => btcLookChange(prev, seen, look));
           } catch { /* mempool.space unreachable, or can't say: next round */ }
         }

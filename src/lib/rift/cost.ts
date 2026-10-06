@@ -157,6 +157,19 @@ export const gasDeskChains = (route: { execution?: { mode: string; chain?: numbe
 export const ethereumGasDeskWei = (chains: number[], ethGasPriceWei: bigint): bigint =>
   chains.includes(1) ? ethGasPriceWei * BigInt(ETHEREUM_GAS_DESK_UNITS) : 0n;
 
+/**
+ * Whether the gas desk's charge would take the whole order, from what is known, without needing iAERO's price:
+ * paid in ETH or WETH (`payWei`), the Ethereum charge against the amount itself; otherwise the charge in USD against
+ * the payment's USD value (`payUsd`, when its price and ETH's are known). An unknown Ethereum gas price counts as
+ * ETHEREUM_GAS_FLOOR_WEI: an order that would certainly be swallowed is refused, not ticked through.
+ */
+export function gasSwallows(x: { chains: number[]; gasWei?: bigint; ethUsd?: number; payWei?: bigint; payUsd?: number | null }): boolean {
+  const gas = x.gasWei ?? ETHEREUM_GAS_FLOOR_WEI;
+  if (x.payWei !== undefined) return x.payWei <= ethereumGasDeskWei(x.chains, gas);
+  const usd = gasDeskUsd(x.chains, gas, x.ethUsd);
+  return x.payUsd != null && x.payUsd > 0 && usd !== null && usd > 0 && usd >= x.payUsd;
+}
+
 /** Expected gas-desk charge in USD, or null when Ethereum is involved and its gas price or ETH price is unknown. */
 export function gasDeskUsd(chains: number[], ethGasPriceWei: bigint | undefined, ethUsd: number | undefined): number | null {
   let usd = 0;
