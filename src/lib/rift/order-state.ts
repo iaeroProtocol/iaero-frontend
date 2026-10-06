@@ -336,6 +336,19 @@ export function btcNeedsLook(o: StoredOrder, now = Date.now()): boolean {
   return !btcConfirmed(o.btc) && now - (o.statusTimes.expired ?? o.createdAt) < BTC_LOOK_AFTER_EXPIRY_MS;
 }
 
+/** Whether another Bitcoin order, paid as well, could buy twice with this one (Buy asks first): it still waits for its
+ *  payment and its address may yet receive one. 'open': within its pay window with nothing seen; 'closed': its window
+ *  closed with nothing seen, before looks have shown that nothing was sent (a payment sent in its last minutes may still
+ *  arrive); 'missing': a payment seen is no longer visible, but may still confirm. Null for one whose payment is seen,
+ *  or proven absent. */
+export function btcStillPayable(o: StoredOrder, now: number): 'open' | 'closed' | 'missing' | null {
+  if (KIND_OF[o.sourceChain] !== 'bitcoin' || o.status !== 'awaiting_deposit') return null;
+  if (o.btc?.txid && !o.btc.missing) return null;
+  if (payWindowOpen(o, 'bitcoin', now)) return 'open';
+  if (o.btc?.missing) return 'missing';
+  return btcUnchecked(o, now) ? 'closed' : null;
+}
+
 /** Rift expired the order after its Bitcoin payment went missing (most likely dropped or replaced). The user may
  *  clear it, but it is never dropped automatically: only their wallet can say the payment didn't go through. */
 export const missingButExpired = (o: StoredOrder) => o.status === 'expired' && !!o.btc?.missing;

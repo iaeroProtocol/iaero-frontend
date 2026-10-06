@@ -6,7 +6,7 @@ import {
   BTC_MISSING_AFTER, BTC_GRACE_MS, btcCheckpoint, btcConfirmed, btcLookPatch, btcNeedsLook, btcPositive, btcUnchecked, btcUnpaid, canRetryUnknown, BTC_EMPTY_SPAN_MS, BTC_LOOK_FRESH_MS, btcLookEveryMs, doubtButExpired,
   PRE_SEND_COOLDOWN_MS, btcLookChange, nonceUsed, paymentFacts, pastDeadline, windowCloseChange,
   clearable, canHide, isOutOfDate, missingButExpired, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
-  BTC_EMPTY_GAP_MS, shownOutOfDate, btcLookSoon, btcWatchEveryMs, BTC_WATCH_LOOK_MS,
+  BTC_EMPTY_GAP_MS, shownOutOfDate, btcLookSoon, btcWatchEveryMs, BTC_WATCH_LOOK_MS, btcStillPayable,
 } from '../../src/lib/rift/order-state.ts';
 
 const T0 = 1_790_930_000_000;
@@ -717,4 +717,23 @@ test('round 15: the background watcher alone proves an unpaid order and finds a 
   const dropped = T0 + 100 * 60_000;
   const missing = sim(t => (t < dropped ? seenAns : EMPTY), x => !!x.btc?.missing);
   assert.ok(missing.t !== null && missing.t - dropped < 12 * 60_000, `missing ${missing.t === null ? 'never' : `${(missing.t - dropped) / 60_000} min after the drop`}`);
+});
+
+// --- Round 16 ---
+
+test('round 16: Buy asks before a second Bitcoin order while an earlier one may yet receive its payment', () => {
+  // Bitcoin auditor, Low: the question stopped once the earlier order's window closed, though a payment sent in its
+  // last minutes may still arrive (its card then offers a new order, its list badge says "Out of date").
+  const o = btcOrd();
+  const cp = btcCheckpoint(o);
+  assert.equal(btcStillPayable(o, T0 + 30 * 60_000), 'open');
+  assert.equal(btcStillPayable(o, T0 + 61 * 60_000), 'closed', 'window closed, nothing seen, nothing ruled out');
+  assert.equal(btcStillPayable(o, T0 + 5 * 3600_000), 'closed', '...for as long as no look has ruled it out');
+  assert.equal(btcStillPayable({ ...o, btc: { emptyChecks: 5, emptySince: cp + 1000, emptyLastAt: cp + 121_000, emptyAt: cp + 121_000 } }, cp + 200_000), null,
+    'proven: nothing was sent');
+  assert.equal(btcStillPayable({ ...o, btc: { txid: 'ab'.repeat(32), firstSeenAt: T0 } }, T0 + 61 * 60_000), null, 'its payment seen');
+  assert.equal(btcStillPayable({ ...o, btc: { txid: 'ab'.repeat(32), firstSeenAt: T0, missing: true } }, T0 + 61 * 60_000), 'missing');
+  assert.equal(btcStillPayable({ ...o, btc: { txid: 'ab'.repeat(32), firstSeenAt: T0, missing: true } }, T0 + 30 * 60_000), 'open');
+  assert.equal(btcStillPayable({ ...o, status: 'expired' }, T0 + 61 * 60_000), null, 'expired: Rift takes no payment');
+  assert.equal(btcStillPayable(order(), T0 + 1000), null, 'not a Bitcoin order');
 });

@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterGasOut, cardCostCheck, clickQuoteMove, costLevel, costVsMarketPct, costWorseThanAccepted, deliveredVsQuotedPct, formatPct, gasDeskUsd, gasSharePct, gasSwallows, parseLlamaQuotes, priceDropPct, seenBaseline, tickCovers } from '../../src/lib/rift/cost.ts';
+import { afterGasOut, cardCostCheck, clickQuoteMove, costLevel, costVsMarketPct, costWorseThanAccepted, deliveredVsQuotedPct, formatPct, gasDeskUsd, gasSharePct, gasSwallows, nextShown, parseLlamaQuotes, priceDropPct, seenBaseline, tickCovers } from '../../src/lib/rift/cost.ts';
 
 test('cost against market prices, from a real quote', () => {
   // $500 in, 830 iAERO out at $0.5976: $496.01 of iAERO, so 0.8%.
@@ -311,7 +311,9 @@ test('round 15: a cost tick covers only the route charges it was given with', ()
   assert.equal(tickCovers(tick, 'k', unknown, { chains: [42161, 8453], share: 2.4 }), true, 'within half a point');
   assert.equal(tickCovers(tick, 'k', unknown, { chains: [42161, 8453], share: 3 }), false, 'the charge\'s share grew');
   assert.equal(tickCovers({ ...tick, share: null }, 'k', unknown, l2), false, 'ticked unvalued, valued now: asked again');
-  assert.equal(tickCovers(tick, 'k', unknown, { chains: [42161, 8453], share: null }), true, 'not valued now: no new news');
+  // Round 16: valued when ticked, unvalued now (a gas price unread for minutes): ticked again; unvalued both times: covered.
+  assert.equal(tickCovers(tick, 'k', unknown, { chains: [42161, 8453], share: null }), false, 'valued then, not now');
+  assert.equal(tickCovers({ ...tick, share: null }, 'k', unknown, { chains: [42161, 8453], share: null }), true, 'unvalued both times');
   const eth = { chains: [1, 8453], share: 20 };
   assert.equal(tickCovers({ ...tick, ...eth }, 'k', unknown, { chains: [42161, 8453], share: 2 }), true, 'a step dropped: cheaper');
   // As before: the token and amount, the kind of check, and a known cost's size.
@@ -326,4 +328,43 @@ test('round 15: a cost tick covers only the route charges it was given with', ()
   assert.equal(gasSharePct('10', 1.8), 82);
   assert.equal(gasSharePct('10', null), null);
   assert.equal(gasSharePct('0', 1), null);
+});
+
+test('round 16: a view replaced within 3 s of appearing was never read: a burst of changes keeps the one read before it', () => {
+  // Quotes auditor, Medium (round-15 regression): the refresh bringing a route with an Ethereum step makes the page read
+  // Ethereum's gas price, which lands a moment later and changes what arrives; the unread Ethereum view became the one
+  // "seen", so a click a second later bought it without the route-change question.
+  const px = { ethUsd: 2500, iaeroUsd: 1 };
+  const gas = 300_000_000n; // 0.3 gwei
+  const T = 1_790_930_000_000;
+  const l2 = { out: '100', chains: [8453], after: 99.9 };
+  let s = nextShown(null, 'k', l2, T);
+  s = nextShown(s, 'k', { out: '100', chains: [8453, 1], after: null }, T + 30_000); // the refresh: Ethereum, unvalued
+  s = nextShown(s, 'k', { out: '100', chains: [8453, 1], after: afterGasOut('100', [8453, 1], gas, px) }, T + 30_500); // its gas
+  const seen = seenBaseline(s, 'k', s.view, T + 31_500);
+  assert.deepEqual(seen, l2, 'the view read before the burst');
+  const m = clickQuoteMove(seen, { out: '100', chains: [8453, 1] }, 1, gas, px);
+  assert.equal(m.moved, true);
+  assert.equal(m.routeChanged, true);
+  // The general case: a quote 3% lower 2 s before the click, then a price refresh 1 s before it.
+  let g = nextShown(null, 'k', { out: '100', chains: [8453], after: 99.9 }, T);
+  g = nextShown(g, 'k', { out: '97', chains: [8453], after: 96.9 }, T + 60_000);
+  g = nextShown(g, 'k', { out: '97', chains: [8453], after: 96.8 }, T + 61_000);
+  assert.equal(seenBaseline(g, 'k', g.view, T + 62_000).out, '100');
+  assert.equal(clickQuoteMove(seenBaseline(g, 'k', g.view, T + 62_000), { out: '97', chains: [8453] }, 1, undefined, px).moved, true);
+  // A view on screen for 3 s or more was read: it becomes the one before the next change.
+  let r = nextShown(null, 'k', { out: '100', chains: [8453], after: 99.9 }, T);
+  r = nextShown(r, 'k', { out: '99', chains: [8453], after: 98.9 }, T + 30_000);
+  r = nextShown(r, 'k', { out: '98', chains: [8453], after: 97.9 }, T + 34_000);
+  assert.equal(r.prev.out, '99');
+  // The same view again changes nothing; another key starts afresh; the first view replaced quickly is still the one before.
+  assert.equal(nextShown(r, 'k', { out: '98', chains: [8453], after: 97.9 }, T + 35_000), r);
+  assert.equal(nextShown(r, 'other', l2, T + 35_000).prev, undefined);
+  const f = nextShown(nextShown(null, 'k', l2, T), 'k', { out: '90', chains: [8453], after: 89.9 }, T + 1000);
+  assert.equal(f.prev.out, '100');
+  // A view stored "in the future" (the clock since put back) can't be placed: the better of the two stays before.
+  let c = nextShown(null, 'k', { out: '100', chains: [8453], after: 99.9 }, T);
+  c = nextShown(c, 'k', { out: '102', chains: [8453, 1], after: 98 }, T + 3_600_000); // written with the clock an hour ahead
+  c = nextShown(c, 'k', { out: '95', chains: [8453], after: 94.9 }, T + 60_000);
+  assert.deepEqual(c.prev, { out: '102', chains: [8453], after: 99.9 });
 });

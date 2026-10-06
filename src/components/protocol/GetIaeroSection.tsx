@@ -53,15 +53,16 @@ import {
 } from '@/lib/rift/hypercore';
 import {
   DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, afterGasOut, assessCost, cardCostCheck, clickQuoteMove, costNeedsTick, costText,
-  gasSharePct, seenBaseline, tickCovers, type CostTick, type SeenQuote,
+  gasSharePct, nextShown, seenBaseline, tickCovers, type CostTick, type SeenQuote, type ShownQuotes,
   ethereumGasDeskWei, formatPct, gasDeskChains, gasDeskUsd, gasSwallows, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
 import {
-  btcLookChange, btcUnpaid, canPay, canRetryUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, PAY_HEARTBEAT_MS, paymentFacts, payState,
-  payWindowOpen, sourceKindOf,
+  btcLookChange, btcStillPayable, btcUnpaid, canPay, canRetryUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, PAY_HEARTBEAT_MS, paymentFacts,
+  payState, payWindowOpen, sourceKindOf,
 } from '@/lib/rift/order-state';
 import {
   applyStatusUpdate, beginHyperPost, claimPayment, loadOrders, orderStorageProblem, patchOrder, patchPaymentAttempt, removeOrders, saveCarriedNow, storageFailing, unreadableOrderIds, unsavedChanges, upsertOrder, useStoredOrders,
+  type AttemptWrite,
 } from '@/lib/rift/storage';
 import { accountNonce, evmDepositEvidence, hyperDepositEvidence, postHyperTransfer, transferDeliversInFull } from '@/lib/rift/payment-io';
 import { enableNotifications } from '@/lib/rift/watch';
@@ -514,14 +515,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   // after that charge, which moves with the gas price and market prices too), or the one before it if it changed in the
   // last 3 seconds (a change landing just before your click is not something you had time to read).
   const shownAfter = expected ? expected.out : null;
-  const shown = useRef<{ key: string; view: SeenQuote; since: number; prev?: SeenQuote } | null>(null);
+  const shown = useRef<ShownQuotes | null>(null);
   useEffect(() => {
     if (!quote) return;
-    const key = `${quote.from}|${quote.from_amount}`;
     const view: SeenQuote = { out: quote.estimated_amount_out, chains: gasDeskChains(quote.route), after: shownAfter };
-    const s = shown.current;
-    if (s && s.key === key && s.view.out === view.out && s.view.chains.join() === view.chains.join() && s.view.after === view.after) return;
-    shown.current = { key, view, since: Date.now(), prev: s?.key === key ? s.view : undefined };
+    shown.current = nextShown(shown.current, `${quote.from}|${quote.from_amount}`, view, Date.now());
   }, [quote, shownAfter]);
   // A price move, and the ticks, belong to the token and amount they were given for: one shown again later (back to an
   // earlier amount) is read and ticked again, its first quote having no "before" to be held against.
@@ -851,9 +849,12 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
      *  attempt holds it. An order removed from this browser meanwhile is put back, with its payment. */
     const sentNow = async (at: number, attemptId?: string) => {
       const sent = { depositSentAt: at, depositConfirmedAt: Date.now(), payRequestedAt: undefined, payUnknown: false };
-      let r = attemptId
+      // (patchOrder answers 'unchanged' for an order no longer stored: one removed meanwhile is told apart here.)
+      let found = false;
+      let r: AttemptWrite = attemptId
         ? await patchPaymentAttempt(id, attemptId, sent)
-        : await patchOrder(id, prev => (prev.hlAction?.time === at ? sent : {}));
+        : await patchOrder(id, prev => { found = true; return prev.hlAction?.time === at ? sent : {}; });
+      if (!attemptId && !found && r !== 'failed') r = 'missing';
       if (r === 'missing' && o) r = await upsertOrder({ ...o, ...sent });
       if (r === 'failed') setError(`Your Hyperliquid transfer went through, but this browser could not record it for order ${id}. Keep this page open and don’t pay again.`);
     };
@@ -1057,8 +1058,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     const owner = address as Address;
     // What the user saw, at the click (not after the checks below, which take seconds): a quote that changed in the
     // 3 s before it is not what they reviewed, so the one before it is the baseline.
-    const seen: SeenQuote = accepted ? { out: accepted.quote.estimated_amount_out, chains: gasDeskChains(accepted.quote.route) }
-      : seenBaseline(shown.current, `${quote.from}|${quote.from_amount}`, { out: quote.estimated_amount_out, chains: gasDeskChains(quote.route) }, Date.now());
+    // ("Buy at the new price": the panel's quote is the one on screen, put there when the move was found, and read as such.)
+    const seen: SeenQuote = accepted && accepted.quote.id !== quote.id
+      ? { out: accepted.quote.estimated_amount_out, chains: gasDeskChains(accepted.quote.route) }
+      : seenBaseline(shown.current, `${quote.from}|${quote.from_amount}`,
+        { out: quote.estimated_amount_out, chains: gasDeskChains(quote.route), after: shownAfter }, Date.now());
     // What this purchase is for, fixed at the click: the form can change while it runs (another token, an amount
     // written by an order card), and nothing may be bought for anything other than what was reviewed.
     const want = { asset: token.asset, amount: quoteAmount, decimals: token.decimals, chain: chainKey };
@@ -1073,12 +1077,18 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       // An order must be kept, under the cross-tab lock: checked before it exists.
       const storageProblem = orderStorageProblem();
       if (storageProblem) throw new Error(`${storageProblem} Nothing was sent.`);
-      // Two Bitcoin orders both waiting for payment buy twice if both QR codes are paid (one whose payment went missing
-      // shows its QR code again): asked once, at the click.
+      // Two Bitcoin orders both paid buy twice: asked once, at the click, while an earlier one's address may yet receive
+      // its payment (its QR code still up, a last-minute payment not seen yet, or one no longer visible that may still
+      // confirm: order-state.ts btcStillPayable).
       const mine = loadOrders().filter(x => x.toAddress.toLowerCase() === owner.toLowerCase() && x.status === 'awaiting_deposit');
       if (chain.kind === 'bitcoin') {
-        const open = mine.find(x => x.sourceChain === 'bitcoin' && payWindowOpen(x, 'bitcoin', Date.now()) && (!x.btc?.txid || x.btc.missing));
-        if (open && !window.confirm(`Order ${open.id} is still waiting for a Bitcoin payment. Paying both would buy twice. Create another order anyway?`)) {
+        const now = Date.now();
+        const earlier = mine.map(x => ({ x, state: btcStillPayable(x, now) })).find(y => y.state);
+        if (earlier && !window.confirm(
+          earlier.state === 'open' ? `Order ${earlier.x.id} is still waiting for a Bitcoin payment. Paying both would buy twice. Create another order anyway?`
+            : earlier.state === 'closed' ? `Order ${earlier.x.id}’s pay window has closed, but no payment to it has been seen and none ruled out yet: one sent in its last minutes may still arrive. Paying another order too would buy twice. Create another order anyway?`
+              : `The Bitcoin payment seen for order ${earlier.x.id} is no longer visible (most likely dropped or replaced). If it confirms after all, another order buys twice. Create another order anyway?`,
+        )) {
           throw new Error('Kept the Bitcoin order already waiting for payment. Nothing was created.');
         }
       }
@@ -1218,8 +1228,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         destination: RIFT_DESTINATION, quoteId: q.id, toAddress: owner, fromChain: chainKey, fromAmount, refundAddress: refund, fresh: true,
         source: { fromAsset: token.asset, names: riftNames() },
       });
-      // This quote is spent: it is not shown or re-fetched until an amount is entered again.
+      // This quote is spent: it is not shown or re-fetched until an amount is entered again, and the ticks given for it are
+      // used up (a failure below must not leave them standing for the next quote).
       setSpent(quoteKey);
+      setAck(null);
+      setSettlementAckKey(null);
       shown.current = null;
       queryClient.removeQueries({ queryKey: ['rift-quote'] });
       // Never ask the wallet to send anything the order does not say, or to an address of the wrong kind.
@@ -1247,8 +1260,6 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       }
       setActiveId(order.id);
       setAmountText('');
-      setAck(null);
-      setSettlementAckKey(null);
       if (chain.kind !== 'bitcoin') {
         stillSameAccount();
         await pay(stored, { quoteAt: fetchedAt, fromStart: true });

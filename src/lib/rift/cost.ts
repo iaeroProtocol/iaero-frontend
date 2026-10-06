@@ -89,34 +89,50 @@ export interface CostTick { key: string; kind: CostCheck['kind']; pct: number; c
 /** Whether a tick still covers this cost: the same token and amount, the same kind of check and (for a known cost) no
  *  more than half a point worse ("prices disagree" is one state whatever the size of the gap); and no worse charges than
  *  it was given with, which an "unknown cost" tick wouldn't otherwise notice: no new step on Ethereum, and Rift's gas
- *  charge (when it can be valued) no more than half a point more of the quote (one that couldn't be valued when ticked is
- *  ticked again once it can). */
+ *  charge no more than half a point more of the quote, valued then and now (or unvalued both times). */
 export function tickCovers(a: CostTick | null, key: string, c: CostCheck, route: { chains: number[]; share: number | null }): boolean {
   if (!a || a.key !== key || a.kind !== c.kind) return false;
   if (c.kind === 'ok' && c.pct > a.pct + 0.5) return false;
   if (route.chains.includes(1) && !a.chains.includes(1)) return false;
-  return route.share === null || (a.share !== null && route.share <= a.share + 0.5);
+  // A charge valued when ticked that can't be valued now is ticked again (as one ticked unvalued is once it can be).
+  return route.share === null ? a.share === null : a.share !== null && route.share <= a.share + 0.5;
 }
 
 /** A quote as seen on screen: Rift's amount, the chains its route has Rift charge gas on (gasDeskChains), and what it
  *  showed would arrive after that charge (`after`; null when it couldn't be valued). */
 export interface SeenQuote { out: string; chains: number[]; after?: number | null }
 
-/** The quote the user saw when clicking Buy: a refresh that landed within 3 s of the click isn't what they read, so
- *  the one before it is; a refresh "in the future" (the clock since put back) can't be placed, so the better of the
- *  two: the higher amount, and only the chains both routes are charged gas on (either one's extra step counts as new).
- *  `shown`: the latest change on screen (its key, when, and the quote before it). */
+/** What is on screen for Buy (GetIaeroSection.tsx): the quote view shown for a token and amount (`key`), since when, and
+ *  the view the user read before it (nextShown). */
+export interface ShownQuotes { key: string; view: SeenQuote; since: number; prev?: SeenQuote }
+
+/** The better of two views for the user: the higher amount and after-charge figure, and only the chains both routes
+ *  are charged gas on (either one's extra step counts as new). Held against when which one was read can't be told. */
+function betterView(a: SeenQuote, b: SeenQuote): SeenQuote {
+  const afters = [a.after, b.after].filter((x): x is number => typeof x === 'number');
+  return { out: Number(a.out) >= Number(b.out) ? a.out : b.out, chains: b.chains.filter(c => a.chains.includes(c)), after: afters.length ? Math.max(...afters) : null };
+}
+
+/** `shown` once `view` is on screen at `now`: unchanged for the same view; otherwise the new view, with the one before
+ *  it the view on screen until now, unless that one was replaced within 3 s of appearing (never read: the one before it
+ *  stays, so a burst of changes, such as a new route and then its gas price, can't make an unread view the one "seen");
+ *  one stored "in the future" (the clock since put back) can't be placed, so the better of the two stays. */
+export function nextShown(s: ShownQuotes | null, key: string, view: SeenQuote, now: number): ShownQuotes {
+  if (s && s.key === key && s.view.out === view.out && s.view.chains.join() === view.chains.join() && (s.view.after ?? null) === (view.after ?? null)) return s;
+  if (!s || s.key !== key) return { key, view, since: now };
+  const age = now - s.since;
+  const prev = !s.prev ? s.view : age < 0 ? betterView(s.prev, s.view) : age < 3000 ? s.prev : s.view;
+  return { key, view, since: now, prev };
+}
+
+/** The quote the user saw when clicking Buy: a change that landed within 3 s of the click isn't what they read, so the
+ *  view before it is (nextShown keeps that one read); a change "in the future" (the clock since put back) can't be
+ *  placed, so the better of the two. */
 export function seenBaseline(shown: { key: string; since: number; prev?: SeenQuote } | null, key: string, cur: SeenQuote, now: number): SeenQuote {
   const prev = shown?.key === key ? shown.prev : undefined;
   if (!shown || !prev) return cur;
   const age = now - shown.since;
-  if (age < 0) {
-    const afters = [prev.after, cur.after].filter((x): x is number => typeof x === 'number');
-    return {
-      out: Number(prev.out) >= Number(cur.out) ? prev.out : cur.out, chains: cur.chains.filter(c => prev.chains.includes(c)),
-      after: afters.length ? Math.max(...afters) : null,
-    };
-  }
+  if (age < 0) return betterView(prev, cur);
   return age < 3000 ? prev : cur;
 }
 
