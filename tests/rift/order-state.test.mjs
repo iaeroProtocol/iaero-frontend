@@ -477,6 +477,61 @@ test('round 8: a look is timed and ordered by when it was asked, and judged fres
     { at: t, answeredAt: t + 12_000, failing: false, checkpoint: cp })), {});
 });
 
+test('stale Bitcoin lookups cannot erase newer empty evidence or hide a new payment', () => {
+  const t = T0 + 3 * 3600_000;
+  const txid = 'ab'.repeat(32);
+  const empty = { payments: [], totalSats: 0n };
+  let btc = { txid, confirmations: 0, firstSeenAt: t - 4 * 60_000, lastSeenAt: t - 4 * 60_000, totalSats: '100000', payments: 1 };
+  // Five fresh looks spanning two minutes find that the unconfirmed payment is gone.
+  for (const at of [t - 120_000, t - 90_000, t - 60_000, t - 30_000, t]) btc = lookNow(btc, empty, at, t - 300_000).btc;
+  assert.equal(btc.missing, true);
+  // Another tab asked whether the transaction was still known before the final empty look, but its slow answer
+  // arrives afterward. It cannot undo the later evidence or suppress the warning before another order.
+  assert.deepEqual(lookNow(btc, 'known', t - 15_000, t - 300_000, false, t + 1_000), {});
+  assert.equal(btcStillPayable(order({ sourceChain: 'bitcoin', btc }), t + 1_000), 'missing',
+    'the next Buy still warns about the payment that went missing');
+  assert.deepEqual(lookNow(btc, 'known', t - 15_000, t - 300_000, true, t + 60_000), {},
+    'an old positive answer replayed after a storage outage is still old');
+  const payment = { payments: [{ txid, confirmations: 0 }], totalSats: 100000n };
+  assert.deepEqual(lookNow(btc, payment, t - 15_000, t - 300_000, false, t + 1_000), {},
+    'an old address sighting cannot undo a newer empty run either');
+  // A direct lookup begun after the empty run can still clear a stale address index's false missing result.
+  const fresh = lookNow(btc, 'known', t + 20_000, t - 300_000, false, t + 20_000).btc;
+  assert.equal(fresh.missing, undefined);
+  assert.equal(fresh.emptyChecks, undefined);
+  assert.equal(lookNow(btc, payment, t + 20_000, t - 300_000).btc.missing, undefined,
+    'a newer address sighting can clear a false missing result');
+  const confirmed = { payments: [{ txid, confirmations: 1 }], totalSats: 100000n };
+  assert.equal(lookNow(btc, confirmed, t - 15_000, t - 300_000, false, t + 1_000).btc.confirmed, true,
+    'a first confirmation is stronger evidence than the later empty address index');
+  const replacement = { payments: [{ txid: 'cd'.repeat(32), confirmations: 0 }], totalSats: 100000n };
+  assert.equal(lookNow(btc, replacement, t - 15_000, t - 300_000, false, t + 1_000).btc.txid, replacement.payments[0].txid,
+    'a newly discovered transaction must be recorded even when its address lookup was older');
+  const unpaidProof = { emptyChecks: 5, emptySince: t - 120_000, emptyLastAt: t, emptyAt: t };
+  assert.equal(lookNow(unpaidProof, payment, t - 15_000, t - 300_000, false, t + 1_000).btc.txid, txid,
+    'a first payment must not be lost behind a later empty-address proof');
+  const unconfirmedSeenLater = { txid, confirmations: 0, firstSeenAt: t - 60_000, lastSeenAt: t,
+    totalSats: '100000', payments: 1 };
+  const lateConfirmation = lookNow(unconfirmedSeenLater, confirmed, t - 15_000, t - 300_000, false, t + 1_000).btc;
+  assert.equal(lateConfirmation.confirmed, true,
+    'an older answer proving a first confirmation outranks a newer unconfirmed sighting');
+  assert.equal(lateConfirmation.lastSeenAt, t, 'the confirmation does not move the latest sighting time backward');
+});
+
+test('concurrent empty Bitcoin looks do not count as separate checks', () => {
+  const t = T0 + 3 * 3600_000;
+  const empty = { payments: [], totalSats: 0n };
+  let btc = { txid: 'ab'.repeat(32), confirmations: 0, firstSeenAt: t - 4 * 60_000,
+    lastSeenAt: t - 4 * 60_000, totalSats: '100000', payments: 1 };
+  btc = lookNow(btc, empty, t - 120_000, t - 300_000).btc;
+  for (let i = 0; i < 4; i++) {
+    const patch = lookNow(btc, empty, t + i, t - 300_000, false, t + 1000 + i);
+    if (patch.btc) btc = patch.btc;
+  }
+  assert.equal(btc.emptyChecks, 2, 'four near-simultaneous tabs gave one independent later look');
+  assert.equal(btc.missing, undefined, 'two look times are not five checks across the span');
+});
+
 // --- Round 9 ---
 
 test('round 9: a sighting or run stored while the clock ran ahead does not stop looks counting', () => {

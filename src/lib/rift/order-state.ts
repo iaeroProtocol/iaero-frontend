@@ -144,6 +144,9 @@ export function phaseInput(o: StoredOrder, kind: SourceKind) {
  *  mempool.space backend proves nothing, and several tabs looking at once must not speed it up. */
 export const BTC_MISSING_AFTER = 5;
 export const BTC_EMPTY_SPAN_MS = 2 * 60_000;
+/** Concurrent tabs can ask within milliseconds of each other. Count their empty answers as one look, with at least
+ *  the shared lookup stamp's 15-second spacing between independent checks. */
+const BTC_EMPTY_MIN_GAP_MS = 15_000;
 /** A run of empty answers is one stretch of looking: an answer more than this after the run's latest one (nobody was
  *  looking, or mempool.space couldn't be reached) starts a new run, so a lagging answer from before the gap and a few
  *  quick ones after it can't make up the span between them. While a run is open (or a look past the checkpoint
@@ -221,6 +224,16 @@ export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcL
     if (ahead(prev.emptySince) || ahead(prev.emptyLastAt)) { delete prev.emptySince; delete prev.emptyChecks; delete prev.emptyLastAt; }
     if (ahead(prev.emptyAt)) delete prev.emptyAt;
   }
+  // A delayed "still known" answer or a repeat unconfirmed sighting must not erase another tab's newer empty
+  // evidence. A first payment, replacement or confirmation is new evidence even if its answer arrives late.
+  const repeatUnconfirmed = seen !== 'known' && !!prev?.txid && seen.payments.length > 0
+    && seen.payments[0].txid === prev.txid && seen.payments.length === prev.payments
+    && seen.totalSats.toString() === prev.totalSats && seen.payments.every(p => p.confirmations === 0);
+  const firstConfirmation = seen !== 'known' && !btcConfirmed(prev) && seen.payments.some(p => p.confirmations > 0);
+  if ((seen === 'known' || repeatUnconfirmed)
+    && look.at < Math.max(prev?.lastSeenAt ?? 0, prev?.emptyLastAt ?? 0, prev?.emptyAt ?? 0)) return {};
+  if (seen !== 'known' && !seen.payments.length && prev?.emptyLastAt !== undefined
+    && look.at - prev.emptyLastAt < BTC_EMPTY_MIN_GAP_MS) return {};
   if (seen === 'known') {
     // The payment recorded is still there: a run of empty answers (or "missing") ends.
     if (!prev?.emptyChecks && !prev?.missing) return {};
@@ -238,17 +251,17 @@ export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcL
     const proven = emptyChecks >= BTC_MISSING_AFTER && look.at - emptySince >= BTC_EMPTY_SPAN_MS;
     return { btc: { ...prev, emptyChecks, emptySince, emptyLastAt, ...(proven ? { emptyAt: look.at } : {}) } };
   }
-  // An answer older than the latest sighting recorded counts for nothing: a newer look has been recorded since (a
-  // sighting from it must not set that record back). Nor does an empty answer older than the run it would extend.
-  if (look.at < (prev?.lastSeenAt ?? 0)) return {};
+  // An answer older than the latest sighting recorded counts for nothing, except a first confirmation: it proves
+  // the payment on-chain even when a newer address lookup saw it unconfirmed. Older empty answers cannot extend a run.
+  if (look.at < (prev?.lastSeenAt ?? 0) && !firstConfirmation) return {};
   if (!seen.payments.length && prev?.emptySince !== undefined && look.at < prev.emptySince) return {};
   const btc = nextBtcRecord(prev, seen, look.at);
   if (btc === prev || (positiveOnly && !btcPositive(prev, btc))) return {};
   if (!seen.payments.length) return { btc };
-  // A sighting is recorded only when it changes something, and then with its time (lastSeenAt).
+  // A sighting is recorded only when it changes something. A late first confirmation keeps the newer ask time.
   const before = prev ? { ...prev } : undefined;
   if (before) delete before.lastSeenAt;
-  return JSON.stringify(btc) === JSON.stringify(before) ? {} : { btc: { ...btc, lastSeenAt: look.at } };
+  return JSON.stringify(btc) === JSON.stringify(before) ? {} : { btc: { ...btc, lastSeenAt: Math.max(look.at, prev?.lastSeenAt ?? 0) } };
 }
 
 /** btcLookPatch over the order as stored when the change is applied, with that order's checkpoint: Rift may have
