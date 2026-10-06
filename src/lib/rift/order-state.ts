@@ -182,6 +182,14 @@ export type BtcSeen = { payments: { txid: string; confirmations: number }[]; tot
  *  seen the payment since without recording it. */
 export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcLook): Pick<StoredOrder, 'btc'> | Record<string, never> {
   const positiveOnly = look.failing || Date.now() - (look.answeredAt ?? look.at) > BTC_LOOK_FRESH_MS;
+  // Times stored from the future (the clock ran ahead, then was put back) count as absent: they would stop every look
+  // from counting until the clock caught up.
+  const ahead = (t?: number) => t !== undefined && t > Date.now() + 1000;
+  if (prev && (ahead(prev.lastSeenAt) || ahead(prev.emptySince))) {
+    prev = { ...prev };
+    if (ahead(prev.lastSeenAt)) delete prev.lastSeenAt;
+    if (ahead(prev.emptySince)) { delete prev.emptySince; delete prev.emptyChecks; }
+  }
   if (seen === 'known') {
     // The payment recorded is still there: a run of empty answers (or "missing") ends.
     if (!prev?.emptyChecks && !prev?.missing) return {};
@@ -240,6 +248,12 @@ export const btcCheckpoint = (o: StoredOrder) =>
 export const btcUnchecked = (o: StoredOrder) =>
   KIND_OF[o.sourceChain] === 'bitcoin' && !o.btc?.txid && !o.btc?.missing && (o.btc?.emptyAt ?? 0) < btcCheckpoint(o);
 
+/** An unfinished order this long past Rift's deposit deadline is one Rift no longer settles or answers for: polled
+ *  now and then, and the user may remove it. */
+export const STALE_AFTER_DEADLINE_MS = 7 * 864e5;
+export const pastDeadline = (o: StoredOrder, now: number) =>
+  !isFinalStatus(o.status) && now - Date.parse(o.depositDeadline) > STALE_AFTER_DEADLINE_MS;
+
 /** A payment seen for an order Rift expired is followed this long after the expiry: Bitcoin nodes drop an unconfirmed
  *  transaction from their mempool after two weeks by default, so by then it has confirmed or is gone. */
 export const BTC_LOOK_AFTER_EXPIRY_MS = 14 * 24 * 3600_000;
@@ -249,7 +263,8 @@ export const BTC_LOOK_AFTER_EXPIRY_MS = 14 * 24 * 3600_000;
  *  a look shows that nothing was sent. */
 export function btcNeedsLook(o: StoredOrder, now = Date.now()): boolean {
   if (KIND_OF[o.sourceChain] !== 'bitcoin') return false;
-  if (o.status === 'awaiting_deposit' || o.status === 'underfunded') return true;
+  // Still waiting two weeks past Rift's deposit deadline: an order Rift no longer answers for (gone stale).
+  if (o.status === 'awaiting_deposit' || o.status === 'underfunded') return !(now - Date.parse(o.depositDeadline) > BTC_LOOK_AFTER_EXPIRY_MS);
   if (o.status !== 'expired') return false;
   if (!o.btc?.txid) return btcUnchecked(o);
   return !btcConfirmed(o.btc) && now - (o.statusTimes.expired ?? o.createdAt) < BTC_LOOK_AFTER_EXPIRY_MS;

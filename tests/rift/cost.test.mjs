@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { costLevel, costVsMarketPct, deliveredVsQuotedPct, formatPct, gasSwallows, priceDropPct } from '../../src/lib/rift/cost.ts';
+import { costLevel, costVsMarketPct, deliveredVsQuotedPct, formatPct, gasSwallows, parseLlamaQuotes, priceDropPct } from '../../src/lib/rift/cost.ts';
 
 test('cost against market prices, from a real quote', () => {
   // $500 in, 830 iAERO out at $0.5976: $496.01 of iAERO, so 0.8%.
@@ -139,4 +139,23 @@ test('round 8: an order the gas charge would take whole is refused from what is 
   // Layer 2 steps only: about $0.10 each.
   assert.equal(gasSwallows({ chains: [42161, 8453], payUsd: 0.15 }), true);
   assert.equal(gasSwallows({ chains: [42161, 8453], payUsd: 5 }), false);
+});
+
+test('round 9: with this computer\'s clock running slow, a price hours old is still too old', () => {
+  const real = Date.now();
+  const slow = real - 2 * 3600_000; // the clock two hours behind
+  const answer = { coins: {
+    'coingecko:ethereum': { price: 4000, timestamp: Math.floor(real / 1000) - 60, confidence: 0.99 },
+    'base:0xstale': { price: 1, timestamp: Math.floor(real / 1000) - 2 * 3600, confidence: 0.99 },
+  } };
+  const q = parseLlamaQuotes(answer, slow);
+  assert.ok(q['coingecko:ethereum'], 'a fresh price is kept');
+  assert.equal(q['base:0xstale'], undefined, 'two hours older than the newest price in the answer: left out');
+  // A correct clock gives the same answer.
+  assert.equal(parseLlamaQuotes(answer, real)['base:0xstale'], undefined);
+});
+
+test('round 9: a gas price of zero counts as unknown (the floor applies)', () => {
+  assert.equal(gasSwallows({ chains: [1, 8453], gasWei: 0n, ethUsd: 4000, payUsd: 2 }), true);
+  assert.equal(gasSwallows({ chains: [1, 8453], gasWei: 0n, payWei: 500_000_000_000_000n }), true);
 });

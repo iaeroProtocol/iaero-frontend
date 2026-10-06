@@ -418,9 +418,13 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       // Every fetch but a key's first (a quote or an error came back before) waits out Rift's rate-limit pause: a
       // fetch the user didn't ask for never lands in it (the end of a purchase, a scheduled refresh, the tab shown
       // again). A new amount, which the user is waiting on, goes at once.
-      const wait = riftPauseLeft();
+      // Nor sooner than QUOTE_FRESH_MS after its last answer (the tab shown again in the page re-enables the query,
+      // and a key with no quote always counts as stale).
       const before = queryClient.getQueryState(queryKey);
-      if (wait > 0 && (before?.dataUpdatedAt || before?.errorUpdatedAt)) {
+      const last = Math.max(before?.dataUpdatedAt ?? 0, before?.errorUpdatedAt ?? 0);
+      const spacing = last && last <= Date.now() + 1000 ? last + QUOTE_FRESH_MS - Date.now() : 0;
+      const wait = last ? Math.min(Math.max(riftPauseLeft(), spacing), 60_000) : 0;
+      if (wait > 0) {
         await new Promise<void>((resolve, reject) => {
           const t = setTimeout(resolve, wait);
           signal.addEventListener('abort', () => { clearTimeout(t); reject(signal.reason); }, { once: true });
@@ -458,7 +462,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   // fetched only when the route runs on Ethereum.
   const routeOnEthereum = !!quote && gasDeskChains(quote.route).includes(1);
   const gasQuery = useGasPrice({ chainId: mainnet.id, query: { enabled: active && routeOnEthereum, refetchInterval: 60_000 } });
-  const gasAt = (now: number) => (gasQuery.data !== undefined && now - gasQuery.dataUpdatedAt <= GAS_MAX_AGE_MS ? gasQuery.data : undefined);
+  const gasAt = (now: number) => (gasQuery.data !== undefined && gasQuery.data > 0n && now - gasQuery.dataUpdatedAt <= GAS_MAX_AGE_MS ? gasQuery.data : undefined);
   const expectedFor = (q: RiftQuote, px: MarketPrices, gasWei: bigint | undefined) => {
     const chains = gasDeskChains(q.route);
     const usd = gasDeskUsd(chains, gasWei, px.ethUsd);
@@ -590,6 +594,28 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         setError(`Rift’s price for this order has dropped ${formatPct(drop)} since you made it, more than your ${tolerance}% limit. Nothing was sent. Start a new order at today’s price.`);
         return 'dropped';
       }
+      // Rift's quote leaves its gas charge out (cost.ts), and Ethereum's gas may have risen since the order was made:
+      // the same rules as at Buy, with the gas price and market prices as they are now.
+      const chains = gasDeskChains(q.route);
+      const px = market.at(Date.now());
+      let gasWei: bigint | undefined;
+      if (chains.includes(1)) {
+        try { const g = await ethPublic?.getGasPrice(); if (g !== undefined && g > 0n) gasWei = g; } catch { /* the floor */ }
+      }
+      const payWei = ETH_UNITS.has(o.token.asset.toLowerCase()) ? BigInt(o.fromAmountRaw) : undefined;
+      if (gasSwallows({ chains, gasWei, ethUsd: px.ethUsd, payWei, payUsd: o.marketUsdIn ?? null })) {
+        setError('Rift’s gas charge would now take this whole order (network gas has risen since you made it). Nothing was sent. Start a new order with a larger amount, or pay from Base or Arbitrum.');
+        return 'dropped';
+      }
+      const gasUsd = gasDeskUsd(chains, gasWei, px.ethUsd);
+      if (o.expectedOut && gasUsd !== null && px.iaeroUsd) {
+        const after = Math.max(0, Number(q.estimated_amount_out) - gasUsd / px.iaeroUsd);
+        const dropAfter = priceDropPct(o.expectedOut, String(after));
+        if (dropAfter > tolerance) {
+          setError(`After Rift’s gas charge, this order now gets ${formatPct(dropAfter)} less iAERO than when you made it, more than your ${tolerance}% limit. Nothing was sent. Start a new order at today’s price.`);
+          return 'dropped';
+        }
+      }
       return 'ok';
     } catch (e) {
       setError(`Couldn’t re-check the price (${e instanceof RiftApiError ? explainRiftError(e) : errText(e)}). Nothing was sent; try again in a moment.`);
@@ -686,10 +712,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
           : 'Rift reports a status this page doesn’t know yet. Nothing was sent; the order card keeps checking.');
       }
     }
-    // An attempt that ended "failed before anything was sent" (a wallet's word, from its error) is checked at the
-    // deposit address, and against the account's nonce since then, before paying again.
+    // Paying again is checked at the deposit address first, whatever ended the last attempt (a failure this page
+    // judged wrongly must not lead to a second payment); one that ended "failed before anything was sent" (a
+    // wallet's word, from its error) also against the account's nonce since then.
     const doubt = (msg: string) => patchOrder(id, prev => (prev.payAttemptId === o!.payAttemptId ? { payUnknown: true } : {})).then(() => { throw new Error(msg); });
-    if (o.preSendNonce !== undefined) {
+    if (o.payAttemptAt) {
       let ev: Awaited<ReturnType<typeof evmDepositEvidence>>;
       try { ev = await evmDepositEvidence(client, o); } catch {
         throw new Error(`Could not check ${c.name} for an earlier payment. Nothing was sent; try again in a moment.`);
@@ -1203,7 +1230,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       return false;
     }
     const look = { at: asked, answeredAt: Date.now(), failing: storageFailing() };
-    await patchOrder(o.id, prev => btcLookChange(prev, seen, look));
+    await patchOrder(o.id, prev => btcLookChange(prev, seen, { ...look, failing: look.failing || storageFailing() }));
     if (seen === 'known' || seen.payments.length) {
       setError(`A payment to the Bitcoin address of order ${o.id} was just found, so it stays, and is tracked here.`);
       return false;

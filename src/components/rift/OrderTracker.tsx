@@ -33,7 +33,7 @@ import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, RIFT_SUPP
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
 import { costText, costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
 import {
-  BTC_MISSING_AFTER, btcConfirmed, btcLookChange, btcLookEveryMs, btcNeedsLook, nonceUsed, btcUnchecked, canHide, doubtButExpired, isFinalStatus, isOutOfDate, isTerminalStatus, missingButExpired, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput, PRE_SEND_COOLDOWN_MS,
+  BTC_MISSING_AFTER, btcConfirmed, btcLookChange, btcLookEveryMs, btcNeedsLook, nonceUsed, pastDeadline, btcUnchecked, canHide, doubtButExpired, isFinalStatus, isOutOfDate, isTerminalStatus, missingButExpired, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput, PRE_SEND_COOLDOWN_MS,
 } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
@@ -172,8 +172,11 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
     const ifCurrent = (patch: Partial<StoredOrder> | ((prev: StoredOrder) => Partial<StoredOrder>)) =>
       patchOrder(id, prev => (prev.depositTxHash === hash && !prev.depositFailed && !prev.depositConfirmedAt && !prev.payUnknown
         ? (typeof patch === 'function' ? patch(prev) : patch) : {}));
+    // A nonce says something about the payer's account only for a transaction the payer sent: a relayer's (a sponsored
+    // send) is another account's.
+    const ownNonce = (t: { from: string; nonce: number }) => (t.from.toLowerCase() === payer.toLowerCase() ? t.nonce : undefined);
     const settle = async (r: TransactionReceipt) => {
-      if (nonce === undefined) nonce = await sourcePublic.getTransaction({ hash }).then(t => t.nonce, () => undefined);
+      if (nonce === undefined) nonce = await sourcePublic.getTransaction({ hash }).then(ownNonce, () => undefined);
       const mined = await minedPayment(sourcePublic, order, r);
       if (mined.kind === 'failed') return ifCurrent(prev => ({ depositFailed: true, depositFailReason: 'reverted' as const, ...nonceUsed(prev, nonce) }));
       if (mined.kind === 'doubt') return ifCurrent({ payUnknown: true });
@@ -193,7 +196,10 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
             if (stop) return;
             if (tx) {
               lastSeen = Date.now();
-              if (nonce === undefined) { nonce = tx.nonce; await patchOrder(id, prev => (prev.depositTxHash === hash ? { depositNonce: tx.nonce } : {})); }
+              // Replaced or sped up is told from the payer's nonce, so only for the payer's own transaction; a relayed
+              // one is followed to its receipt (or reported unknown if it disappears).
+              const own = ownNonce(tx);
+              if (nonce === undefined && own !== undefined) { nonce = own; await patchOrder(id, prev => (prev.depositTxHash === hash ? { depositNonce: own } : {})); }
             }
           }
           if (nonce !== undefined && round % 2 === 1) {
@@ -256,7 +262,8 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
           if (!stop) {
             // Taken here, not in the change (order-state.ts btcLookChange): a change storage refused is applied later.
             const look = { at: asked, answeredAt: Date.now(), failing: storageFailing() };
-            await patchOrder(order.id, prev => btcLookChange(prev, seen, look));
+            // Storage judged again when the change is applied: its first refused write can be this one (or a replay).
+            await patchOrder(order.id, prev => btcLookChange(prev, seen, { ...look, failing: look.failing || storageFailing() }));
           }
         } catch {
           errors++;
@@ -365,7 +372,8 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
         const at = Date.now();
         // The failed transaction used its nonce: an earlier "nothing was sent" at that nonce is settled (nonceUsed).
         const hash = order.depositTxHash as `0x${string}`;
-        const n = order.depositNonce ?? await sourcePublic?.getTransaction({ hash }).then(t => t.nonce, () => undefined);
+        const n = order.depositNonce ?? await sourcePublic?.getTransaction({ hash })
+          .then(t => (t.from.toLowerCase() === order.toAddress.toLowerCase() ? t.nonce : undefined), () => undefined);
         await patchOrder(order.id, prev => prev.depositTxHash === hash && payState(prev, at) === 'unknown'
           ? { payUnknown: false, payRequestedAt: undefined, depositFailed: true, depositFailReason: 'reverted' as const, ...nonceUsed(prev, n) }
           : {});
@@ -529,7 +537,9 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                 : <div className="text-sm text-slate-300">No payment arrived before the deadline, so this order closed. Nothing was taken.</div>)}
           {/* Kept until the user says otherwise: Rift support needs the ID, or this page can't check the address. */}
           {((phase === 'expired' && (paidButExpired(order, now) || missingButExpired(order) || doubtButExpired(order, now) || (btcUnchecked(order) && btcErrors >= 3)))
-            || order.status === 'frozen' || order.status === 'underfunded' || (!!order.rawStatus && !payWindowOpen(order, kind, now))) && (
+            || order.status === 'frozen' || order.status === 'underfunded' || (!!order.rawStatus && !payWindowOpen(order, kind, now))
+            // Rift no longer settles or answers for it.
+            || pastDeadline(order, now)) && (
             <button
               type="button"
               onClick={() => { if (window.confirm(`Remove this order from this browser? Keep its ID first if you may need Rift’s support: ${order.id}`)) onForget(order); }}

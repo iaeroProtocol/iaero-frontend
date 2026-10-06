@@ -111,11 +111,16 @@ export function parseLlamaQuotes(json: unknown, nowMs: number): Record<string, L
   const coins = (json as { coins?: Record<string, { price?: unknown; timestamp?: unknown; confidence?: unknown }> } | null)?.coins;
   const out: Record<string, LlamaQuote> = {};
   if (!coins || typeof coins !== 'object') return out;
+  // Ages are judged against the newest price in the answer too: with this computer's clock running slow, a price
+  // hours old would otherwise pass. (A liquid coin, ETH, is asked for with every price for that.) A time from the
+  // future can only make prices count as stale, the safe side; beyond a day ahead it is ignored as nonsense.
+  const newest = Math.max(0, ...Object.values(coins).map(c => Number(c?.timestamp)).filter(t => Number.isFinite(t) && t * 1000 <= nowMs + 864e5));
+  const nowSec = Math.max(nowMs / 1000, newest);
   for (const [id, c] of Object.entries(coins)) {
     const price = Number(c?.price);
     const ts = Number(c?.timestamp);
     if (!(price > 0) || !Number.isFinite(price)) continue;
-    if (!(ts > 0) || nowMs / 1000 - ts > PRICE_MAX_AGE_SEC) continue;
+    if (!(ts > 0) || nowSec - ts > PRICE_MAX_AGE_SEC) continue;
     if (c?.confidence !== undefined && !(Number(c.confidence) >= 0.9)) continue;
     out[id] = { price, ts };
   }
@@ -164,7 +169,8 @@ export const ethereumGasDeskWei = (chains: number[], ethGasPriceWei: bigint): bi
  * ETHEREUM_GAS_FLOOR_WEI: an order that would certainly be swallowed is refused, not ticked through.
  */
 export function gasSwallows(x: { chains: number[]; gasWei?: bigint; ethUsd?: number; payWei?: bigint; payUsd?: number | null }): boolean {
-  const gas = x.gasWei ?? ETHEREUM_GAS_FLOOR_WEI;
+  // A gas price of zero (a node answering nonsense) counts as unknown.
+  const gas = x.gasWei !== undefined && x.gasWei > 0n ? x.gasWei : ETHEREUM_GAS_FLOOR_WEI;
   if (x.payWei !== undefined) return x.payWei <= ethereumGasDeskWei(x.chains, gas);
   const usd = gasDeskUsd(x.chains, gas, x.ethUsd);
   return x.payUsd != null && x.payUsd > 0 && usd !== null && usd > 0 && usd >= x.payUsd;

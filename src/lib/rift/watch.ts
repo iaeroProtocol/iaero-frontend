@@ -20,7 +20,7 @@ import { parseOrderUpdate } from './validate';
 import { applyStatusUpdate, loadOrders, markPolled, patchOrder, polledWithin, pollStamps, storageFailing } from './storage';
 import { lookAtBtcAddress } from './bitcoin';
 import { orderNotice } from './notice';
-import { btcLookChange, btcNeedsLook, isOutOfDate, isTerminalStatus, pendingByLeastRecentPoll } from './order-state';
+import { btcLookChange, btcNeedsLook, isOutOfDate, isTerminalStatus, pastDeadline, pendingByLeastRecentPoll } from './order-state';
 import type { RiftOrderStatus, StoredOrder } from './types';
 
 const POLL_MS = 60_000;
@@ -74,7 +74,7 @@ export function useOrderWatcher(
         for (const o of due) {
           const now = Date.now();
           if (stop) break;
-          const idle = o.status === 'frozen' || isOutOfDate(o, now);
+          const idle = o.status === 'frozen' || isOutOfDate(o, now) || pastDeadline(o, now);
           if (polledWithin(o.id, idle ? IDLE_POLL_MS : POLL_MS - 5000, now)) continue;
           if (!riftBudget('poll', now)) break;
           try {
@@ -114,7 +114,8 @@ export function useOrderWatcher(
             const seen = await lookAtBtcAddress(o.depositAddress, latest.btc?.txid);
             if (stop) break;
             const look = { at: asked, answeredAt: Date.now(), failing: storageFailing() };
-            await patchOrder(o.id, prev => btcLookChange(prev, seen, look));
+            // Storage judged again when the change is applied: its first refused write can be this one (or a replay).
+            await patchOrder(o.id, prev => btcLookChange(prev, seen, { ...look, failing: look.failing || storageFailing() }));
           } catch { /* mempool.space unreachable, or can't say: next round */ }
         }
       } finally {

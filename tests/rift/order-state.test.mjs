@@ -4,16 +4,17 @@ import assert from 'node:assert/strict';
 import {
   PAY_WINDOW_MS, canMoveTo, canPay, capOrders, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowOpen, phaseInput,
   BTC_MISSING_AFTER, BTC_GRACE_MS, btcCheckpoint, btcConfirmed, btcLookPatch, btcNeedsLook, btcPositive, btcUnchecked, btcUnpaid, canRetryUnknown, BTC_EMPTY_SPAN_MS, BTC_LOOK_FRESH_MS, btcLookEveryMs, doubtButExpired,
-  PRE_SEND_COOLDOWN_MS, btcLookChange, nonceUsed, paymentFacts,
+  PRE_SEND_COOLDOWN_MS, btcLookChange, nonceUsed, paymentFacts, pastDeadline,
   clearable, canHide, isOutOfDate, missingButExpired, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
 } from '../../src/lib/rift/order-state.ts';
 
 const T0 = 1_790_930_000_000;
-/** btcLookPatch for a look taken at `at` and applied straight away (it judges freshness by the clock). */
-const lookNow = (prev, seen, at, checkpoint, failing = false) => {
+/** btcLookPatch for a look asked at `at`, answered and applied at `appliedAt` (the clock then; `at` by default). The
+ *  clock is never behind times already stored by this page, so a look older than the record is applied later. */
+const lookNow = (prev, seen, at, checkpoint, failing = false, appliedAt = at) => {
   const real = Date.now;
-  Date.now = () => at;
-  try { return btcLookPatch(prev, seen, { at, failing, checkpoint }); } finally { Date.now = real; }
+  Date.now = () => appliedAt;
+  try { return btcLookPatch(prev, seen, { at, answeredAt: appliedAt, failing, checkpoint }); } finally { Date.now = real; }
 };
 const HASH = `0x${'ab'.repeat(32)}`;
 const order = (over = {}) => ({
@@ -331,7 +332,7 @@ test('Bitcoin evidence needs a run of empty answers over minutes; a stale or lag
     Date.now = real;
   }
   // An empty answer older than the run it would extend counts for nothing.
-  assert.deepEqual(lookNow({ ...paid, emptySince: cp + 5 * 60_000 }, empty, cp + 4 * 60_000, cp), {});
+  assert.deepEqual(lookNow({ ...paid, emptySince: cp + 5 * 60_000 }, empty, cp + 4 * 60_000, cp, false, cp + 5 * 60_000 + 1000), {});
   // Unpaid Bitcoin orders are never dropped by the cap; an expired one whose payment went missing is not bulk-cleared.
   const unpaid = btc({ createdAt: T0 - 864e5, btc: { emptyAt: T0 } });
   const others = Array.from({ length: 3 }, (_, i) => order({ id: String(i), status: 'delivered' }));
@@ -348,7 +349,7 @@ test('an empty answer older than the latest sighting recorded counts for nothing
   const rec = lookNow(undefined, seen, T0 + 100_000, cp).btc;
   assert.equal(rec.lastSeenAt, T0 + 100_000, 'a recorded sighting carries its time');
   assert.deepEqual(lookNow(rec, seen, T0 + 120_000, cp), {}, 'the same sighting again: nothing to write');
-  assert.deepEqual(lookNow(rec, empty, T0 + 90_000, cp), {}, 'older than the sighting: ignored');
+  assert.deepEqual(lookNow(rec, empty, T0 + 90_000, cp, false, T0 + 101_000), {}, 'older than the sighting: ignored');
   assert.equal(lookNow(rec, empty, T0 + 130_000, cp).btc.emptyChecks, 1, 'newer: counted');
 });
 
@@ -417,7 +418,8 @@ test('round 6: a payment seen for an expired order is followed for two weeks; an
   assert.equal(btcNeedsLook({ ...seen, btc: { ...seen.btc, missing: undefined } }, expiredAt + 15 * 864e5), false);
   assert.equal(btcNeedsLook(btcOrd({ status: 'expired', statusTimes: { expired: expiredAt } }), expiredAt + 30 * 864e5), true,
     'never "nothing was taken" without a look');
-  assert.equal(btcNeedsLook(btcOrd(), T0 + 30 * 864e5), true, 'an open order is always watched');
+  assert.equal(btcNeedsLook(btcOrd(), T0 + 20 * 864e5), true, 'an open order is watched...');
+  assert.equal(btcNeedsLook(btcOrd(), T0 + 22 * 864e5), false, '...until two weeks past Rift\'s deposit deadline (Rift no longer answers for it)');
 });
 
 test('round 6: an explicit removal is judged on the payment, not on a look\'s own bookkeeping', () => {
@@ -448,9 +450,9 @@ test('round 7: an answer older than the latest sighting recorded never sets that
   // Tab B's look, taken at t0 + 3 s, saw a second payment and recorded it.
   const newer = { txid: A, confirmations: 0, firstSeenAt: T0, totalSats: '200000', payments: 2, lastSeenAt: t0 + 3000 };
   // Tab A's look, taken at t0, lands after it: one payment. It must not replace the record.
-  assert.deepEqual(lookNow(newer, { payments: [{ txid: A, confirmations: 0 }], totalSats: 100000n }, t0, cp), {});
+  assert.deepEqual(lookNow(newer, { payments: [{ txid: A, confirmations: 0 }], totalSats: 100000n }, t0, cp, false, t0 + 4000), {});
   // An empty answer taken at t0 + 1.5 s counts for nothing either.
-  assert.deepEqual(lookNow(newer, EMPTY, t0 + 1500, cp), {});
+  assert.deepEqual(lookNow(newer, EMPTY, t0 + 1500, cp, false, t0 + 4000), {});
   // A newer answer still records what it adds.
   const later = lookNow(newer, { payments: [{ txid: A, confirmations: 1 }, { txid: B, confirmations: 1 }], totalSats: 200000n }, t0 + 6000, cp);
   assert.equal(later.btc.confirmed, true);
@@ -473,4 +475,29 @@ test('round 8: a look is timed and ordered by when it was asked, and judged fres
   const newer = { txid: B, confirmations: 0, firstSeenAt: T0, totalSats: '100000', payments: 1, lastSeenAt: t + 3000 };
   assert.deepEqual(clockAt(t + 12_000, () => btcLookPatch(newer, { payments: [{ txid: A, confirmations: 0 }], totalSats: 100000n },
     { at: t, answeredAt: t + 12_000, failing: false, checkpoint: cp })), {});
+});
+
+// --- Round 9 ---
+
+test('round 9: a sighting or run stored while the clock ran ahead does not stop looks counting', () => {
+  const cp = T0 + 60 * 60_000 + BTC_GRACE_MS;
+  const now = cp + 3600_000;
+  const A = 'ab'.repeat(32);
+  // Saved three hours "ahead": a sighting, and a run of empty answers that started then.
+  const ahead = { txid: A, confirmations: 0, firstSeenAt: T0, totalSats: '100000', payments: 1, lastSeenAt: now + 3 * 3600_000 };
+  const r = lookNow(ahead, EMPTY, now, cp);
+  assert.equal(r.btc?.emptyChecks, 1, 'an empty answer counts again');
+  assert.equal(r.btc?.emptySince, now);
+  const run = { ...ahead, lastSeenAt: now - 600_000, emptyChecks: 2, emptySince: now + 3 * 3600_000 };
+  const r2 = lookNow(run, EMPTY, now, cp);
+  assert.equal(r2.btc?.emptyChecks, 1, 'a run "from the future" starts again from now');
+  assert.equal(r2.btc?.emptySince, now);
+});
+
+test('round 9: an unfinished order a week past Rift\'s deposit deadline can be removed (Rift no longer answers for it)', () => {
+  const o = order(); // deadline: T0 + 7 days
+  assert.equal(pastDeadline(o, T0 + 10 * 864e5), false);
+  assert.equal(pastDeadline(o, T0 + 15 * 864e5), true);
+  assert.equal(pastDeadline(order({ status: 'delivered' }), T0 + 30 * 864e5), false, 'a finished order is cleared as usual');
+  assert.equal(pastDeadline(order({ depositDeadline: 'soon' }), T0 + 30 * 864e5), false, 'no readable deadline: never');
 });

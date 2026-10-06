@@ -19,7 +19,7 @@ const btcOrder = (over = {}) => ({
 /** Bitcoin looks as the order card takes them (OrderTracker.tsx 2b); `at`: when (now by default). */
 const trackerLook = (t, id) => (d, at = Date.now()) => {
   const look = { at, failing: t.storageFailing() };
-  return t.patchOrder(id, prev => orderState.btcLookChange(prev, d, look));
+  return t.patchOrder(id, prev => orderState.btcLookChange(prev, d, { ...look, failing: look.failing || t.storageFailing() }));
 };
 const order = () => {
   const now = Date.now();
@@ -669,4 +669,42 @@ test('round 8: a status answer asked before the last one recorded changes nothin
   await t.applyStatusUpdate(o.id, known('awaiting_deposit'), t0 + 31_000, t0 + 30_000);
   assert.equal(h.read().rawStatus, undefined);
   assert.equal(h.read().statusAskedAt, t0 + 30_000);
+});
+
+// --- Round 9 ---
+
+test('round 9: an ask time stored while the clock ran ahead does not freeze the order\'s status', async () => {
+  const o = order();
+  const h = harness(o);
+  const t = h.tab();
+  const now = Date.now();
+  // Asked and recorded three hours "ahead"; the clock is then put back.
+  await t.applyStatusUpdate(o.id, unknownStatus('held_for_review'), now + 3 * 3600_000, now + 3 * 3600_000);
+  await t.applyStatusUpdate(o.id, known('funded'), now + 1000, now);
+  assert.equal(h.read().status, 'funded', 'Rift\'s answer is recorded, not ignored for three hours');
+  assert.equal(h.read().rawStatus, undefined);
+});
+
+test('round 9: a repeated unknown status keeps an older, slower answer from clearing it', async () => {
+  const o = order();
+  const h = harness(o);
+  const t = h.tab();
+  const t0 = Date.now();
+  await t.applyStatusUpdate(o.id, unknownStatus('held_for_review'), t0 + 1000, t0);
+  await t.applyStatusUpdate(o.id, unknownStatus('held_for_review'), t0 + 21_500, t0 + 21_000); // the same, asked later
+  await t.applyStatusUpdate(o.id, known('awaiting_deposit'), t0 + 30_000, t0 + 20_000); // asked before it, back last
+  assert.equal(h.read().rawStatus, 'held_for_review', 'paying stays paused: Rift\'s newest answer was the unknown status');
+});
+
+test('round 9: a look whose save is the first storage refuses doesn\'t decide "missing" in the page\'s view', async () => {
+  const now = Date.now();
+  // Seen, then two empty answers over three minutes (saved): the next empty one would complete the run.
+  const o = btcOrder({ btc: { txid: 'ab'.repeat(32), confirmations: 0, firstSeenAt: now - 600_000, totalSats: '100000', payments: 1,
+    lastSeenAt: now - 400_000, emptyChecks: 2, emptySince: now - 180_000 } });
+  const h = harness(o);
+  const t = h.tab();
+  h.block(); // storage starts refusing writes on exactly this look's save
+  assert.equal(await trackerLook(t, o.id)({ payments: [], totalSats: 0n }, now), 'failed');
+  assert.equal(t.loadOrders()[0].btc.missing, undefined, '"missing" waits for storage (another tab may be seeing the payment)');
+  assert.equal(t.loadOrders()[0].btc.txid, 'ab'.repeat(32));
 });

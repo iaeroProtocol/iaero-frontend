@@ -70,7 +70,8 @@ export function useMarketPrices(asset: string | undefined, enabled = true): Mark
   });
   const token = useQuery({
     queryKey: ['rift-token-price', inputId],
-    queryFn: ({ signal }) => llama([inputId!], signal),
+    // With ETH alongside, whose fresh price dates the answer (cost.ts parseLlamaQuotes).
+    queryFn: ({ signal }) => llama([inputId!, ETH_ID], signal),
     enabled: enabled && !!inputId && !BASE_IDS.includes(inputId),
     refetchInterval: 60_000, staleTime: 30_000, retry: 1,
   });
