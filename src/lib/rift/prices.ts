@@ -105,10 +105,11 @@ export function useMarketPrices(asset: string | undefined, enabled = true): Mark
 
   const coreData = core.data, coreAt = core.dataUpdatedAt, tokenData = token.data, tokenAt = token.dataUpdatedAt, poolsAt = pools.dataUpdatedAt;
   const at = useCallback((now: number): MarketPrices => {
+    // (A fetch stamped in the future, by a clock since put back, is not fresh.)
     const pick = (data: Record<string, LlamaQuote> | undefined, fetchedAt: number, id: string) =>
-      data && now - fetchedAt <= FETCH_MAX_AGE_MS ? freshPrice(data[id], now) : undefined;
+      data && now - fetchedAt <= FETCH_MAX_AGE_MS && now >= fetchedAt - 1000 ? freshPrice(data[id], now) : undefined;
     const aeroUsd = pick(coreData, coreAt, AERO_ID);
-    const poolFresh = aeroPerIaero !== undefined && now - poolsAt <= POOL_MAX_AGE_MS;
+    const poolFresh = aeroPerIaero !== undefined && now - poolsAt <= POOL_MAX_AGE_MS && now >= poolsAt - 1000;
     return {
       iaeroUsd: poolFresh && aeroUsd ? aeroPerIaero * aeroUsd : undefined,
       inputUsd: inputId ? (BASE_IDS.includes(inputId) ? pick(coreData, coreAt, inputId) : pick(tokenData, tokenAt, inputId)) : undefined,

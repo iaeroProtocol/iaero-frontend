@@ -125,6 +125,9 @@ export interface StoredOrder {
   /** The user hid this order once its pay window had closed and a check found no payment. It stays tracked, at
    *  the idle rate, and comes back if Rift reports a payment. */
   hiddenAt?: number;
+  /** When a page first saw this order's pay window closed: it never opens again (a clock put back would otherwise
+   *  reopen it, and show a Bitcoin QR code at an old price). */
+  windowClosedAt?: number;
   /** Hidden after a check found a transaction from the account since the payment was requested, which may be this
    *  payment (stuck on a low fee): Buy still asks before another order. */
   hiddenPending?: boolean;

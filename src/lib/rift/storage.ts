@@ -155,10 +155,11 @@ function mutate(change: Change, { keepOnFailure = true, poll }: { keepOnFailure?
     const stored = current();
     if (!stored) {
       // Storage can't be read: nothing is written over what it holds, unseen. A change that changes something is
-      // shown on this page (over its last view) and waits, carried, for storage.
+      // shown on this page (over its last view) and waits, carried, for storage. (Failing from now on, and as this
+      // change is made: one that waits for storage, "missing", must see it.)
+      writeFailed = true;
       const seen = change(memory ?? []);
       if (seen && keepOnFailure) { carry(change, memory ?? [], seen, poll); memory = seen; }
-      writeFailed = true;
       retryLater();
       window.dispatchEvent(new Event(EVENT));
       return 'failed';

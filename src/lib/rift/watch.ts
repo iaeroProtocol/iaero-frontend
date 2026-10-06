@@ -20,7 +20,7 @@ import { parseOrderUpdate } from './validate';
 import { applyStatusUpdate, loadOrders, markPolled, patchOrder, polledWithin, pollStamps, storageFailing } from './storage';
 import { lookAtBtcAddress } from './bitcoin';
 import { orderNotice } from './notice';
-import { btcLookChange, btcNeedsLook, isOutOfDate, isTerminalStatus, pastDeadline, pendingByLeastRecentPoll } from './order-state';
+import { btcLookChange, btcNeedsLook, isOutOfDate, isTerminalStatus, pastDeadline, pendingByLeastRecentPoll, windowCloseChange } from './order-state';
 import type { RiftOrderStatus, StoredOrder } from './types';
 
 const POLL_MS = 60_000;
@@ -74,6 +74,8 @@ export function useOrderWatcher(
         for (const o of due) {
           const now = Date.now();
           if (stop) break;
+          // A pay window seen closed stays closed (order-state.ts windowClosedAt).
+          if (Object.keys(windowCloseChange(o, now)).length) void patchOrder(o.id, prev => windowCloseChange(prev, Date.now()));
           const idle = o.status === 'frozen' || isOutOfDate(o, now) || pastDeadline(o, now);
           if (polledWithin(o.id, idle ? IDLE_POLL_MS : POLL_MS - 5000, now)) continue;
           if (!riftBudget('poll', now)) break;

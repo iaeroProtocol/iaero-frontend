@@ -368,8 +368,8 @@ test('while storage refuses writes, Bitcoin looks record what was seen and not t
   h.unblock();
   await a.patchOrder(x.id, {});
   const now = Date.now();
-  for (const dt of [0, 30_000, 60_000]) await look(empty, now + dt);
-  assert.equal(h.read().btc.missing, undefined, 'three quick empty answers are not enough (several tabs, one lagging backend)');
+  for (let i = 0; i < orderState.BTC_MISSING_AFTER - 1; i++) await look(empty, now + i * 20_000);
+  assert.equal(h.read().btc.missing, undefined, 'quick empty answers are not enough (several tabs, one lagging backend)');
   await look(empty, now + orderState.BTC_EMPTY_SPAN_MS + 1);
   assert.equal(h.read().btc.missing, true, 'empty answers in a row over two minutes, once storage works');
   assert.equal(h.read().btc.txid, TXID);
@@ -726,4 +726,20 @@ test('round 10: a status poll carried through an outage, replayed later, doesn\'
   a.unblockMe();
   await a.saveCarriedNow();
   assert.equal(h.read().rawStatus, 'held_for_review', '...nor when tab A saves');
+});
+
+// --- Round 12 ---
+
+test('round 12: the first change after storage becomes unreadable can\'t decide "missing" either', async () => {
+  const now = Date.now();
+  const x = btcOrder({ btc: { txid: 'ab'.repeat(32), confirmations: 0, firstSeenAt: now - 600_000, totalSats: '100000', payments: 1,
+    lastSeenAt: now - 400_000, emptyChecks: orderState.BTC_MISSING_AFTER - 1, emptySince: now - 180_000 } });
+  const h = harness(x);
+  const t = h.tab();
+  t.loadOrders(); // this page's view
+  h.setRaw('garbled');
+  h.refuseKey('iaero.rift.orders.v1.unreadable');
+  assert.equal(await trackerLook(t, x.id)({ payments: [], totalSats: 0n }, now), 'failed');
+  assert.equal(t.loadOrders()[0].btc.missing, undefined, '"missing" waits for storage');
+  assert.equal(t.loadOrders()[0].btc.txid, 'ab'.repeat(32));
 });

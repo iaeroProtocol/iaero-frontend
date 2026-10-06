@@ -56,7 +56,7 @@ import {
   ethereumGasDeskWei, formatPct, gasDeskChains, gasDeskUsd, gasSwallows, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
 import {
-  btcLookChange, btcUnpaid, canPay, canRetryUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, orderCreatedAt, PAY_HEARTBEAT_MS, paymentFacts, payState,
+  btcLookChange, btcUnpaid, canPay, canRetryUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, PAY_HEARTBEAT_MS, paymentFacts, payState,
   payWindowOpen, sourceKindOf,
 } from '@/lib/rift/order-state';
 import {
@@ -465,7 +465,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   // fetched only when the route runs on Ethereum.
   const routeOnEthereum = !!quote && gasDeskChains(quote.route).includes(1);
   const gasQuery = useGasPrice({ chainId: mainnet.id, query: { enabled: active && routeOnEthereum, refetchInterval: 60_000 } });
-  const gasAt = (now: number) => (gasQuery.data !== undefined && gasQuery.data > 0n && now - gasQuery.dataUpdatedAt <= GAS_MAX_AGE_MS ? gasQuery.data : undefined);
+  // (A read stamped in the future, by a clock since put back, is not fresh.)
+  const gasAt = (now: number) => (gasQuery.data !== undefined && gasQuery.data > 0n && now - gasQuery.dataUpdatedAt <= GAS_MAX_AGE_MS
+    && now >= gasQuery.dataUpdatedAt - 1000 ? gasQuery.data : undefined);
   const expectedFor = (q: RiftQuote, px: MarketPrices, gasWei: bigint | undefined) => {
     const chains = gasDeskChains(q.route);
     const usd = gasDeskUsd(chains, gasWei, px.ethUsd);
@@ -621,7 +623,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         try { const g = await ethPublic?.getGasPrice(); if (g !== undefined && g > 0n) gasWei = g; } catch { /* the floor */ }
       }
       const payWei = ETH_UNITS.has(o.token.asset.toLowerCase()) ? BigInt(o.fromAmountRaw) : undefined;
-      if (gasSwallows({ chains, gasWei, ethUsd: px.ethUsd, payWei, payUsd: o.marketUsdIn ?? null })) {
+      // The payment's value as at Buy (without Hyperliquid's fee, which the order's recorded value includes).
+      const feeUsd = sourceKindOf(o.sourceChain) === 'hypercore' ? HL_NEW_ADDRESS_FEE_USDC : 0;
+      if (gasSwallows({ chains, gasWei, ethUsd: px.ethUsd, payWei, payUsd: o.marketUsdIn != null ? o.marketUsdIn - feeUsd : null })) {
         setError('Rift’s gas charge would now take this whole order (network gas has risen since you made it). Nothing was sent. Start a new order with a larger amount, or pay from Base or Arbitrum.');
         return 'dropped';
       }
@@ -639,7 +643,12 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         return 'error';
       }
       if (gasUsd !== null && px.iaeroUsd) {
-        const after = Math.max(0, Number(q.estimated_amount_out) - gasUsd / px.iaeroUsd);
+        const after = Number(q.estimated_amount_out) - gasUsd / px.iaeroUsd;
+        // The charge takes the whole order (Buy refuses this outright, whatever is ticked).
+        if (!(after > 0)) {
+          setError('Rift’s gas charge would now take this whole order (network gas has risen since you made it). Nothing was sent. Start a new order with a larger amount, or pay from Base or Arbitrum.');
+          return 'dropped';
+        }
         // Against what the order expected after the charge (an order made while its cost couldn't be valued, ticked at
         // Buy, has no such figure: the cost rule below still applies).
         const dropAfter = o.expectedOut ? priceDropPct(o.expectedOut, String(after)) : 0;
@@ -1199,7 +1208,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       }
       let baseFromBlock: string | undefined;
       try { baseFromBlock = basePublic ? String(await basePublic.getBlockNumber()) : undefined; } catch { /* optional */ }
-      const created = orderCreatedAt(order.created_at, Date.now());
+      // This clock's time: the pay window is measured on it (a time from the future, the clock since put back, closes
+      // the window: order-state.ts payWindowOpen).
+      const created = Date.now();
       const stored: StoredOrder = {
         id: order.id, quoteId: q.id, createdAt: created, sourceChain: chainKey,
         token: { symbol: token.symbol, decimals: token.decimals, address: token.address, asset: token.asset },
@@ -1285,9 +1296,10 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   }
   /** Removed at the user's explicit request ("Remove from this browser"), only if its payment is as they saw it
    *  (order-state.ts paymentFacts): another tab may have recorded a payment since. */
-  const forget = async (o: StoredOrder) => {
-    // An unpaid Bitcoin order's address is looked at first, when it can be (a payment found keeps the order).
-    if (!(await stillUnpaid(o, { unreachableOk: true }))) return;
+  const forget = async (o: StoredOrder, { strict = false }: { strict?: boolean } = {}) => {
+    // An unpaid Bitcoin order's address is looked at first (a payment found keeps the order); offered because it can't
+    // be checked (the card's button), the removal goes ahead when it still can't be, unless `strict`.
+    if (!(await stillUnpaid(o, { unreachableOk: !strict }))) return;
     const seen = paymentFacts(o);
     const r = await removeOrders([o.id], x => paymentFacts(x) === seen);
     // Removed, here or already by another tab.
@@ -1300,7 +1312,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
    *  Bitcoin order's address, and only if its payment is as it was. */
   const removeDamaged = async (o: StoredOrder) => {
     if (!window.confirm(`Remove this order from this browser? Keep its ID first if you may need Rift’s support: ${o.id}`)) return;
-    await forget(o);
+    // A record that can't be shown isn't one offered for removal because its address can't be checked: it must be.
+    await forget(o, { strict: true });
   };
 
   // The price-moved panel shows the same after-gas figures as the quote panel.

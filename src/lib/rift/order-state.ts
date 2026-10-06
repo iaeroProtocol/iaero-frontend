@@ -50,10 +50,17 @@ export function payWindowMs(kind: SourceKind) {
   return kind === 'bitcoin' ? BTC_PAY_WINDOW_MS : PAY_WINDOW_MS;
 }
 
+/** A change recording that an order's pay window is closed, the first time a page sees it so (order-state.ts
+ *  windowClosedAt): nothing otherwise. */
+export const windowCloseChange = (o: StoredOrder, now: number): Partial<StoredOrder> =>
+  (o.status === 'awaiting_deposit' && o.windowClosedAt === undefined && !payWindowOpen(o, KIND_OF[o.sourceChain], now) ? { windowClosedAt: now } : {});
+
 /** Whether the order may still be paid: waiting for a deposit, inside its pay window, and before the deadline. */
 export function payWindowOpen(o: StoredOrder, kind: SourceKind, now: number): boolean {
-  if (o.status !== 'awaiting_deposit') return false;
-  if (now - o.createdAt > payWindowMs(kind)) return false;
+  if (o.status !== 'awaiting_deposit' || o.windowClosedAt !== undefined) return false;
+  // A creation time from the future (made while the clock ran ahead, since put back): the window's real start can't
+  // be known, so it counts as closed, never as open for hours (a Bitcoin QR code at an old price).
+  if (now - o.createdAt > payWindowMs(kind) || fromFuture(o.createdAt, now)) return false;
   const deadline = Date.parse(o.depositDeadline);
   return Number.isFinite(deadline) && deadline - now > DEADLINE_MARGIN_MS;
 }
@@ -127,7 +134,7 @@ export function phaseInput(o: StoredOrder, kind: SourceKind) {
 /** Empty answers in a row, spanning at least BTC_EMPTY_SPAN_MS, before a Bitcoin payment seen earlier counts as
  *  gone (dropped or replaced), or an address with nothing seen counts as unpaid: one answer from a lagging
  *  mempool.space backend proves nothing, and several tabs looking at once must not speed it up. */
-export const BTC_MISSING_AFTER = 3;
+export const BTC_MISSING_AFTER = 5;
 export const BTC_EMPTY_SPAN_MS = 2 * 60_000;
 /** A look's empty answer counts only while this fresh: applied again later (a change storage refused), it is
  *  older than what other tabs may have seen since, so only a payment it saw is kept. */
@@ -234,21 +241,14 @@ export const btcLookChange = (prev: StoredOrder, seen: BtcSeen, look: Omit<BtcLo
  *  that run can't complete); otherwise every 10 minutes. Failed looks back off, doubling up to 10 minutes. */
 export function btcLookEveryMs(o: StoredOrder, now: number, { errors = 0, failing = false } = {}): number {
   const deciding = btcUnchecked(o, now) && now >= btcCheckpoint(o, now) && !failing;
-  const base = (o.status === 'awaiting_deposit' && now < o.createdAt + BTC_PAY_WINDOW_MS + BTC_GRACE_MS) || deciding ? 20_000 : 10 * 60_000;
+  const base = (o.status === 'awaiting_deposit' && now < o.createdAt + BTC_PAY_WINDOW_MS + BTC_GRACE_MS && !fromFuture(o.createdAt, now))
+    || deciding ? 20_000 : 10 * 60_000;
   return Math.min(base * 2 ** Math.min(errors, 10), 10 * 60_000);
 }
 
 /** A Bitcoin order's address is still watched this long after its pay window closes before a look finding
  *  nothing counts: a payment sent at the last minute takes a while to show. */
 export const BTC_GRACE_MS = 15 * 60_000;
-
-/** When an order was made, for its pay window: Rift's own time when this computer's clock is ahead of it (within a
- *  day; a clock put back later would otherwise keep the window, and a Bitcoin QR code, open for hours), else this
- *  clock's. */
-export function orderCreatedAt(riftCreatedAt: string, now: number): number {
-  const riftAt = Date.parse(riftCreatedAt);
-  return Number.isFinite(riftAt) && riftAt < now && now - riftAt < 864e5 ? riftAt : now;
-}
 
 /** A time this page stored that is in the future: written while the clock ran ahead, since put back. It counts as
  *  absent (or is replaced), never as fresh: it would hold things up, or prove them, until the clock caught up. */
@@ -395,7 +395,7 @@ function tokenMatchesSource(chain: SourceChainKey, token: StoredOrder['token']):
 /** Optional fields that must have their type when present; a wrong one is dropped, not the order. */
 const OPTIONAL_NUMBERS = [
   'payRequestedAt', 'payAttemptAt', 'payNonce', 'depositNonce', 'preSendNonce', 'preSendAt', 'hlNonce', 'depositSentAt', 'depositConfirmedAt', 'lastPolledAt',
-  'deliveredAtChain', 'marketUsdIn', 'marketIaeroUsd', 'gasDeskUsd', 'hlPostedAt', 'hiddenAt', 'statusAskedAt',
+  'deliveredAtChain', 'marketUsdIn', 'marketIaeroUsd', 'gasDeskUsd', 'hlPostedAt', 'hiddenAt', 'statusAskedAt', 'windowClosedAt',
 ] as const;
 const OPTIONAL_UINTS = ['depositReceivedRaw', 'baseFromBlock', 'deliveryScannedTo'] as const;
 const OPTIONAL_DECIMALS = ['expectedOut', 'amountOut'] as const;
