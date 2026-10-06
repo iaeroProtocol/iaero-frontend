@@ -9,8 +9,6 @@
 //
 import { NextRequest, NextResponse } from 'next/server';
 
-export const runtime = 'edge';
-
 const GITHUB_OWNER = 'iaeroProtocol';
 const GITHUB_REPO = 'ChainProcessingBot';
 const GITHUB_PATH = 'data/spam_tokens_base.json';

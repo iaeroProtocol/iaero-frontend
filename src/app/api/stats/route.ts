@@ -1,6 +1,5 @@
 // src/app/api/stats/route.ts
 import { NextResponse } from 'next/server';
-export const runtime = 'edge';
 export const revalidate = 300;
 import { ethers } from 'ethers';
 import { getLIQinUSDC, getPegIAEROinAERO, getAEROinUSDC } from '@/lib/amm';

@@ -6,6 +6,8 @@ cache/
 
 # Production
 .next/
+.open-next/
+.wrangler/
 out/
 build/
 
@@ -13,6 +15,7 @@ build/
 .env
 .env.local
 .env.production.local
+.dev.vars*
 
 # Debug
 npm-debug.log*
