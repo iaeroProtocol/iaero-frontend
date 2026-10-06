@@ -1,10 +1,11 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
  Lock, Zap, Gift, Shield, Sparkles, TrendingUp, Coins, Banknote, Vault,
- MessageCircle, Twitter, BookOpen
+ MessageCircle, Twitter, BookOpen, ArrowLeftRight
 } from 'lucide-react';
 
 // Import your real components
@@ -16,6 +17,8 @@ import StakeSection from '@/components/protocol/StakeSection';
 import LiqStaking from '@/components/protocol/LiqStaking';
 import RewardsSection from '@/components/protocol/RewardsSection';
 import AutoVaultSection from '@/components/protocol/AutoVaultSection';
+import RiftErrorBoundary from '@/components/rift/RiftErrorBoundary';
+import { ORDERS_KEY } from '@/lib/rift/keys';
 import ToastNotification from '@/components/protocol/ToastNotification';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -36,6 +39,16 @@ const XIcon = ({ className }: { className?: string }) => (
   </svg>
 );
 
+// Get iAERO renders in the browser only, and loads the first time its tab is opened: it reads the wallet and
+// saved orders, and its code stays out of the page load for everyone else. Orders are tracked in the background,
+// on every tab, by OrderWatcher.
+const GetIaeroSection = dynamic(() => import('@/components/protocol/GetIaeroSection'), {
+  ssr: false,
+  loading: () => <div className="h-40 animate-pulse rounded-xl bg-slate-800/40" />,
+});
+// Loaded only in a browser that has orders, or once Get iAERO is opened.
+const OrderWatcher = dynamic(() => import('@/components/rift/OrderWatcher'), { ssr: false });
+
 // Utility function
 const formatNumber = (num: string | number) => {
  const n = typeof num === 'string' ? parseFloat(num) : num;
@@ -50,6 +63,17 @@ const formatNumber = (num: string | number) => {
 export default function IaeroProtocolApp() {
  const [toasts, setToasts] = useState<Array<{ id: number; message: string; type: 'success' | 'error' | 'info' | 'warning' }>>([]);
  const { stats, loading } = useProtocol() as any;
+ const [tab, setTab] = useState('lock');
+ // The Get iAERO tab trigger, focused by the hero's "Buy iAERO" (by ref: an id of our own would replace Radix's,
+ // which the tab panel's aria-labelledby points at).
+ const getIaeroTabRef = useRef<HTMLButtonElement>(null);
+ const goToGetIaero = () => {
+   setTab('get-iaero');
+   requestAnimationFrame(() => {
+     document.getElementById('protocol-tabs')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+     getIaeroTabRef.current?.focus({ preventScroll: true });
+   });
+ };
 
  let toastCounter = 0;
 
@@ -60,9 +84,30 @@ export default function IaeroProtocolApp() {
     setToasts(prev => prev.filter(t => t.id !== id));
   }, 5000);
 };
+ // Get iAERO is loaded when first opened, then kept mounted (hidden) so a purchase in progress survives tab switches.
+ const [getIaeroOpened, setGetIaeroOpened] = useState(false);
+ React.useEffect(() => { if (tab === 'get-iaero') setGetIaeroOpened(true); }, [tab]);
+ const [hasSavedOrders, setHasSavedOrders] = useState(false);
+ React.useEffect(() => {
+   const refresh = () => { try { setHasSavedOrders(!!localStorage.getItem(ORDERS_KEY)); } catch { /* storage blocked */ } };
+   const onStorage = (e: StorageEvent) => { if (e.key === ORDERS_KEY || e.key === null) refresh(); };
+   refresh();
+   window.addEventListener('storage', onStorage);
+   window.addEventListener('iaero-rift-orders', refresh);
+   return () => {
+     window.removeEventListener('storage', onStorage);
+     window.removeEventListener('iaero-rift-orders', refresh);
+   };
+ }, []);
 
  return (
    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950">
+     {/* Background tracking of Get iAERO orders, on every tab; an error in it renders nothing. */}
+     {(hasSavedOrders || getIaeroOpened) && (
+       <RiftErrorBoundary fallback={() => null}>
+         <OrderWatcher showToast={showToast} />
+       </RiftErrorBoundary>
+     )}
      {/* Animated Background */}
      <div className="fixed inset-0 overflow-hidden pointer-events-none">
        <div className="absolute -top-40 -right-40 w-80 h-80 bg-purple-500 rounded-full mix-blend-multiply filter blur-3xl opacity-10 animate-blob" />
@@ -73,8 +118,10 @@ export default function IaeroProtocolApp() {
      {/* Header */}
      <header className="relative z-10 border-b border-slate-800/50 backdrop-blur-xl bg-slate-900/50">
        <div className="w-full px-4 sm:px-6 lg:px-8 xl:px-12 2xl:px-16 py-4">
-         <div className="flex items-center justify-between">
-           <div className="flex items-center space-x-8">
+         {/* One row from md up: below lg the nav shows icons only, so the wallet button still fits beside it. On
+             phones the wallet button wraps under the logo. */}
+         <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+           <div className="flex min-w-0 items-center gap-6 xl:gap-8">
             <div className="flex items-center space-x-3">
               <div className="w-12 h-12 flex-shrink-0">
                 <Image 
@@ -86,32 +133,36 @@ export default function IaeroProtocolApp() {
                 />
               </div>
       
-               <div>
+               <div className="whitespace-nowrap">
                  <h1 className="text-xl md:text-2xl font-bold text-white">iAero Protocol</h1>
                  <p className="text-xs text-slate-400">Liquid Staking on Base</p>
                </div>
              </div>
              
-             <nav className="hidden md:flex items-center space-x-6">
+             <nav className="hidden md:flex items-center gap-4 xl:gap-6 whitespace-nowrap">
               {/* Token Sweeper - Prominent Link */}
               <a 
                 href="https://sweeper.iaero.finance" 
                 target="_blank" 
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-sm font-semibold rounded-lg shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 transition-all duration-300 hover:scale-105"
+                aria-label="Token Sweeper"
+                title="Token Sweeper"
+                className="inline-flex items-center gap-2 px-2.5 lg:px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-sm font-semibold rounded-lg shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 transition-all duration-300 hover:scale-105"
               >
                 <Sparkles className="w-4 h-4" />
-                <span>Token Sweeper</span>
+                <span className="hidden lg:inline">Token Sweeper</span>
               </a>
               
               <a 
                 href="https://docs.iaero.finance" 
                 target="_blank" 
                 rel="noopener noreferrer"
+                aria-label="Docs"
+                title="Docs"
                 className="text-slate-300 hover:text-white transition-colors text-sm lg:text-base flex items-center gap-2"
               >
                 <BookOpen className="w-4 h-4" />
-                <span>Docs</span>
+                <span className="hidden lg:inline">Docs</span>
               </a>
               <a 
                 href={OFFICIAL_DISCORD_URL}
@@ -133,15 +184,19 @@ export default function IaeroProtocolApp() {
               </a>
               <a 
                 href="/status"
+                aria-label="Points"
+                title="Points"
                 className="text-slate-300 hover:text-white transition-colors text-sm lg:text-base flex items-center gap-2"
               >
                 <TrendingUp className="w-4 h-4" />
-                <span>Points</span>
+                <span className="hidden lg:inline">Points</span>
               </a>
             </nav>
            </div>
            
-           <WalletConnection />
+           <div className="md:ml-auto">
+             <WalletConnection showToast={showToast} />
+           </div>
          </div>
        </div>
      </header>
@@ -224,16 +279,21 @@ export default function IaeroProtocolApp() {
          {/* Empty spacer for first card column */}
          <div className="hidden lg:block" />
          
-         {/* Buy iAERO - under veAERO Owned card */}
-         <div className="flex justify-center">
-           <a
-             href="https://aero.drome.eth.limo/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x81034fb34009115f215f5d5f564aac9ffa46a1dc&chain0=8453&chain1=8453"
-             target="_blank"
-             rel="noopener noreferrer"
+         {/* Buy iAERO - under veAERO Owned card: opens the Get iAERO tab (any token, any supported chain) */}
+         <div className="flex flex-col items-center gap-1">
+           <button
+             type="button"
+             onClick={goToGetIaero}
              className="inline-flex items-center justify-center gap-2 px-10 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-sm font-semibold rounded-lg shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 transition-all duration-300 hover:scale-105 w-full max-w-[220px]"
            >
              <Coins className="w-4 h-4" />
              Buy iAERO
+           </button>
+           <a
+             href="https://aero.drome.eth.limo/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x81034fb34009115f215f5d5f564aac9ffa46a1dc&chain0=8453&chain1=8453"
+             target="_blank" rel="noopener noreferrer" className="text-xs text-slate-400 hover:text-white"
+           >
+             or swap on Aerodrome
            </a>
          </div>
          
@@ -255,41 +315,58 @@ export default function IaeroProtocolApp() {
        </motion.div>
 
        {/* Main Protocol Interface */}
-       <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50 w-full max-w-7xl mx-auto">
+       <Card id="protocol-tabs" className="scroll-mt-4 bg-slate-800/50 backdrop-blur-xl border-slate-700/50 w-full max-w-7xl mx-auto">
          <CardContent className="p-8">
-           <Tabs defaultValue="lock" className="w-full">
-           <TabsList className="flex flex-wrap w-full mb-8 gap-1">
-            <TabsTrigger value="lock" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
-                <Lock className="w-4 h-4 mb-0.5 md:mb-0" />
-                <span>Lock</span>
+           <Tabs value={tab} onValueChange={setTab} className="w-full">
+           {/* Below md a 3 x 2 grid that grows with its rows (a fixed-height wrapping list overlapped the panel);
+               below lg each tab stacks its icon over a smaller label so the longer ones still fit. */}
+           <TabsList className="grid grid-cols-3 md:flex md:flex-wrap h-auto w-full mb-8 gap-1">
+            <TabsTrigger ref={getIaeroTabRef} value="get-iaero" className="flex-1 min-w-[70px] text-xs px-1 sm:px-2 py-1.5">
+              <div className="flex flex-col lg:flex-row items-center justify-center lg:gap-1">
+                <ArrowLeftRight className="w-4 h-4 mb-0.5 lg:mb-0" />
+                <span className="max-lg:text-[0.75em]">Get iAERO</span>
               </div>
             </TabsTrigger>
-            <TabsTrigger value="stake" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
-                <Zap className="w-4 h-4 mb-0.5 md:mb-0" />
-                <span>Stake</span>
+            <TabsTrigger value="lock" className="flex-1 min-w-[70px] text-xs px-1 sm:px-2 py-1.5">
+              <div className="flex flex-col lg:flex-row items-center justify-center lg:gap-1">
+                <Lock className="w-4 h-4 mb-0.5 lg:mb-0" />
+                <span className="max-lg:text-[0.75em]">Lock</span>
               </div>
             </TabsTrigger>
-            <TabsTrigger value="rewards" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
-                <Gift className="w-4 h-4 mb-0.5 md:mb-0" />
-                <span>Rewards</span>
+            <TabsTrigger value="stake" className="flex-1 min-w-[70px] text-xs px-1 sm:px-2 py-1.5">
+              <div className="flex flex-col lg:flex-row items-center justify-center lg:gap-1">
+                <Zap className="w-4 h-4 mb-0.5 lg:mb-0" />
+                <span className="max-lg:text-[0.75em]">Stake</span>
               </div>
             </TabsTrigger>
-            <TabsTrigger value="stake-liq" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
-                <Coins className="w-4 h-4 mb-0.5 md:mb-0" />
-                <span>LIQ</span>
+            <TabsTrigger value="rewards" className="flex-1 min-w-[70px] text-xs px-1 sm:px-2 py-1.5">
+              <div className="flex flex-col lg:flex-row items-center justify-center lg:gap-1">
+                <Gift className="w-4 h-4 mb-0.5 lg:mb-0" />
+                <span className="max-lg:text-[0.75em]">Rewards</span>
               </div>
             </TabsTrigger>
-            <TabsTrigger value="auto-vault" className="flex-1 min-w-[70px] text-xs px-2 py-1.5">
-              <div className="flex flex-col md:flex-row items-center justify-center md:gap-1">
-                <Vault className="w-4 h-4 mb-0.5 md:mb-0" />
-                <span>Auto-Vault</span>
+            <TabsTrigger value="stake-liq" className="flex-1 min-w-[70px] text-xs px-1 sm:px-2 py-1.5">
+              <div className="flex flex-col lg:flex-row items-center justify-center lg:gap-1">
+                <Coins className="w-4 h-4 mb-0.5 lg:mb-0" />
+                <span className="max-lg:text-[0.75em]">LIQ</span>
+              </div>
+            </TabsTrigger>
+            <TabsTrigger value="auto-vault" className="flex-1 min-w-[70px] text-xs px-1 sm:px-2 py-1.5">
+              <div className="flex flex-col lg:flex-row items-center justify-center lg:gap-1">
+                <Vault className="w-4 h-4 mb-0.5 lg:mb-0" />
+                <span className="max-lg:text-[0.75em]">Auto-Vault</span>
               </div>
             </TabsTrigger>
           </TabsList>
+
+             {/* Loaded on first open, then kept mounted (hidden when inactive). */}
+             <TabsContent value="get-iaero" forceMount className="data-[state=inactive]:hidden">
+               {getIaeroOpened && (
+                 <RiftErrorBoundary>
+                   <GetIaeroSection active={tab === 'get-iaero'} showToast={showToast} onGoToStake={() => setTab('stake')} />
+                 </RiftErrorBoundary>
+               )}
+             </TabsContent>
 
              <TabsContent value="lock">
                <LockSection showToast={showToast} formatNumber={formatNumber} />

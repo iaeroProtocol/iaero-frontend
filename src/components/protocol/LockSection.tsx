@@ -19,11 +19,11 @@ import {
   useDebounce,
   validateTokenAmount,
 } from "../lib/defi-utils";
-import { useSwitchChain } from 'wagmi';
-import { baseSepolia } from 'wagmi/chains';
-import { usePublicClient } from 'wagmi';
 import { getContractAddress } from '@/components/contracts/addresses';
 import { ABIS } from '@/components/contracts/abis';
+import { useProtocolPublicClient } from '@/lib/protocol-chain';
+import { SwitchToBaseCard } from '@/components/SwitchToBase';
+import { knownTxError } from '@/components/lib/tx-errors';
 
 interface LockSectionProps {
   showToast: (message: string, type: "success" | "error" | "info" | "warning") => void;
@@ -44,7 +44,8 @@ const MAX_DUST = BigInt(1000000000000000);
 
 // Helpers
 const msgFromError = (e: any, fallback = "Transaction failed") => {
-  if (e?.code === 4001) return "Transaction rejected by user";
+  const known = knownTxError(e);
+  if (known) return known;
   const m = String(e?.message || "").toLowerCase();
   if (m.includes("insufficient funds")) return "Insufficient ETH for gas fees";
   return fallback;
@@ -84,7 +85,6 @@ const calculateVeNFTRewards = (nft: any) => {
 
 export default function LockSection({ showToast, formatNumber }: LockSectionProps) {
   const { connected, networkSupported, balances, allowances, loading, chainId, account } = useProtocol();
-  const { switchChain } = useSwitchChain();
   const {
     depositAero,
     calculateLiqRewards,
@@ -95,7 +95,7 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
     depositVeNFT,
     loading: vaultLoading,
   } = useVault();
-  const publicClient = usePublicClient();
+  const publicClient = useProtocolPublicClient();
   // Tabs: deposit iAERO + LIQ, deposit existing veNFT, add to existing veNFT
   const [lockType, setLockType] = useState<"deposit" | "depositNFT">("deposit");
 
@@ -455,6 +455,9 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
     return addAmountBN === 0n || addAmountBN > aeroBN || selectedNFT == null || !!addError;
   };
 
+  // Wallet on another chain: no balances or live buttons, just the way back to Base.
+  if (connected && !networkSupported) return <SwitchToBaseCard what="lock AERO" showToast={showToast} />;
+
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="max-w-2xl mx-auto space-y-6">
       <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50">
@@ -670,33 +673,6 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
           </div>
         </CardContent>
       </Card>
-
-      {/* Network Helper */}
-      {connected && !networkSupported && (
-        <Card className="bg-amber-500/10 border border-amber-500/20">
-          <CardContent className="p-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-amber-400 font-medium">Wrong Network</p>
-                <p className="text-sm text-slate-300 mt-1">Please switch to Base Sepolia to continue</p>
-              </div>
-              <Button
-                onClick={async () => { 
-                  try { 
-                    switchChain({ chainId: baseSepolia.id });
-                  } catch (e) { 
-                    console.error(e); 
-                    showToast("Network switch failed", "error"); 
-                  } 
-                }}
-                className="bg-amber-600 hover:bg-amber-700"
-              >
-                Switch to Base Sepolia
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       {/* Approval Status */}
       {connected && networkSupported && (

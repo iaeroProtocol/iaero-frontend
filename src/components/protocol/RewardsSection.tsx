@@ -3,11 +3,12 @@
 // IMPROVED VERSION - Ported swap logic from Token Sweeper page.tsx
 // WITH POST-TRADE RESULTS MODAL
 // ==============================================
+import { SwitchToBaseCard } from '@/components/SwitchToBase';
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { usePublicClient, useWriteContract } from 'wagmi';
 import { computeStakingApyPct } from '@/lib/staking-apy';
+import { useProtocolPublicClient, useProtocolWriteContract } from '@/lib/protocol-chain';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -41,6 +42,7 @@ import {
   formatBigNumber,
 } from "../lib/defi-utils";
 import { usePrices } from "@/components/contexts/PriceContext";
+import { knownTxError } from '@/components/lib/tx-errors';
 
 // --------------------------------------------------------------------------
 // 1. CONFIGURATION & ABIS
@@ -379,7 +381,8 @@ interface JsonRewardItem {
 // 3. HELPERS
 // --------------------------------------------------------------------------
 const msgFromError = (e: any, fallback = "Transaction failed") => {
-  if (e?.code === 4001) return "Transaction rejected by user";
+  const known = knownTxError(e);
+  if (known) return known;
   const m = String(e?.message || "").toLowerCase();
   if (m.includes("insufficient funds")) return "Insufficient ETH for gas fees";
   if (m.includes("no pending rewards")) return "No rewards available to claim";
@@ -845,8 +848,9 @@ async function fetchRewardsFromChain(
 // --------------------------------------------------------------------------
 export default function RewardsSection({ showToast }: RewardsSectionProps) {
   const { connected, networkSupported, chainId, account, balances, loading } = useProtocol();
-  const publicClient = usePublicClient();
-  const { writeContractAsync } = useWriteContract();
+  // Reads, writes and receipts on Base (or Base Sepolia), wherever the wallet is: see protocol-chain.ts.
+  const publicClient = useProtocolPublicClient();
+  const { writeContractAsync } = useProtocolWriteContract();
   const { claimReward, loading: stakingLoading, calculateStakingAPR } = useStaking();
   const { prices } = usePrices();
 
@@ -3548,6 +3552,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
   // RENDER
   // ============================================================================
 
+  if (connected && !networkSupported) return <SwitchToBaseCard what="see and claim your rewards" showToast={showToast} />;
   if (!connected || !networkSupported) {
     return (
       <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="space-y-6">
@@ -3566,7 +3571,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="space-y-6">
       <Card className="bg-slate-800/50 backdrop-blur-xl border-slate-700/50">
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle className="text-white flex items-center space-x-2">
               <Gift className="w-6 h-6" />
               <span>Your Rewards</span>
@@ -3699,16 +3704,16 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                 ))}
               </div>
 
-              <div className="grid grid-cols-2 gap-3 mt-4">
-                <Button onClick={handleClaimAll} disabled={!hasRewards || isProcessing || stakingLoading || Boolean(claimingSpecific) || rewardsLoading || pricesLoading} className="col-span-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 py-6 text-lg">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
+                <Button onClick={handleClaimAll} disabled={!hasRewards || isProcessing || stakingLoading || Boolean(claimingSpecific) || rewardsLoading || pricesLoading} className="sm:col-span-2 h-auto whitespace-normal bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 py-6 text-lg">
                   {isProcessing ? <div className="flex items-center justify-center space-x-2"><Loader2 className="w-5 h-5 animate-spin" /><span>{progressStep || "Processing..."}</span></div> : <><Gift className="w-5 h-5 mr-2" />{hasRewards ? `Claim All Rewards (${formatUSD(totalRewardsUSD, 6)})` : "No Rewards to Claim"}</>}
                 </Button>
                 
-                <Button variant="secondary" onClick={handleClaimAndConvert} disabled={!hasRewards || isProcessing} className="bg-slate-700 text-blue-200 hover:bg-slate-600 border border-slate-600">
+                <Button variant="secondary" onClick={handleClaimAndConvert} disabled={!hasRewards || isProcessing} className="h-auto min-h-9 whitespace-normal bg-slate-700 text-blue-200 hover:bg-slate-600 border border-slate-600">
                   <RefreshCw className="w-4 h-4 mr-2" />Convert to USDC
                 </Button>
                 
-                <Button variant="secondary" onClick={handleClaimAndCompound} disabled={!hasRewards || isProcessing} className="bg-slate-700 text-purple-200 hover:bg-slate-600 border border-slate-600">
+                <Button variant="secondary" onClick={handleClaimAndCompound} disabled={!hasRewards || isProcessing} className="h-auto min-h-9 whitespace-normal bg-slate-700 text-purple-200 hover:bg-slate-600 border border-slate-600">
                   <TrendingUp className="w-4 h-4 mr-2" />Compound & Stake
                 </Button>
               </div>
@@ -3732,7 +3737,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
               <Button 
                 onClick={handleOpenCustomSweep}
                 disabled={isProcessing}
-                className="w-full h-12 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white border-0"
+                className="w-full h-auto min-h-12 whitespace-normal bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white border-0"
               >
                 <div className="flex items-center gap-2">
                   {isProcessing && progressStep.includes("Scanning") ? <Loader2 className="w-4 h-4 animate-spin"/> : <History className="w-4 h-4" />}

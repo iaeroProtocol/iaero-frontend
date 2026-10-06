@@ -1,6 +1,7 @@
 // =============================
 // src/components/protocol/LiqStaking.tsx
 // =============================
+import { SwitchToBaseCard } from '@/components/SwitchToBase';
 import React, { useState, useEffect, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,13 +9,15 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Coins, TrendingUp, Clock, Gift, AlertCircle, Loader2 } from "lucide-react";
 import { useProtocol } from "@/components/contexts/ProtocolContext";
-import { useAccount, useChainId, useWriteContract, usePublicClient } from 'wagmi';
+import { useAccount } from 'wagmi';
+import { useProtocolChainId, useProtocolPublicClient, useProtocolWriteContract } from '@/lib/protocol-chain';
 import { getContractAddress } from '@/components/contracts/addresses';
 import { ABIS } from '@/components/contracts/abis';
 import { parseTokenAmount } from "@/components/lib/ethereum";
 import { usePrices } from "@/components/contexts/PriceContext";
 import { formatUnits } from 'viem';
 import { useStaking } from "../contracts/hooks/useStaking";
+import { isUserRejection, txErrorMessage } from '@/components/lib/tx-errors';
 
 
 const ZERO = "0x0000000000000000000000000000000000000000";
@@ -85,9 +88,10 @@ type RowWithUsd = BaseRow & { usd: number };
 export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps) {
   const { connected, networkSupported, loadBalances, setTransactionLoading } = useProtocol();
   const { address } = useAccount();
-  const chainId = useChainId();
-  const publicClient = usePublicClient();
-  const { writeContractAsync } = useWriteContract();
+  const chainId = useProtocolChainId();
+  // Reads, writes and receipts on Base (or Base Sepolia), wherever the wallet is: see protocol-chain.ts.
+  const publicClient = useProtocolPublicClient();
+  const { writeContractAsync } = useProtocolWriteContract();
   // pricesLastUpdate flips from null → timestamp once real prices arrive; we
   // re-trigger loadStakingStats on that transition so the APR display refreshes
   // immediately instead of waiting for the next 30s interval (or a wallet
@@ -469,8 +473,9 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   const totalRewardsUSD = useMemo(() => rows.reduce((s, r) => s + r.usd, 0), [rows]);
 
   // Actions
-  const handleApprove = async () => {
-    if (!connected || !address) return;
+  /** Approve LIQ for staking; false when it was declined or failed (the caller must stop). */
+  const handleApprove = async (): Promise<boolean> => {
+    if (!connected || !address) return false;
     const txId = "approveLiq";
     setTransactionLoading(txId, true);
     setLoading(true);
@@ -493,9 +498,11 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       if (receipt && receipt.status !== "success") throw new Error(`Approval reverted: ${hash}`);
       showToast("LIQ approved!", "success");
       await loadLiqBalance();
+      return true;
     } catch (e: any) {
       console.error("Approval error:", e);
-      showToast(e.message || "Approval failed", "error");
+      showToast(txErrorMessage(e, "Approval failed"), isUserRejection(e) ? "info" : "error");
+      return false;
     } finally {
       setLoading(false);
       setTransactionLoading(txId, false);
@@ -513,7 +520,8 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       if (!liqStakingAddr) throw new Error("LIQ Staking contract not initialized");
       if (!publicClient) throw new Error("RPC client not available");
 
-      if (needsApproval) await handleApprove();
+      // No staking without the approval: a declined or failed one ends here (it has already said why).
+      if (needsApproval && !(await handleApprove())) return;
 
       const amount = parseTokenAmount(stakeAmount);
 
@@ -567,7 +575,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       await Promise.all([loadStakingStats(), loadLiqBalance(), loadBalances()]);
     } catch (e: any) {
       console.error("Staking error:", e);
-      showToast(e.message || "Staking failed", "error");
+      showToast(txErrorMessage(e, "Staking failed"), isUserRejection(e) ? "info" : "error");
     } finally {
       setLoading(false);
       setTransactionLoading(txId, false);
@@ -634,7 +642,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       await Promise.all([loadStakingStats(), loadLiqBalance(), loadBalances()]);
     } catch (e: any) {
       console.error("Unstaking error:", e);
-      showToast(e.message || "Unstaking failed", "error");
+      showToast(txErrorMessage(e, "Unstaking failed"), isUserRejection(e) ? "info" : "error");
     } finally {
       setLoading(false);
       setTransactionLoading(txId, false);
@@ -761,7 +769,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       setRewardsRefreshKey((k) => k + 1);
     } catch (e: any) {
       console.error("Claim error:", e);
-      showToast(e?.shortMessage || e?.message || "Claim failed", "error");
+      showToast(txErrorMessage(e, "Claim failed"), isUserRejection(e) ? "info" : "error");
     } finally {
       setLoading(false);
       setTransactionLoading(txId, false);
@@ -818,7 +826,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
       setRewardsRefreshKey((k) => k + 1);
     } catch (e: any) {
       console.error("Single-token claim error:", e);
-      showToast(e?.shortMessage || e?.message || "Claim failed", "error");
+      showToast(txErrorMessage(e, "Claim failed"), isUserRejection(e) ? "info" : "error");
     } finally {
       setClaimingAddr(null);
       setTransactionLoading(txId, false);
@@ -826,6 +834,7 @@ export default function LiqStaking({ showToast, formatNumber }: LiqStakingProps)
   };
   
   
+  if (connected && !networkSupported) return <SwitchToBaseCard what="stake LIQ" showToast={showToast} />;
   if (!connected || !networkSupported) {
     return (
       <div className="text-center py-12">
