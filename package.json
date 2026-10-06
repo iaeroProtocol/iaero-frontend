@@ -63,6 +63,9 @@
     "typescript": "^5"
   },
   "overrides": {
+    "minimatch@3.1.5": {
+      "brace-expansion": "1.1.21"
+    },
     "next@^15.5.24": {
       "postcss": "8.5.29"
     },
