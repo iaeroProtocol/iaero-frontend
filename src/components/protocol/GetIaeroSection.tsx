@@ -56,7 +56,7 @@ import {
   ethereumGasDeskWei, formatPct, gasDeskChains, gasDeskUsd, gasSwallows, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
 import {
-  btcLookChange, btcUnpaid, canPay, canRetryUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, PAY_HEARTBEAT_MS, paymentFacts, payState,
+  btcLookChange, btcUnpaid, canPay, canRetryUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, orderCreatedAt, PAY_HEARTBEAT_MS, paymentFacts, payState,
   payWindowOpen, sourceKindOf,
 } from '@/lib/rift/order-state';
 import {
@@ -627,14 +627,22 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       }
       const gasUsd = gasDeskUsd(chains, gasWei, px.ethUsd);
       // On a route Rift charges Ethereum gas for, a charge that can't be valued now isn't paid on trust (Buy would ask):
-      // no gas price, no ETH or iAERO price, or an order made before this page recorded what it expected.
-      if (chains.includes(1) && (gasUsd === null || !px.iaeroUsd || !o.expectedOut)) {
+      // no gas price, or no ETH or iAERO price.
+      if (chains.includes(1) && (gasUsd === null || !px.iaeroUsd)) {
         setError('Couldn’t value Rift’s gas charge for this order right now (a market price or Ethereum’s gas price is unavailable). Nothing was sent; try again in a moment.');
         return 'error';
       }
-      if (o.expectedOut && gasUsd !== null && px.iaeroUsd) {
+      // On any route: an order whose cost was checked at Buy (iAERO had a market price then) isn't paid with that check
+      // skipped because iAERO's price is missing now.
+      if (!px.iaeroUsd && o.marketIaeroUsd) {
+        setError('Couldn’t check this order’s cost against market prices right now (iAERO’s price is unavailable). Nothing was sent; try again in a moment.');
+        return 'error';
+      }
+      if (gasUsd !== null && px.iaeroUsd) {
         const after = Math.max(0, Number(q.estimated_amount_out) - gasUsd / px.iaeroUsd);
-        const dropAfter = priceDropPct(o.expectedOut, String(after));
+        // Against what the order expected after the charge (an order made while its cost couldn't be valued, ticked at
+        // Buy, has no such figure: the cost rule below still applies).
+        const dropAfter = o.expectedOut ? priceDropPct(o.expectedOut, String(after)) : 0;
         if (dropAfter > tolerance) {
           setError(`After Rift’s gas charge, this order now gets ${formatPct(dropAfter)} less iAERO than when you made it, more than your ${tolerance}% limit. Nothing was sent. Start a new order at today’s price.`);
           return 'dropped';
@@ -644,7 +652,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         const hl = sourceKindOf(o.sourceChain) === 'hypercore' ? HL_NEW_ADDRESS_FEE_USDC : 0;
         const usdIn = payWei !== undefined && px.ethUsd ? Number(o.fromAmount) * px.ethUsd + hl : o.marketUsdIn ?? null;
         const nowPct = usdIn ? costVsMarketPct(usdIn, after * px.iaeroUsd) : null;
-        const thenPct = o.marketUsdIn && o.marketIaeroUsd ? costVsMarketPct(o.marketUsdIn, Number(o.expectedOut) * o.marketIaeroUsd) : null;
+        const thenPct = o.marketUsdIn && o.marketIaeroUsd && o.expectedOut ? costVsMarketPct(o.marketUsdIn, Number(o.expectedOut) * o.marketIaeroUsd) : null;
         if (nowPct !== null && costWorseThanAccepted(nowPct, thenPct)) {
           setError(`This order now costs ${formatPct(nowPct)} against market prices${thenPct !== null ? ` (${formatPct(thenPct)} when you made it)` : ''}. Nothing was sent. Start a new order to review it.`);
           return 'dropped';
@@ -1191,7 +1199,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       }
       let baseFromBlock: string | undefined;
       try { baseFromBlock = basePublic ? String(await basePublic.getBlockNumber()) : undefined; } catch { /* optional */ }
-      const created = Date.now();
+      const created = orderCreatedAt(order.created_at, Date.now());
       const stored: StoredOrder = {
         id: order.id, quoteId: q.id, createdAt: created, sourceChain: chainKey,
         token: { symbol: token.symbol, decimals: token.decimals, address: token.address, asset: token.asset },
@@ -1255,12 +1263,15 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   /** Before a Bitcoin order with no payment seen is removed at the user's request: one fresh look at its address. A
    *  payment made from another wallet, or one another tab saw but could not save, must not go with the order. Says
    *  why when it stays. Other orders pass. */
-  async function stillUnpaid(rendered: StoredOrder): Promise<boolean> {
+  async function stillUnpaid(rendered: StoredOrder, { unreachableOk = false }: { unreachableOk?: boolean } = {}): Promise<boolean> {
     const o = loadOrders().find(x => x.id === rendered.id) ?? rendered; // as stored now
     if (!btcUnpaid(o)) return true;
     let seen: Awaited<ReturnType<typeof lookAtBtcAddress>>;
     const asked = Date.now();
     try { seen = await lookAtBtcAddress(o.depositAddress, o.btc?.txid); } catch {
+      // `unreachableOk`: a removal the user confirmed, offered because the address can't be checked (or Rift no
+      // longer answers): it goes ahead.
+      if (unreachableOk) return true;
       setError(`Couldn’t check the Bitcoin address of order ${o.id} before removing it, so it stays. Try again in a moment.`);
       return false;
     }
@@ -1275,6 +1286,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   /** Removed at the user's explicit request ("Remove from this browser"), only if its payment is as they saw it
    *  (order-state.ts paymentFacts): another tab may have recorded a payment since. */
   const forget = async (o: StoredOrder) => {
+    // An unpaid Bitcoin order's address is looked at first, when it can be (a payment found keeps the order).
+    if (!(await stillUnpaid(o, { unreachableOk: true }))) return;
     const seen = paymentFacts(o);
     const r = await removeOrders([o.id], x => paymentFacts(x) === seen);
     // Removed, here or already by another tab.
@@ -1287,7 +1300,6 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
    *  Bitcoin order's address, and only if its payment is as it was. */
   const removeDamaged = async (o: StoredOrder) => {
     if (!window.confirm(`Remove this order from this browser? Keep its ID first if you may need Rift’s support: ${o.id}`)) return;
-    if (!(await stillUnpaid(o))) return;
     await forget(o);
   };
 

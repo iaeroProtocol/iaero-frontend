@@ -129,7 +129,7 @@ export function parseLlamaQuotes(json: unknown, nowMs: number, referenceId?: str
   for (const [id, c] of Object.entries(coins)) {
     const price = Number(c?.price);
     const ts = Number(c?.timestamp);
-    if (!(price > 0) || !Number.isFinite(price)) continue;
+    if (!(price > 0) || !(price < 1e9)) continue; // (as holdings.ts usdPrice: nothing is worth a billion each)
     if (!(ts > 0) || nowSec - ts > PRICE_MAX_AGE_SEC) continue;
     if (c?.confidence !== undefined && !(Number(c.confidence) >= 0.9)) continue;
     out[id] = { price, ts };
@@ -178,13 +178,17 @@ export const ethereumGasDeskWei = (chains: number[], ethGasPriceWei: bigint): bi
  * the payment's USD value (`payUsd`, when its price and ETH's are known). An unknown Ethereum gas price counts as
  * ETHEREUM_GAS_FLOOR_WEI: an order that would certainly be swallowed is refused, not ticked through.
  */
+/** ETH's price, if plausible (a nonsense price from a broken source counts as none). */
+export const plausibleEthUsd = (p: number | undefined): p is number => p !== undefined && p >= 1 && p < 1e7;
+
 export function gasSwallows(x: { chains: number[]; gasWei?: bigint; ethUsd?: number; payWei?: bigint; payUsd?: number | null }): boolean {
   // A gas price of zero (a node answering nonsense) counts as unknown.
   const gas = x.gasWei !== undefined && x.gasWei > 0n ? x.gasWei : ETHEREUM_GAS_FLOOR_WEI;
   if (x.payWei !== undefined) {
     // The Layer 2 charges (in USD) too, when ETH's price is known.
     const l2Usd = x.chains.filter(c => c !== 1).length * L2_GAS_DESK_USD;
-    const l2Wei = x.ethUsd && x.ethUsd > 0 ? BigInt(Math.ceil((l2Usd / x.ethUsd) * 1e18)) : 0n;
+    const wei = plausibleEthUsd(x.ethUsd) ? Math.ceil((l2Usd / x.ethUsd!) * 1e18) : 0;
+    const l2Wei = Number.isSafeInteger(wei) || (Number.isFinite(wei) && wei < 1e30) ? BigInt(wei) : 0n;
     return x.payWei <= ethereumGasDeskWei(x.chains, gas) + l2Wei;
   }
   const usd = gasDeskUsd(x.chains, gas, x.ethUsd);
@@ -196,7 +200,7 @@ export function gasDeskUsd(chains: number[], ethGasPriceWei: bigint | undefined,
   let usd = 0;
   for (const chain of chains) {
     if (chain !== 1) { usd += L2_GAS_DESK_USD; continue; }
-    if (!ethGasPriceWei || !ethUsd) return null;
+    if (!ethGasPriceWei || !plausibleEthUsd(ethUsd)) return null;
     usd += (Number(ethGasPriceWei) * ETHEREUM_GAS_DESK_UNITS / 1e18) * ethUsd;
   }
   return usd;

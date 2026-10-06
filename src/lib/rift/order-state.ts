@@ -242,6 +242,14 @@ export function btcLookEveryMs(o: StoredOrder, now: number, { errors = 0, failin
  *  nothing counts: a payment sent at the last minute takes a while to show. */
 export const BTC_GRACE_MS = 15 * 60_000;
 
+/** When an order was made, for its pay window: Rift's own time when this computer's clock is ahead of it (within a
+ *  day; a clock put back later would otherwise keep the window, and a Bitcoin QR code, open for hours), else this
+ *  clock's. */
+export function orderCreatedAt(riftCreatedAt: string, now: number): number {
+  const riftAt = Date.parse(riftCreatedAt);
+  return Number.isFinite(riftAt) && riftAt < now && now - riftAt < 864e5 ? riftAt : now;
+}
+
 /** A time this page stored that is in the future: written while the clock ran ahead, since put back. It counts as
  *  absent (or is replaced), never as fresh: it would hold things up, or prove them, until the clock caught up. */
 export const fromFuture = (t: number | undefined, now = Date.now()) => t !== undefined && t > now + 1000;
@@ -252,7 +260,9 @@ export const fromFuture = (t: number | undefined, now = Date.now()) => t !== und
 export function btcCheckpoint(o: StoredOrder, now = Date.now()): number {
   const window = o.createdAt + BTC_PAY_WINDOW_MS + BTC_GRACE_MS;
   if (o.status !== 'expired') return window;
-  const expired = o.statusTimes.expired ?? o.createdAt;
+  // (No expiry time recorded: Rift's deadline, which it expires the order at, not the order's creation.)
+  const deadlineAt = Date.parse(o.depositDeadline);
+  const expired = o.statusTimes.expired ?? (Number.isFinite(deadlineAt) ? deadlineAt : o.createdAt);
   if (!fromFuture(expired, now)) return expired;
   const deadline = Date.parse(o.depositDeadline);
   return Number.isFinite(deadline) && !fromFuture(deadline, now) ? Math.max(deadline, window) : window;

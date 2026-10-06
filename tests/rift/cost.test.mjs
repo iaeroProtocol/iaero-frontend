@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { costLevel, costVsMarketPct, costWorseThanAccepted, deliveredVsQuotedPct, formatPct, gasSwallows, parseLlamaQuotes, priceDropPct } from '../../src/lib/rift/cost.ts';
+import { costLevel, costVsMarketPct, costWorseThanAccepted, deliveredVsQuotedPct, formatPct, gasDeskUsd, gasSwallows, parseLlamaQuotes, priceDropPct } from '../../src/lib/rift/cost.ts';
 
 test('cost against market prices, from a real quote', () => {
   // $500 in, 830 iAERO out at $0.5976: $496.01 of iAERO, so 0.8%.
@@ -183,4 +183,15 @@ test('round 10: a card\'s Pay asks for a new order when the cost is now high and
   assert.equal(costWorseThanAccepted(3.5, 3.2), false, 'high then too, and within half a point: the tick at Buy covers it');
   assert.equal(costWorseThanAccepted(2.9, 1), false, 'not high');
   assert.equal(costWorseThanAccepted(4, null), true, 'unknown then');
+});
+
+test('round 11: a nonsense ETH price (from a broken source) counts as none, and never throws', () => {
+  // 1e-300 made the Layer 2 conversion BigInt(Infinity), which threw while the page rendered.
+  assert.doesNotThrow(() => gasSwallows({ chains: [42161, 8453], ethUsd: 1e-300, payWei: 10n ** 15n }));
+  assert.equal(gasDeskUsd([1, 8453], 10n ** 9n, 1e-300), null, 'the Ethereum charge can\'t be valued');
+  assert.equal(gasDeskUsd([1, 8453], 10n ** 9n, 1e12), null);
+  assert.ok(gasDeskUsd([1, 8453], 10n ** 9n, 4000) > 0);
+  const sec = Math.floor(Date.now() / 1000);
+  assert.deepEqual(Object.keys(parseLlamaQuotes({ coins: { a: { price: 1e12, timestamp: sec }, b: { price: 2, timestamp: sec } } }, Date.now())), ['b'],
+    'a price of a billion or more is none');
 });

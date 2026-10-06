@@ -16,7 +16,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useReadContracts } from 'wagmi';
 import { base } from 'wagmi/chains';
 import { IAERO_ADDRESS } from './config';
-import { clAeroPerIaero, freshPrice, llamaIdOf, parseLlamaQuotes, v2AeroPerIaero, type LlamaQuote } from './cost';
+import { clAeroPerIaero, freshPrice, llamaIdOf, parseLlamaQuotes, plausibleEthUsd, v2AeroPerIaero, type LlamaQuote } from './cost';
 
 const AERO_ID = 'base:0x940181a94a35a4569e4529a3cdfb74e38fd98631';
 const ETH_ID = 'coingecko:ethereum';
@@ -112,7 +112,7 @@ export function useMarketPrices(asset: string | undefined, enabled = true): Mark
     return {
       iaeroUsd: poolFresh && aeroUsd ? aeroPerIaero * aeroUsd : undefined,
       inputUsd: inputId ? (BASE_IDS.includes(inputId) ? pick(coreData, coreAt, inputId) : pick(tokenData, tokenAt, inputId)) : undefined,
-      ethUsd: pick(coreData, coreAt, ETH_ID),
+      ethUsd: (p => (plausibleEthUsd(p) ? p : undefined))(pick(coreData, coreAt, ETH_ID)),
     };
   }, [coreData, coreAt, tokenData, tokenAt, poolsAt, aeroPerIaero, inputId]);
 

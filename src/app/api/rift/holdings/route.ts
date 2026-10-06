@@ -395,8 +395,10 @@ export async function GET(request: NextRequest) {
       : null,
     holdsEth ? blockscoutEthUsd(deadline) : undefined,
   ]);
-  if (prices) holdings = applyLlamaPrices(holdings, prices, llamaChain);
-  const ethUsd = usdPrice(prices?.['coingecko:ethereum']) || blockscoutEth;
+  if (prices) holdings = applyLlamaPrices(holdings, prices, llamaChain, h => MAJOR.has(h.asset));
+  // An ETH price outside any plausible range counts as missing (ETH is then listed unvalued, not dropped as dust).
+  const plausibleEth = (p: number | undefined) => (p !== undefined && p >= 1 && p < 1e7 ? p : 0);
+  const ethUsd = plausibleEth(usdPrice(prices?.['coingecko:ethereum'])) || plausibleEth(blockscoutEth);
   if (ethUsd) holdings = holdings.map(h => (!h.address ? { ...h, priceUsd: ethUsd, valueUsd: usdValue(ethUsd, h.balanceRaw, h.decimals) } : h));
   holdings = [...holdings, ...hyperCoreHoldings(hyperBalances, prices ?? {})];
   // Tokens known to be real (ETH, major tokens, Rift's list) stay listed without a value when no price is to be

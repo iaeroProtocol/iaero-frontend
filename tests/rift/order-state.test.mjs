@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   PAY_WINDOW_MS, canMoveTo, canPay, capOrders, isAbandoned, isFinalStatus, isTerminalStatus, payState, payWindowOpen, phaseInput,
   BTC_MISSING_AFTER, BTC_GRACE_MS, btcCheckpoint, btcConfirmed, btcLookPatch, btcNeedsLook, btcPositive, btcUnchecked, btcUnpaid, canRetryUnknown, BTC_EMPTY_SPAN_MS, BTC_LOOK_FRESH_MS, btcLookEveryMs, doubtButExpired,
-  PRE_SEND_COOLDOWN_MS, btcLookChange, nonceUsed, paymentFacts, pastDeadline,
+  PRE_SEND_COOLDOWN_MS, btcLookChange, nonceUsed, paymentFacts, pastDeadline, orderCreatedAt,
   clearable, canHide, isOutOfDate, missingButExpired, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
 } from '../../src/lib/rift/order-state.ts';
 
@@ -535,4 +535,22 @@ test('round 10: a prompt or a cooldown stamped by a clock that ran ahead doesn\'
   // A cooldown from the future doesn't block Pay for hours.
   assert.equal(canPay(order({ depositFailed: true, depositFailReason: 'pre_send', preSendAt: now + 3 * 3600_000 }), 'evm', now), true);
   assert.equal(canPay(order({ depositFailed: true, depositFailReason: 'pre_send', preSendAt: now - 10_000 }), 'evm', now), false);
+});
+
+// --- Round 11 ---
+
+test('round 11: an order\'s pay window runs from Rift\'s time when this clock is ahead of it', () => {
+  const rift = T0;
+  assert.equal(orderCreatedAt(new Date(rift).toISOString(), rift + 2 * 3600_000), rift, 'the clock two hours ahead: Rift\'s time');
+  assert.equal(orderCreatedAt(new Date(rift).toISOString(), rift + 800), rift);
+  assert.equal(orderCreatedAt(new Date(rift + 5000).toISOString(), rift), rift, 'the clock behind: its own time, consistent with its own reads');
+  assert.equal(orderCreatedAt('soon', rift), rift, 'no readable time: this clock');
+  assert.equal(orderCreatedAt(new Date(rift - 3 * 864e5).toISOString(), rift), rift, 'days apart: nonsense, this clock');
+});
+
+test('round 11: an expired order with no expiry time recorded is checked from Rift\'s deadline, not its creation', () => {
+  const o = btcOrd({ status: 'expired', statusTimes: {} }); // deadline: T0 + 7 days
+  assert.equal(btcCheckpoint(o, T0 + 8 * 864e5), T0 + 7 * 864e5);
+  // A run of looks from before the deadline proves nothing.
+  assert.equal(btcUnchecked({ ...o, btc: { emptyAt: T0 + 3 * 864e5 } }, T0 + 8 * 864e5), true);
 });

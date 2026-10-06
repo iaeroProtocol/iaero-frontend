@@ -171,10 +171,13 @@ export function parseNative(chain: HoldingChain, json: unknown): Holding | null 
 }
 
 /** Fill in prices from DeFiLlama prices (cost.ts parseLlamaPrices: recent and confident only), keyed
- *  `<llamaChain>:<address>`. */
-export function applyLlamaPrices(holdings: Holding[], prices: Record<string, number>, llamaChainOf: (c: HoldingChain) => string): Holding[] {
+ *  `<llamaChain>:<address>`. `prefer`: holdings whose price DeFiLlama's replaces (our major tokens: a wrong tiny
+ *  price from Blockscout would hide a real balance). */
+export function applyLlamaPrices(
+  holdings: Holding[], prices: Record<string, number>, llamaChainOf: (c: HoldingChain) => string, prefer: (h: Holding) => boolean = () => false,
+): Holding[] {
   return holdings.map(h => {
-    if (h.priceUsd > 0 || !h.address) return h;
+    if ((h.priceUsd > 0 && !prefer(h)) || !h.address) return h;
     const price = prices[`${llamaChainOf(h.chain)}:${h.address}`];
     const p = usdPrice(price);
     return p > 0 ? { ...h, priceUsd: p, valueUsd: usdValue(p, h.balanceRaw, h.decimals) } : h;
