@@ -10,7 +10,8 @@
 // - Notices are deduplicated across tabs by the order's `notifiedStatus` and the browser notification's tag.
 // - Bitcoin orders whose address still needs looking at (order-state.ts btcNeedsLook) are looked at every 5
 //   minutes when no order card is doing it: a payment made from another wallet must not go unseen just because
-//   its order isn't open on screen.
+//   its order isn't open on screen. While a run of looks decides something (a payment gone, or nothing sent), each
+//   minute (order-state.ts btcWatchEveryMs).
 
 'use client';
 
@@ -20,12 +21,10 @@ import { parseOrderUpdate } from './validate';
 import { applyStatusUpdate, loadOrders, markPolled, patchOrder, polledWithin, pollStamps, recordWindowClosed, storageFailing } from './storage';
 import { lookAtBtcAddress } from './bitcoin';
 import { orderNotice } from './notice';
-import { btcLookChange, btcNeedsLook, isOutOfDate, isTerminalStatus, pastDeadline, pendingByLeastRecentPoll, windowCloseChange } from './order-state';
+import { btcLookChange, btcNeedsLook, btcWatchEveryMs, isOutOfDate, isTerminalStatus, pastDeadline, pendingByLeastRecentPoll, windowCloseChange } from './order-state';
 import type { RiftOrderStatus, StoredOrder } from './types';
 
 const POLL_MS = 60_000;
-/** A Bitcoin address no order card is watching is looked at this often (shared across tabs, `btc:<id>` stamps). */
-const BTC_LOOK_MS = 5 * 60_000;
 /** Unpaid past the window (it can only expire) or on hold (Rift's operators decide): now and then. */
 const IDLE_POLL_MS = 10 * 60_000;
 /** The page's notification service worker (public/), registered only when notifications are turned on. */
@@ -101,6 +100,7 @@ export function useOrderWatcher(
     if (!any) return;
     let stop = false;
     let running = false;
+    const failures = new Map<string, number>(); // looks that failed in a row, per order
     const tick = async () => {
       if (running) return;
       running = true;
@@ -108,17 +108,21 @@ export function useOrderWatcher(
         for (const o of ordersRef.current.filter(x => btcNeedsLook(x, Date.now()))) {
           if (stop) break;
           const key = `btc:${o.id}`;
-          if (polledWithin(key, BTC_LOOK_MS)) continue;
+          const latest = loadOrders().find(x => x.id === o.id) ?? o; // the payment recorded as of now
+          if (polledWithin(key, btcWatchEveryMs(latest, Date.now(), storageFailing(), failures.get(o.id) ?? 0))) continue;
           markPolled(key);
           try {
-            const latest = loadOrders().find(x => x.id === o.id) ?? o; // the payment recorded as of now
             const asked = Date.now();
             const seen = await lookAtBtcAddress(o.depositAddress, latest.btc?.txid);
+            failures.delete(o.id);
             if (stop) break;
             const look = { at: asked, answeredAt: Date.now(), failing: storageFailing() };
             // Storage judged again when the change is applied: its first refused write can be this one (or a replay).
             await patchOrder(o.id, prev => btcLookChange(prev, seen, { ...look, failing: look.failing || storageFailing() }));
-          } catch { /* mempool.space unreachable, or can't say: next round */ }
+          } catch {
+            // mempool.space unreachable, or can't say: a later round.
+            failures.set(o.id, (failures.get(o.id) ?? 0) + 1);
+          }
         }
       } finally {
         running = false;

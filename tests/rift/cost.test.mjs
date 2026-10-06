@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterGasOut, cardCostCheck, clickQuoteMove, costLevel, costVsMarketPct, costWorseThanAccepted, deliveredVsQuotedPct, formatPct, gasDeskUsd, gasSwallows, parseLlamaQuotes, priceDropPct, seenBaseline } from '../../src/lib/rift/cost.ts';
+import { afterGasOut, cardCostCheck, clickQuoteMove, costLevel, costVsMarketPct, costWorseThanAccepted, deliveredVsQuotedPct, formatPct, gasDeskUsd, gasSharePct, gasSwallows, parseLlamaQuotes, priceDropPct, seenBaseline, tickCovers } from '../../src/lib/rift/cost.ts';
 
 test('cost against market prices, from a real quote', () => {
   // $500 in, 830 iAERO out at $0.5976: $496.01 of iAERO, so 0.8%.
@@ -248,6 +248,9 @@ test('round 14: Buy at the click holds what arrives after Rift\'s gas charge to 
   assert.equal(clickQuoteMove(l2, { out: '99.5', chains: [42161, 8453] }, 1, undefined, px).moved, false);
   assert.equal(clickQuoteMove(viaEth, l2, 1, undefined, px).moved, false);
   assert.equal(clickQuoteMove(viaEth, viaEth, 1, undefined, px).moved, false, 'seen with its step: Rift\'s amount alone');
+  // Round 15: Rift's amount 2% lower but its Ethereum step gone: more arrives, so nothing to ask (it was "2% less").
+  assert.equal(clickQuoteMove(viaEth, { out: '98', chains: [42161, 8453] }, 1, 8n * gwei, px).moved, false);
+  assert.equal(clickQuoteMove(viaEth, { out: '98', chains: [42161, 8453] }, 1, undefined, px).moved, true, 'unvalued: Rift\'s amount');
   // Unvalued: Rift's own amount is still held to the limit.
   assert.equal(clickQuoteMove(l2, { out: '98', chains: [42161, 8453] }, 1, undefined, {}).moved, true);
 });
@@ -271,4 +274,56 @@ test('round 14: a card\'s cost rule without a USD value compares the gas charge\
   const odd = cardCostCheck({ ...blind, usdIn: Number.NaN, afterOut: 25 });
   assert.equal(odd.share, true);
   assert.equal(odd.refuse, true);
+});
+
+test('round 15: Buy at the click holds what was shown after the gas charge, so a gas price that rose within 3 s counts', () => {
+  // Quotes auditor, Low 1: both quotes were valued at the click's gas price, so a gas refresh landing just before the
+  // click (the figure the user read was the one before it) moved what arrives without a question.
+  const px = { ethUsd: 2500, iaeroUsd: 1 };
+  const gwei = 1_000_000_000n;
+  const shownAt = (g) => afterGasOut('100', [1], g, px); // Rift's 100 iAERO, a route on Ethereum
+  const before = { out: '100', chains: [1], after: shownAt(gwei / 4n) }; // read at 0.25 gwei: 99.0
+  const m = clickQuoteMove(before, { out: '100', chains: [1] }, 1, 6n * gwei / 10n, px); // bought at 0.6 gwei: 97.6
+  assert.equal(m.moved, true);
+  assert.ok(Math.abs(m.dropPct - (1 - 97.6 / 99) * 100) < 1e-9);
+  assert.equal(clickQuoteMove({ out: '100', chains: [1] }, { out: '100', chains: [1] }, 1, 6n * gwei / 10n, px).moved, false,
+    'what the page did before: both valued now');
+  // The seen figure follows the 3 s rule like the rest of the quote, and from "the future" the higher one counts.
+  const now = 1_790_930_000_000;
+  const shown = { key: 'k', since: now - 1000, prev: { out: '100', chains: [1], after: 99 } };
+  assert.equal(seenBaseline(shown, 'k', { out: '100', chains: [1], after: 97.6 }, now).after, 99);
+  assert.equal(seenBaseline({ ...shown, since: now - 20_000 }, 'k', { out: '100', chains: [1], after: 97.6 }, now).after, 97.6);
+  assert.equal(seenBaseline({ ...shown, since: now + 60_000 }, 'k', { out: '100', chains: [1], after: 97.6 }, now).after, 99);
+  assert.equal(seenBaseline({ ...shown, since: now + 60_000, prev: { out: '100', chains: [1], after: null } }, 'k', { out: '100', chains: [1], after: null }, now).after, null);
+  // A figure that couldn't be shown is valued now, as before.
+  assert.equal(clickQuoteMove({ out: '100', chains: [1], after: null }, { out: '100', chains: [1] }, 1, 6n * gwei / 10n, px).moved, false);
+});
+
+test('round 15: a cost tick covers only the route charges it was given with', () => {
+  // Payments auditor, Low: an "unknown cost" tick given for a Layer 2 route went on covering the route the 30 s refresh
+  // brought with an Ethereum step (Rift's charge there 82% of the order, valued on screen), with no new question.
+  const unknown = { kind: 'unknown' };
+  const l2 = { chains: [42161, 8453], share: 2 };
+  const tick = { key: 'k', kind: 'unknown', pct: NaN, ...l2 };
+  assert.equal(tickCovers(tick, 'k', unknown, l2), true, 'as ticked');
+  assert.equal(tickCovers(tick, 'k', unknown, { chains: [42161, 1, 8453], share: 82 }), false, 'a step on Ethereum added');
+  assert.equal(tickCovers(tick, 'k', unknown, { chains: [42161, 1, 8453], share: null }), false, '...even unvalued');
+  assert.equal(tickCovers(tick, 'k', unknown, { chains: [42161, 8453], share: 2.4 }), true, 'within half a point');
+  assert.equal(tickCovers(tick, 'k', unknown, { chains: [42161, 8453], share: 3 }), false, 'the charge\'s share grew');
+  assert.equal(tickCovers({ ...tick, share: null }, 'k', unknown, l2), false, 'ticked unvalued, valued now: asked again');
+  assert.equal(tickCovers(tick, 'k', unknown, { chains: [42161, 8453], share: null }), true, 'not valued now: no new news');
+  const eth = { chains: [1, 8453], share: 20 };
+  assert.equal(tickCovers({ ...tick, ...eth }, 'k', unknown, { chains: [42161, 8453], share: 2 }), true, 'a step dropped: cheaper');
+  // As before: the token and amount, the kind of check, and a known cost's size.
+  assert.equal(tickCovers(tick, 'other', unknown, l2), false);
+  assert.equal(tickCovers(tick, 'k', { kind: 'disagree', pct: -5 }, l2), false);
+  const high = { kind: 'ok', pct: 6, level: 'high' };
+  const okTick = { key: 'k', kind: 'ok', pct: 6, ...l2 };
+  assert.equal(tickCovers(okTick, 'k', { ...high, pct: 6.4 }, l2), true);
+  assert.equal(tickCovers(okTick, 'k', { ...high, pct: 6.6 }, l2), false);
+  assert.equal(tickCovers(null, 'k', unknown, l2), false);
+  // The share: the charge against Rift's quote.
+  assert.equal(gasSharePct('10', 1.8), 82);
+  assert.equal(gasSharePct('10', null), null);
+  assert.equal(gasSharePct('0', 1), null);
 });

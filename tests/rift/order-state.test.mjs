@@ -6,7 +6,7 @@ import {
   BTC_MISSING_AFTER, BTC_GRACE_MS, btcCheckpoint, btcConfirmed, btcLookPatch, btcNeedsLook, btcPositive, btcUnchecked, btcUnpaid, canRetryUnknown, BTC_EMPTY_SPAN_MS, BTC_LOOK_FRESH_MS, btcLookEveryMs, doubtButExpired,
   PRE_SEND_COOLDOWN_MS, btcLookChange, nonceUsed, paymentFacts, pastDeadline, windowCloseChange,
   clearable, canHide, isOutOfDate, missingButExpired, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
-  BTC_EMPTY_GAP_MS, shownOutOfDate,
+  BTC_EMPTY_GAP_MS, shownOutOfDate, btcLookSoon, btcWatchEveryMs, BTC_WATCH_LOOK_MS,
 } from '../../src/lib/rift/order-state.ts';
 
 const T0 = 1_790_930_000_000;
@@ -646,4 +646,75 @@ test('round 14: the run\'s latest answer time survives sanitizing', () => {
   assert.ok(sanitizeOrder(o), 'a valid record');
   assert.equal(sanitizeOrder(o).btc.emptyLastAt, T0 + 80_000);
   assert.equal(sanitizeOrder({ ...o, btc: { ...o.btc, emptyLastAt: 'soon' } }).btc.emptyLastAt, undefined, 'not a number: dropped');
+});
+
+// --- Round 15 ---
+
+/** A looker over simulated time: from `start`, looks at the address when `next` says, applying each answer to the record
+ *  as stored; `answer(t)` is what mempool.space says at t. Returns the order when `done` holds, or at `until`. */
+function lookOver(o, { start, until, answer, next, done }) {
+  let t = start;
+  while (t <= until) {
+    const r = lookNow(o.btc, answer(t), t, btcCheckpoint(o, t));
+    if (r.btc) o = { ...o, btc: r.btc };
+    if (done(o, t)) return { o, t };
+    t += next(o, t);
+  }
+  return { o, t: null };
+}
+
+test('round 15: a payment that vanishes long after it was seen is found missing, with the card open', () => {
+  // Bitcoin auditor, Medium (round-14 regression): past 75 minutes the card looked every 10 minutes, so with runs
+  // needing answers 2 minutes apart, "missing" was never decided; Rift's expiry then read as "a payment was sent".
+  const A = 'ab'.repeat(32);
+  const seen = { payments: [{ txid: A, confirmations: 0 }], totalSats: 100000n };
+  const o = btcOrd({ btc: { txid: A, confirmations: 0, firstSeenAt: T0 + 50 * 60_000, totalSats: '100000', payments: 1, lastSeenAt: T0 + 50 * 60_000 } });
+  const dropped = T0 + 100 * 60_000;
+  const r = lookOver(o, {
+    start: T0 + 51 * 60_000, until: T0 + 6 * 3600_000, answer: t => (t < dropped ? seen : EMPTY),
+    next: (x, t) => btcLookEveryMs(x, t), done: x => !!x.btc?.missing,
+  });
+  assert.ok(r.t !== null && r.t - dropped < 15 * 60_000, `missing ${r.t === null ? 'never' : `${(r.t - dropped) / 60_000} min after the drop`}`);
+  // An open run is looked at again soon; not once it is decided, nor for a confirmed payment, nor while storage fails.
+  const run = { ...o, btc: { ...o.btc, emptyChecks: 1, emptySince: dropped, emptyLastAt: dropped } };
+  const late = T0 + 2 * 3600_000;
+  assert.equal(btcLookSoon(run, late), true);
+  assert.equal(btcLookEveryMs(run, late), 20_000);
+  assert.equal(btcLookEveryMs(o, late), 10 * 60_000, 'no run open: the slow pace');
+  assert.equal(btcLookSoon({ ...run, btc: { ...run.btc, missing: true } }, late), false);
+  assert.equal(btcLookSoon({ ...run, btc: { ...run.btc, confirmed: true } }, late), false);
+  assert.equal(btcLookSoon(run, late, true), false, 'storage failing: empty answers wouldn\'t count');
+});
+
+test('round 15: the background watcher alone proves an unpaid order and finds a vanished payment', () => {
+  // Bitcoin auditor, Low (round-14 regression): the watcher's looks, 5 minutes apart, never made a run, so an unpaid
+  // order whose card wasn't opened was never proven unpaid (polled each minute for a week, looked at for ever after).
+  const o = btcOrd();
+  const cp = btcCheckpoint(o);
+  // The watcher: a round each minute, a look when the order's spacing has passed since its last look.
+  const sim = (answer, done) => {
+    let x = o, last = -Infinity;
+    for (let t = T0 + 60_000; t <= T0 + 6 * 3600_000; t += 60_000) {
+      if (t - last < btcWatchEveryMs(x, t, false, 0)) continue;
+      last = t;
+      const p = lookNow(x.btc, answer(t), t, btcCheckpoint(x, t));
+      if (p.btc) x = { ...x, btc: p.btc };
+      if (done(x, t)) return { x, t };
+    }
+    return { x, t: null };
+  };
+  const unpaid = sim(() => EMPTY, (x, t) => !btcUnchecked(x, t));
+  assert.ok(unpaid.t !== null && unpaid.t - cp < 6 * 60_000, `proven ${unpaid.t === null ? 'never' : `${(unpaid.t - cp) / 60_000} min after the checkpoint`}`);
+  assert.equal(isAbandoned(unpaid.x, unpaid.t), true, 'then out of date: polled now and then, clearable');
+  // Before the checkpoint, and with nothing deciding, the watcher's pace is unchanged.
+  assert.equal(btcWatchEveryMs(o, T0 + 30 * 60_000, false, 0), BTC_WATCH_LOOK_MS);
+  assert.equal(btcWatchEveryMs(o, cp + 1, false, 0), 20_000);
+  assert.equal(btcWatchEveryMs(o, cp + 1, false, 2), 80_000, 'backs off after failed looks');
+  assert.equal(btcWatchEveryMs(o, cp + 1, false, 9), BTC_WATCH_LOOK_MS, 'to its usual pace at most');
+  // A payment seen, then gone long after: the watcher's looks find it missing too.
+  const A = 'ab'.repeat(32);
+  const seenAns = { payments: [{ txid: A, confirmations: 0 }], totalSats: 100000n };
+  const dropped = T0 + 100 * 60_000;
+  const missing = sim(t => (t < dropped ? seenAns : EMPTY), x => !!x.btc?.missing);
+  assert.ok(missing.t !== null && missing.t - dropped < 12 * 60_000, `missing ${missing.t === null ? 'never' : `${(missing.t - dropped) / 60_000} min after the drop`}`);
 });

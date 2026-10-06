@@ -146,8 +146,8 @@ export const BTC_MISSING_AFTER = 5;
 export const BTC_EMPTY_SPAN_MS = 2 * 60_000;
 /** A run of empty answers is one stretch of looking: an answer more than this after the run's latest one (nobody was
  *  looking, or mempool.space couldn't be reached) starts a new run, so a lagging answer from before the gap and a few
- *  quick ones after it can't make up the span between them. (The order card looks every 20 s while it decides; the
- *  background watcher's looks, 5 minutes apart, record what they see but never make a run on their own.) */
+ *  quick ones after it can't make up the span between them. While a run is open (or a look past the checkpoint
+ *  decides), the card and the background watcher look again soon (btcLookSoon) so that it can complete. */
 export const BTC_EMPTY_GAP_MS = 2 * 60_000;
 
 /** Whether an empty answer asked `at` continues the run in `b`: begun no later than it, with an answer within
@@ -258,14 +258,33 @@ export const btcLookChange = (prev: StoredOrder, seen: BtcSeen, look: Omit<BtcLo
   btcLookPatch(prev.btc, seen, { ...look, checkpoint: btcCheckpoint(prev) });
 
 /** How often an order card looks at a Bitcoin address: every 20 s while the order can still be paid, and while a run of
- *  looks past its checkpoint is deciding "nothing was sent" (about two minutes; not while storage refuses writes, when
- *  that run can't complete); otherwise every 10 minutes. Failed looks back off, doubling up to 10 minutes. */
+ *  looks decides something (btcLookSoon: "nothing was sent" past its checkpoint, or a payment seen now gone; about two
+ *  minutes; not while storage refuses writes, when that run can't complete); otherwise every 10 minutes. Failed looks
+ *  back off, doubling up to 10 minutes. */
 export function btcLookEveryMs(o: StoredOrder, now: number, { errors = 0, failing = false } = {}): number {
-  const deciding = btcUnchecked(o, now) && now >= btcCheckpoint(o, now) && !failing;
   const base = (o.status === 'awaiting_deposit' && now < o.createdAt + BTC_PAY_WINDOW_MS + BTC_GRACE_MS && !fromFuture(o.createdAt, now))
-    || deciding ? 20_000 : 10 * 60_000;
+    || btcLookSoon(o, now, failing) ? 20_000 : 10 * 60_000;
   return Math.min(base * 2 ** Math.min(errors, 10), 10 * 60_000);
 }
+
+/** Whether a Bitcoin order's address is looked at again soon (every 20 s on its card, each minute in the background,
+ *  rather than every few minutes): while looks past its checkpoint decide whether anything was sent, or while a run of
+ *  empty answers about a payment seen (still unconfirmed) is open. Either needs answers within BTC_EMPTY_GAP_MS of
+ *  each other, which looks minutes apart never give. Not while storage refuses writes: the answers wouldn't count. */
+export function btcLookSoon(o: StoredOrder, now: number, failing = false): boolean {
+  if (failing || KIND_OF[o.sourceChain] !== 'bitcoin') return false;
+  const deciding = btcUnchecked(o, now) && now >= btcCheckpoint(o, now);
+  const runOpen = !!o.btc?.txid && !o.btc.missing && !btcConfirmed(o.btc) && (o.btc.emptyChecks ?? 0) > 0;
+  return deciding || runOpen;
+}
+
+/** A Bitcoin address no order card is watching is looked at this often (watch.ts; shared across tabs, `btc:<id>`
+ *  stamps), */
+export const BTC_WATCH_LOOK_MS = 5 * 60_000;
+/** ...or, while it should be looked at soon (btcLookSoon), at each of the watcher's rounds (a minute apart), backing off
+ *  to BTC_WATCH_LOOK_MS after looks that failed (`failures` in a row). */
+export const btcWatchEveryMs = (o: StoredOrder, now: number, failing: boolean, failures: number) =>
+  btcLookSoon(o, now, failing) ? Math.min(20_000 * 2 ** Math.min(failures, 10), BTC_WATCH_LOOK_MS) : BTC_WATCH_LOOK_MS;
 
 /** A Bitcoin order's address is still watched this long after its pay window closes before a look finding
  *  nothing counts: a payment sent at the last minute takes a while to show. */

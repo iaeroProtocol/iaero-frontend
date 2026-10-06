@@ -53,7 +53,7 @@ import {
 } from '@/lib/rift/hypercore';
 import {
   DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, afterGasOut, assessCost, cardCostCheck, clickQuoteMove, costNeedsTick, costText,
-  seenBaseline, type SeenQuote,
+  gasSharePct, seenBaseline, tickCovers, type CostTick, type SeenQuote,
   ethereumGasDeskWei, formatPct, gasDeskChains, gasDeskUsd, gasSwallows, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
 import {
@@ -100,10 +100,13 @@ const LEVEL_WORD: Record<CostLevel, string> = { low: 'Low', medium: 'Moderate', 
 const CHAIN_NAMES: Record<number, string> = { 1: 'Ethereum', 42161: 'Arbitrum', 8453: 'Base' };
 const chainList = (ids: number[]) => ids.map(id => CHAIN_NAMES[id] ?? `chain ${id}`).join(' and ');
 
-/** A quote that moved between what was seen (its amount, and the chains its route was charged gas on) and the click. */
-interface PriceMove { seenOut: string; seenChains: number[]; quote: RiftQuote; fetchedAt: number; dropPct: number; limit: number; routeChanged: boolean }
-/** The user's tick on a cost that needs one: for this token and amount, and this kind of check. */
-interface Ack { key: string; kind: CostCheck['kind']; pct: number }
+/** A quote that moved between what was seen (its amount, the chains its route was charged gas on, and what it showed
+ *  would arrive after that charge) and the click. */
+interface PriceMove {
+  seenOut: string; seenChains: number[]; seenAfter?: number | null; quote: RiftQuote; fetchedAt: number; dropPct: number; limit: number; routeChanged: boolean;
+}
+/** The user's tick on a cost that needs one (cost.ts CostTick). */
+type Ack = CostTick;
 
 interface Props {
   /** The tab is showing: holdings, quotes, prices and route checks run only then. */
@@ -501,26 +504,28 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   const expectedOut = quote ? Math.max(0, expected?.out ?? Number(quote.estimated_amount_out)) : 0;
   const cost = quote ? costOf(quote, market, gasNow) : null;
   const ackKey = quoteKey;
-  // A tick covers this token and amount, the same kind of check and (for a known cost) no more than half a
-  // point worse; "prices disagree" is one state whatever the size of the gap.
-  const ackCovers = (a: Ack | null, c: CostCheck) =>
-    !!a && a.key === ackKey && a.kind === c.kind && (c.kind !== 'ok' || c.pct <= a.pct + 0.5);
+  // The charges of the route on screen: a tick covers no worse ones than it was given with (cost.ts tickCovers).
+  const shownCharge = { chains: quote ? gasDeskChains(quote.route) : [], share: quote ? gasSharePct(quote.estimated_amount_out, expected?.out) : null };
+  const ackCovers = (a: Ack | null, c: CostCheck, route = shownCharge) => tickCovers(a, ackKey, c, route);
   const needsAck = !!cost && costNeedsTick(cost.check) && !ackCovers(ack, cost.check);
   const tooSmall = !!cost?.tooSmall;
 
-  // What you saw: the quote on screen (its amount and the chains its route is charged gas on), or the one before it if
-  // it changed in the last 3 seconds (a refresh landing just before your click is not something you had time to read).
+  // What you saw: the quote on screen (its amount, the chains its route is charged gas on, and what it shows will arrive
+  // after that charge, which moves with the gas price and market prices too), or the one before it if it changed in the
+  // last 3 seconds (a change landing just before your click is not something you had time to read).
+  const shownAfter = expected ? expected.out : null;
   const shown = useRef<{ key: string; view: SeenQuote; since: number; prev?: SeenQuote } | null>(null);
   useEffect(() => {
     if (!quote) return;
     const key = `${quote.from}|${quote.from_amount}`;
-    const view: SeenQuote = { out: quote.estimated_amount_out, chains: gasDeskChains(quote.route) };
+    const view: SeenQuote = { out: quote.estimated_amount_out, chains: gasDeskChains(quote.route), after: shownAfter };
     const s = shown.current;
-    if (s && s.key === key && s.view.out === view.out && s.view.chains.join() === view.chains.join()) return;
+    if (s && s.key === key && s.view.out === view.out && s.view.chains.join() === view.chains.join() && s.view.after === view.after) return;
     shown.current = { key, view, since: Date.now(), prev: s?.key === key ? s.view : undefined };
-  }, [quote]);
-  // A price move belongs to the token and amount it was found for.
-  useEffect(() => { setMoved(null); }, [token?.asset, quoteAmount]);
+  }, [quote, shownAfter]);
+  // A price move, and the ticks, belong to the token and amount they were given for: one shown again later (back to an
+  // earlier amount) is read and ticked again, its first quote having no "before" to be held against.
+  useEffect(() => { setMoved(null); setAck(null); setSettlementAckKey(null); }, [token?.asset, quoteAmount]);
 
   // --- Orders ---
   useEffect(() => {
@@ -1189,7 +1194,10 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       const gasWei = gasAt(Date.now());
       const move = clickQuoteMove(seen, { out: q.estimated_amount_out, chains: gasDeskChains(q.route) }, tolerance, gasWei, px);
       if (move.moved) {
-        setMoved({ seenOut: seen.out, seenChains: seen.chains, quote: q, fetchedAt, dropPct: move.dropPct, limit: tolerance, routeChanged: move.routeChanged });
+        setMoved({
+          seenOut: seen.out, seenChains: seen.chains, seenAfter: seen.after, quote: q, fetchedAt, dropPct: move.dropPct, limit: tolerance,
+          routeChanged: move.routeChanged,
+        });
         return;
       }
       // The cost tick, against the price actually used and market prices as they are now (it can cross into
@@ -1197,8 +1205,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       const freshExpected = expectedFor(q, px, gasWei);
       const freshCost = costOf(q, px, gasWei);
       if (freshCost.tooSmall) throw new Error('This amount is too small: Rift’s gas charge is more than the order is worth.');
-      if (costNeedsTick(freshCost.check) && !ackCovers(ack, freshCost.check)) {
-        throw new Error('The cost changed with the latest prices. Nothing was sent: tick the confirmation above to continue.');
+      const freshCharge = { chains: gasDeskChains(q.route), share: gasSharePct(q.estimated_amount_out, freshExpected?.out) };
+      if (costNeedsTick(freshCost.check) && !ackCovers(ack, freshCost.check, freshCharge)) {
+        throw new Error('The cost changed with the latest prices (or Rift’s gas charge for this route did). Nothing was sent: tick the confirmation above to continue.');
       }
       stillSameAccount();
 
@@ -1328,9 +1337,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     await forget(o, { strict: true });
   };
 
-  // The price-moved panel shows what arrives after Rift's gas charge, as the quote panel does, each quote on its own
-  // route (Rift's own amounts while either charge can't be valued).
-  const movedSeenAfter = moved ? afterGasOut(moved.seenOut, moved.seenChains, gasNow, market) : null;
+  // The price-moved panel shows what arrives after Rift's gas charge, as the quote panel does: what was seen as it was
+  // shown, the new quote on its own route now (Rift's own amounts while either can't be valued).
+  const movedSeenAfter = moved ? (typeof moved.seenAfter === 'number' ? moved.seenAfter : afterGasOut(moved.seenOut, moved.seenChains, gasNow, market)) : null;
   const movedNowAfter = moved ? afterGasOut(moved.quote.estimated_amount_out, gasDeskChains(moved.quote.route), gasNow, market) : null;
   const movedValued = movedSeenAfter !== null && movedNowAfter !== null;
   const movedSeen = moved ? Math.max(0, movedValued ? movedSeenAfter : Number(moved.seenOut)) : 0;
@@ -1562,7 +1571,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
                           <label className="flex cursor-pointer items-start gap-2 pt-1 text-xs">
                             <input
                               type="checkbox" checked={ackCovers(ack, c)} disabled={!!busy} className="mt-0.5 h-4 w-4 shrink-0 accent-red-500"
-                              onChange={e => setAck(e.target.checked ? { key: ackKey, kind: c.kind, pct: c.kind === 'ok' ? c.pct : NaN } : null)}
+                              onChange={e => setAck(e.target.checked ? { key: ackKey, kind: c.kind, pct: c.kind === 'ok' ? c.pct : NaN, ...shownCharge } : null)}
                             />
                             <span>
                               {c.kind === 'ok'

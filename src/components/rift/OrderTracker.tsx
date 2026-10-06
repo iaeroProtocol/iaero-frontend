@@ -25,7 +25,7 @@ import RouteSteps, { type StepLink } from './RouteSteps';
 import { badgeStyle } from './status';
 import { classifyRiftError, getOrder, riftBudget } from '@/lib/rift/client';
 import { parseOrderUpdate } from '@/lib/rift/validate';
-import { applyStatusUpdate, markPolled, patchOrder, polledWithin, recordWindowClosed, storageFailing } from '@/lib/rift/storage';
+import { applyStatusUpdate, loadOrders, markPolled, patchOrder, polledWithin, recordWindowClosed, storageFailing } from '@/lib/rift/storage';
 import { btcToSats, lookAtBtcAddress } from '@/lib/rift/bitcoin';
 import { hyperCoreToken } from '@/lib/rift/hypercore';
 import { accountNonce, evmDepositEvidence, hyperDepositEvidence, minedPayment } from '@/lib/rift/payment-io';
@@ -271,7 +271,10 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
           if (!stop) setBtcErrors(errors);
         }
       }
-      if (!stop) timer = setTimeout(tick, shared ? 15_000 : btcLookEveryMs(orderRef.current, Date.now(), { errors, failing: storageFailing() }));
+      // The next look's time from the record as stored now (the render can lag the look just made: a run it opened is
+      // followed up soon, order-state.ts btcLookSoon).
+      const latest = loadOrders().find(x => x.id === order.id) ?? orderRef.current;
+      if (!stop) timer = setTimeout(tick, shared ? 15_000 : btcLookEveryMs(latest, Date.now(), { errors, failing: storageFailing() }));
     };
     tick();
     return () => { stop = true; if (timer) clearTimeout(timer); };
