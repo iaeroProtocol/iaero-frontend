@@ -352,7 +352,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   });
   const custom = manualHolding && manualHolding.owner.toLowerCase() === address?.toLowerCase() ? manualHolding.holding : null;
   const holdings = useMemo(() => mergeRecoveredHoldings(holdingsQuery.data?.holdings ?? [], [
-    ...(alchemyQuery.data?.holdings ?? []), ...(custom ? [custom] : []),
+    ...(custom ? [custom] : []), ...(alchemyQuery.data?.holdings ?? []),
   ]), [holdingsQuery.data, alchemyQuery.data, custom]);
   const support = useRiftSupport(holdings.filter(h => h.asset !== custom?.asset), active);
   // A token entered by contract is deliberately offered for a direct quote; the quote and Buy's on-chain

@@ -43,6 +43,8 @@ test('on-chain holdings win over recovered copies and the merged list is ranked'
   const recovered = parseAlchemyHoldings('base', owner, [row()], known, excluded, now);
   const primary = { ...recovered[0], balanceRaw: '25000000', valueUsd: 50 };
   assert.deepEqual(mergeRecoveredHoldings([primary], recovered), [primary]);
+  const direct = { ...recovered[0], balanceRaw: '75000000', valueUsd: 150 };
+  assert.deepEqual(mergeRecoveredHoldings([], [direct, ...recovered]), [direct], 'a direct on-chain read wins over an Alchemy copy');
   const more = parseAlchemyHoldings('base', owner, [row(knownToken, { tokenBalance: '0x5f5e100' })], known, excluded, now);
   assert.deepEqual(mergeRecoveredHoldings([primary], more).map(h => h.asset), [`base.${knownToken}`, `base.${token}`]);
 });

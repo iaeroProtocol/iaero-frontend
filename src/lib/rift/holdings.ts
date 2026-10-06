@@ -241,10 +241,17 @@ export function parseAlchemyHoldings(
   return out;
 }
 
-/** The server's on-chain balances win for tokens it already found. */
+/** The server's on-chain balances win for tokens it already found; among extra sources, the first wins. */
 export function mergeRecoveredHoldings(primary: Holding[], recovered: Holding[]): Holding[] {
   const seen = new Set(primary.map(h => h.asset.toLowerCase()));
-  return rankHoldings([...primary, ...recovered.filter(h => !seen.has(h.asset.toLowerCase()))]);
+  const extras: Holding[] = [];
+  for (const h of recovered) {
+    const asset = h.asset.toLowerCase();
+    if (seen.has(asset)) continue;
+    seen.add(asset);
+    extras.push(h);
+  }
+  return rankHoldings([...primary, ...extras]);
 }
 
 /** Route checks use at most this much of a holding, so a big balance does not fail on liquidity alone. */
