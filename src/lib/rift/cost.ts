@@ -51,17 +51,67 @@ export function costWorseThanAccepted(nowPct: number, thenPct: number | null): b
   return thenPct === null || nowPct > thenPct + 0.5;
 }
 
+/**
+ * Buy's cost rule again when an order card pays: the cost now (what arrives after Rift's charge, `afterOut`, against
+ * the payment's USD value) and as accepted at Buy, and whether it needs a new order's review (costWorseThanAccepted).
+ * Without the payment's USD value (unpriced at Buy, not ETH or WETH; or no cost from it) both are the gas charge's share
+ * of Rift's quote: the cost's floor now, against the share Buy showed and the user accepted (its after-charge amount
+ * against its quote). Null: can't be told.
+ */
+export function cardCostCheck(x: {
+  afterOut: number; quoteOut: number; usdIn: number | null; iaeroUsd: number;
+  thenUsdIn?: number; thenIaeroUsd?: number; thenExpectedOut?: number; thenQuoteOut: number;
+}): { pct: number; thenPct: number | null; share: boolean; refuse: boolean } | null {
+  const usdPct = x.usdIn ? costVsMarketPct(x.usdIn, x.afterOut * x.iaeroUsd) : null;
+  if (usdPct !== null) {
+    const thenPct = x.thenUsdIn && x.thenIaeroUsd && x.thenExpectedOut ? costVsMarketPct(x.thenUsdIn, x.thenExpectedOut * x.thenIaeroUsd) : null;
+    return { pct: usdPct, thenPct, share: false, refuse: costWorseThanAccepted(usdPct, thenPct) };
+  }
+  const pct = (1 - x.afterOut / x.quoteOut) * 100;
+  if (!Number.isFinite(pct)) return null;
+  const thenPct = x.thenExpectedOut && x.thenQuoteOut > 0 ? (1 - x.thenExpectedOut / x.thenQuoteOut) * 100 : null;
+  return { pct, thenPct, share: true, refuse: costWorseThanAccepted(pct, thenPct) };
+}
+
 /** Whether Buy needs the confirmation tick for this cost. */
 export const costNeedsTick = (c: CostCheck) => c.kind !== 'ok' || c.level === 'high';
 
+/** A quote as seen on screen: Rift's amount, and the chains its route has Rift charge gas on (gasDeskChains). */
+export interface SeenQuote { out: string; chains: number[] }
+
 /** The quote the user saw when clicking Buy: a refresh that landed within 3 s of the click isn't what they read, so
- *  the one before it is; a refresh "in the future" (the clock since put back) can't be placed, so the higher of
- *  the two. `shown`: the latest change on screen (its key, when, and the quote before it). */
-export function seenBaseline(shown: { key: string; since: number; prevOut?: string } | null, key: string, out: string, now: number): string {
-  if (!shown?.prevOut || shown.key !== key) return out;
+ *  the one before it is; a refresh "in the future" (the clock since put back) can't be placed, so the better of the
+ *  two: the higher amount, and only the chains both routes are charged gas on (either one's extra step counts as new).
+ *  `shown`: the latest change on screen (its key, when, and the quote before it). */
+export function seenBaseline(shown: { key: string; since: number; prev?: SeenQuote } | null, key: string, cur: SeenQuote, now: number): SeenQuote {
+  const prev = shown?.key === key ? shown.prev : undefined;
+  if (!shown || !prev) return cur;
   const age = now - shown.since;
-  if (age < 0) return Number(shown.prevOut) >= Number(out) ? shown.prevOut : out;
-  return age < 3000 ? shown.prevOut : out;
+  if (age < 0) return { out: Number(prev.out) >= Number(cur.out) ? prev.out : cur.out, chains: cur.chains.filter(c => prev.chains.includes(c)) };
+  return age < 3000 ? prev : cur;
+}
+
+/** What arrives after Rift's gas charge on these chains, in iAERO, from Rift's amount `out`: null when the charge can't
+ *  be valued (an Ethereum step without a gas price or ETH's price, or a charge without iAERO's price). */
+export function afterGasOut(out: string, chains: number[], gasWei: bigint | undefined, px: { ethUsd?: number; iaeroUsd?: number }): number | null {
+  const usd = gasDeskUsd(chains, gasWei, px.ethUsd);
+  if (usd === null || (usd > 0 && !px.iaeroUsd)) return null;
+  return Number(out) - (usd > 0 ? usd / px.iaeroUsd! : 0);
+}
+
+/**
+ * Buy, at the click: whether the quote about to be bought must be shown first, against the one seen (seenBaseline).
+ * Rift's amount, and what arrives after its gas charge (each on its own route, when both can be valued), are held to the
+ * tolerance. A route that now has an Ethereum step the one seen didn't is always shown first: the charge there is large,
+ * and this page reads Ethereum's gas price only for a route shown with such a step (so it may not be valued at all).
+ */
+export function clickQuoteMove(seen: SeenQuote, now: SeenQuote, tolerance: number, gasWei: bigint | undefined, px: { ethUsd?: number; iaeroUsd?: number }):
+  { moved: false } | { moved: true; dropPct: number; routeChanged: boolean } {
+  const before = afterGasOut(seen.out, seen.chains, gasWei, px);
+  const after = afterGasOut(now.out, now.chains, gasWei, px);
+  const dropPct = Math.max(priceDropPct(seen.out, now.out), before !== null && before > 0 && after !== null ? (1 - after / before) * 100 : -Infinity);
+  const routeChanged = now.chains.includes(1) && !seen.chains.includes(1);
+  return routeChanged || dropPct > tolerance ? { moved: true, dropPct, routeChanged } : { moved: false };
 }
 
 /** How much worse (in %) a fresh quote is than the one shown; negative when it improved. */

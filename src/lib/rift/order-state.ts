@@ -111,6 +111,14 @@ export function isOutOfDate(o: StoredOrder, now: number): boolean {
     || (!!o.hiddenAt && o.status === 'awaiting_deposit' && !payWindowOpen(o, KIND_OF[o.sourceChain], now));
 }
 
+/** Shown as out of date (the orders list, the card's badge): as isOutOfDate, and also a Bitcoin order past its pay
+ *  window with no payment seen, before a look has shown nothing was sent. Its card says not to pay it, so nothing says it
+ *  waits for a payment; removing it, and polling it less often, still wait for that look. */
+export function shownOutOfDate(o: StoredOrder, now: number): boolean {
+  return isOutOfDate(o, now) || (KIND_OF[o.sourceChain] === 'bitcoin' && o.status === 'awaiting_deposit' && !o.rawStatus
+    && !payWindowOpen(o, 'bitcoin', now) && !o.btc?.txid && !o.btc?.missing);
+}
+
 /** Whether an order whose payment is in doubt may be hidden: its pay window has closed and nothing is waiting on
  *  a wallet. (The card offers it only after a check found no payment.) */
 export const canHide = (o: StoredOrder, now: number) =>
@@ -136,6 +144,16 @@ export function phaseInput(o: StoredOrder, kind: SourceKind) {
  *  mempool.space backend proves nothing, and several tabs looking at once must not speed it up. */
 export const BTC_MISSING_AFTER = 5;
 export const BTC_EMPTY_SPAN_MS = 2 * 60_000;
+/** A run of empty answers is one stretch of looking: an answer more than this after the run's latest one (nobody was
+ *  looking, or mempool.space couldn't be reached) starts a new run, so a lagging answer from before the gap and a few
+ *  quick ones after it can't make up the span between them. (The order card looks every 20 s while it decides; the
+ *  background watcher's looks, 5 minutes apart, record what they see but never make a run on their own.) */
+export const BTC_EMPTY_GAP_MS = 2 * 60_000;
+
+/** Whether an empty answer asked `at` continues the run in `b`: begun no later than it, with an answer within
+ *  BTC_EMPTY_GAP_MS before it (a record from an older version, without the latest answer's time, starts anew). */
+const continuesRun = (b: StoredOrder['btc'], at: number) =>
+  b?.emptySince !== undefined && b.emptyLastAt !== undefined && at >= b.emptySince && at - b.emptyLastAt <= BTC_EMPTY_GAP_MS;
 /** A look's empty answer counts only while this fresh: applied again later (a change storage refused), it is
  *  older than what other tabs may have seen since, so only a payment it saw is kept. */
 export const BTC_LOOK_FRESH_MS = 10_000;
@@ -154,10 +172,12 @@ export function nextBtcRecord(
   if (!seen.payments.length) {
     // Nothing more to record once it is missing; a confirmed payment is never "missing".
     if (!prev?.txid || prev.missing || btcConfirmed(prev)) return prev;
-    const emptyChecks = (prev.emptyChecks ?? 0) + 1;
-    const emptySince = prev.emptySince ?? now;
+    const same = continuesRun(prev, now);
+    const emptyChecks = same ? (prev.emptyChecks ?? 0) + 1 : 1;
+    const emptySince = same ? prev.emptySince! : now;
+    const emptyLastAt = same ? Math.max(prev.emptyLastAt!, now) : now;
     const gone = emptyChecks >= BTC_MISSING_AFTER && now - emptySince >= BTC_EMPTY_SPAN_MS;
-    return { ...prev, emptyChecks, emptySince, ...(gone ? { missing: true } : {}) };
+    return { ...prev, emptyChecks, emptySince, emptyLastAt, ...(gone ? { missing: true } : {}) };
   }
   const confirmations = Math.min(...seen.payments.map(p => p.confirmations));
   const confirmed = btcConfirmed(prev) || seen.payments.some(p => p.confirmations > 0);
@@ -195,27 +215,28 @@ export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcL
   // Times stored from the future (the clock ran ahead, then was put back) count as absent: they would stop every look
   // from counting until the clock caught up.
   const ahead = fromFuture;
-  if (prev && (ahead(prev.lastSeenAt) || ahead(prev.emptySince) || ahead(prev.emptyAt))) {
+  if (prev && (ahead(prev.lastSeenAt) || ahead(prev.emptySince) || ahead(prev.emptyLastAt) || ahead(prev.emptyAt))) {
     prev = { ...prev };
     if (ahead(prev.lastSeenAt)) delete prev.lastSeenAt;
-    if (ahead(prev.emptySince)) { delete prev.emptySince; delete prev.emptyChecks; }
+    if (ahead(prev.emptySince) || ahead(prev.emptyLastAt)) { delete prev.emptySince; delete prev.emptyChecks; delete prev.emptyLastAt; }
     if (ahead(prev.emptyAt)) delete prev.emptyAt;
   }
   if (seen === 'known') {
     // The payment recorded is still there: a run of empty answers (or "missing") ends.
     if (!prev?.emptyChecks && !prev?.missing) return {};
     const btc = { ...prev, lastSeenAt: Math.max(look.at, prev?.lastSeenAt ?? 0) };
-    delete btc.emptyChecks; delete btc.emptySince; delete btc.missing;
+    delete btc.emptyChecks; delete btc.emptySince; delete btc.emptyLastAt; delete btc.missing;
     return { btc };
   }
   if (!seen.payments.length && !prev?.txid && !prev?.missing) {
     if (positiveOnly || look.at < look.checkpoint || (prev?.emptyAt ?? 0) >= look.checkpoint) return {};
     // A run of empty answers past the checkpoint: one lagging answer is not evidence that nothing was sent.
-    const same = prev?.emptySince !== undefined && prev.emptySince >= look.checkpoint && look.at >= prev.emptySince;
+    const same = continuesRun(prev, look.at) && prev!.emptySince! >= look.checkpoint;
     const emptySince = same ? prev!.emptySince! : look.at;
     const emptyChecks = same ? (prev?.emptyChecks ?? 0) + 1 : 1;
+    const emptyLastAt = same ? Math.max(prev!.emptyLastAt!, look.at) : look.at;
     const proven = emptyChecks >= BTC_MISSING_AFTER && look.at - emptySince >= BTC_EMPTY_SPAN_MS;
-    return { btc: { ...prev, emptyChecks, emptySince, ...(proven ? { emptyAt: look.at } : {}) } };
+    return { btc: { ...prev, emptyChecks, emptySince, emptyLastAt, ...(proven ? { emptyAt: look.at } : {}) } };
   }
   // An answer older than the latest sighting recorded counts for nothing: a newer look has been recorded since (a
   // sighting from it must not set that record back). Nor does an empty answer older than the run it would extend.
@@ -448,6 +469,7 @@ export function sanitizeOrder(x: unknown): StoredOrder | null {
         if (btc.missing === true) b.missing = true;
         if (isNum(btc.emptyChecks)) b.emptyChecks = btc.emptyChecks;
         if (isNum(btc.emptySince)) b.emptySince = btc.emptySince;
+        if (isNum(btc.emptyLastAt)) b.emptyLastAt = btc.emptyLastAt;
       }
       clean.btc = b;
     }

@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { costLevel, costVsMarketPct, costWorseThanAccepted, deliveredVsQuotedPct, formatPct, gasDeskUsd, gasSwallows, parseLlamaQuotes, priceDropPct, seenBaseline } from '../../src/lib/rift/cost.ts';
+import { afterGasOut, cardCostCheck, clickQuoteMove, costLevel, costVsMarketPct, costWorseThanAccepted, deliveredVsQuotedPct, formatPct, gasDeskUsd, gasSwallows, parseLlamaQuotes, priceDropPct, seenBaseline } from '../../src/lib/rift/cost.ts';
 
 test('cost against market prices, from a real quote', () => {
   // $500 in, 830 iAERO out at $0.5976: $496.01 of iAERO, so 0.8%.
@@ -198,11 +198,77 @@ test('round 11: a nonsense ETH price (from a broken source) counts as none, and 
 
 test('round 13: the quote "seen" at Buy: one that changed within 3 s isn\'t what was read; a change "in the future" takes the higher', () => {
   const now = 1_790_930_000_000;
-  const shown = { key: 'k', since: now - 20_000, prevOut: '99' };
-  assert.equal(seenBaseline(shown, 'k', '100', now), '100', 'read for 20 s');
-  assert.equal(seenBaseline({ ...shown, since: now - 1000 }, 'k', '100', now), '99', 'changed a second ago: the one before');
-  assert.equal(seenBaseline({ ...shown, since: now + 5 * 60_000 }, 'k', '100', now), '100', 'the clock put back: the higher, not the older');
-  assert.equal(seenBaseline({ ...shown, prevOut: '101', since: now + 5 * 60_000 }, 'k', '100', now), '101');
-  assert.equal(seenBaseline(shown, 'other', '100', now), '100', 'another token or amount');
-  assert.equal(seenBaseline(null, 'k', '100', now), '100');
+  const cur = { out: '100', chains: [42161, 8453] };
+  const shown = { key: 'k', since: now - 20_000, prev: { out: '99', chains: [42161, 8453] } };
+  assert.equal(seenBaseline(shown, 'k', cur, now).out, '100', 'read for 20 s');
+  assert.equal(seenBaseline({ ...shown, since: now - 1000 }, 'k', cur, now).out, '99', 'changed a second ago: the one before');
+  assert.equal(seenBaseline({ ...shown, since: now + 5 * 60_000 }, 'k', cur, now).out, '100', 'the clock put back: the higher, not the older');
+  assert.equal(seenBaseline({ ...shown, prev: { out: '101', chains: [42161, 8453] }, since: now + 5 * 60_000 }, 'k', cur, now).out, '101');
+  assert.equal(seenBaseline(shown, 'other', cur, now).out, '100', 'another token or amount');
+  assert.equal(seenBaseline(null, 'k', cur, now).out, '100');
+});
+
+test('round 14: the route "seen" at Buy: a step on Ethereum that appeared within 3 s, or "in the future", wasn\'t seen', () => {
+  const now = 1_790_930_000_000;
+  const viaEth = { out: '100', chains: [42161, 1, 8453] };
+  const l2 = { out: '100', chains: [42161, 8453] };
+  assert.deepEqual(seenBaseline({ key: 'k', since: now - 1000, prev: l2 }, 'k', viaEth, now).chains, [42161, 8453], 'changed a second ago');
+  assert.deepEqual(seenBaseline({ key: 'k', since: now - 20_000, prev: l2 }, 'k', viaEth, now).chains, [42161, 1, 8453], 'read for 20 s');
+  assert.deepEqual(seenBaseline({ key: 'k', since: now + 60_000, prev: l2 }, 'k', viaEth, now).chains, [42161, 8453], 'from the future: only both routes\' chains');
+  assert.deepEqual(seenBaseline({ key: 'k', since: now + 60_000, prev: viaEth }, 'k', l2, now).chains, [42161, 8453]);
+});
+
+test('round 14: Buy at the click holds what arrives after Rift\'s gas charge to the tolerance, and shows a new Ethereum step first', () => {
+  const px = { ethUsd: 2500, iaeroUsd: 1 };
+  const gwei = 1_000_000_000n;
+  const l2 = { out: '100', chains: [42161, 8453] };
+  const viaEth = { out: '100', chains: [42161, 1, 8453] };
+  // The charge on each chain: $0.10 on a Layer 2; on Ethereum 1.6M gas at the gas price.
+  assert.equal(afterGasOut('100', [42161, 8453], undefined, px), 99.8);
+  assert.equal(afterGasOut('100', [42161, 1, 8453], 8n * gwei, px), 100 - 0.2 - 32);
+  assert.equal(afterGasOut('100', [42161, 1, 8453], undefined, px), null, 'Ethereum without a gas price');
+  assert.equal(afterGasOut('100', [42161, 8453], undefined, { ethUsd: 2500 }), null, 'a charge without iAERO\'s price');
+  assert.equal(afterGasOut('100', [], undefined, {}), 100, 'no charge needs no price');
+  // The auditor's cases: Rift's amount unchanged, the route now via Ethereum: shown, whether or not it can be valued.
+  for (const [gas, prices] of [[undefined, px], [8n * gwei, px], [undefined, { ethUsd: 2500 }], [8n * gwei, {}]]) {
+    const m = clickQuoteMove(l2, viaEth, 1, gas, prices);
+    assert.equal(m.moved, true);
+    assert.equal(m.routeChanged, true);
+  }
+  // Valued: the drop in what arrives (99.8 -> 67.8) is the move's size.
+  assert.ok(Math.abs(clickQuoteMove(l2, viaEth, 1, 8n * gwei, px).dropPct - (1 - 67.8 / 99.8) * 100) < 1e-9);
+  // The same route, Rift's amount 0.9% lower: within a 1% limit, but with a 50% gas share what arrives falls 1.8%.
+  const eth50 = { out: '100', chains: [1] }; // $50 at 12.5 gwei
+  const m = clickQuoteMove(eth50, { out: '99.1', chains: [1] }, 1, 12_500_000_000n, px);
+  assert.equal(m.moved, true);
+  assert.equal(m.routeChanged, false);
+  assert.ok(m.dropPct > 1.7 && m.dropPct < 1.9);
+  // Nothing changed, a small drop, or a route that drops its Ethereum step: bought.
+  assert.equal(clickQuoteMove(l2, l2, 1, undefined, px).moved, false);
+  assert.equal(clickQuoteMove(l2, { out: '99.5', chains: [42161, 8453] }, 1, undefined, px).moved, false);
+  assert.equal(clickQuoteMove(viaEth, l2, 1, undefined, px).moved, false);
+  assert.equal(clickQuoteMove(viaEth, viaEth, 1, undefined, px).moved, false, 'seen with its step: Rift\'s amount alone');
+  // Unvalued: Rift's own amount is still held to the limit.
+  assert.equal(clickQuoteMove(l2, { out: '98', chains: [42161, 8453] }, 1, undefined, {}).moved, true);
+});
+
+test('round 14: a card\'s cost rule without a USD value compares the gas charge\'s share now with the share accepted at Buy', () => {
+  // Unpriced token at Buy; Buy showed the after-charge amount (94.6 of a 100 quote: a 5.4% share) and the user ticked.
+  const base = { quoteOut: 100, usdIn: null, iaeroUsd: 0.6, thenExpectedOut: 94.6, thenQuoteOut: 100 };
+  assert.equal(cardCostCheck({ ...base, afterOut: 94.6 }).refuse, false, 'nothing changed: paid, not refused');
+  assert.equal(cardCostCheck({ ...base, afterOut: 94.3 }).refuse, false, 'within half a point');
+  assert.equal(cardCostCheck({ ...base, afterOut: 90 }).refuse, true, 'gas up: 10% now, 5.4% then');
+  // Saved without an expected amount (Buy couldn't value the charge): a high share needs a new order.
+  const blind = { quoteOut: 34, usdIn: null, iaeroUsd: 0.6, thenQuoteOut: 34 };
+  const c = cardCostCheck({ ...blind, afterOut: 25 });
+  assert.equal(c.refuse, true);
+  assert.equal(c.share, true);
+  assert.equal(cardCostCheck({ ...blind, afterOut: 33.5 }).refuse, false, 'a small share');
+  // With a USD value: the cost against market prices, as before.
+  assert.equal(cardCostCheck({ afterOut: 30, quoteOut: 34, usdIn: 20, iaeroUsd: 0.6, thenUsdIn: 20, thenIaeroUsd: 0.6, thenExpectedOut: 33, thenQuoteOut: 34 }).refuse, true);
+  assert.equal(cardCostCheck({ afterOut: 33, quoteOut: 34, usdIn: 20, iaeroUsd: 0.6, thenUsdIn: 20, thenIaeroUsd: 0.6, thenExpectedOut: 33, thenQuoteOut: 34 }).refuse, false);
+  // A USD value that gives no cost (not a positive number) still leaves the share rule, not no rule.
+  const odd = cardCostCheck({ ...blind, usdIn: Number.NaN, afterOut: 25 });
+  assert.equal(odd.share, true);
+  assert.equal(odd.refuse, true);
 });

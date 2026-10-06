@@ -6,6 +6,7 @@ import {
   BTC_MISSING_AFTER, BTC_GRACE_MS, btcCheckpoint, btcConfirmed, btcLookPatch, btcNeedsLook, btcPositive, btcUnchecked, btcUnpaid, canRetryUnknown, BTC_EMPTY_SPAN_MS, BTC_LOOK_FRESH_MS, btcLookEveryMs, doubtButExpired,
   PRE_SEND_COOLDOWN_MS, btcLookChange, nonceUsed, paymentFacts, pastDeadline, windowCloseChange,
   clearable, canHide, isOutOfDate, missingButExpired, nextBtcRecord, paidButExpired, pendingByLeastRecentPoll, sanitizeOrder,
+  BTC_EMPTY_GAP_MS, shownOutOfDate,
 } from '../../src/lib/rift/order-state.ts';
 
 const T0 = 1_790_930_000_000;
@@ -220,8 +221,8 @@ test('while storage refuses writes, a Bitcoin look records what was seen, not it
   assert.equal(btcPositive({ ...one, emptyChecks: 2 }, nextBtcRecord({ ...one, emptyChecks: 2 }, seen(1), T0 + 4)), true,
     'seen again after empty answers: recorded, so the stored count can\u2019t outlive it');
   // While storage refuses writes, "missing" is never recorded: another tab may be seeing the payment.
-  const high = { ...first, emptyChecks: BTC_MISSING_AFTER - 1, emptySince: T0 };
   const at = T0 + BTC_EMPTY_SPAN_MS + 1, cp = T0 + 10 * 3600_000;
+  const high = { ...first, emptyChecks: BTC_MISSING_AFTER - 1, emptySince: T0, emptyLastAt: at - 20_000 };
   assert.deepEqual(lookNow(high, empty, at, cp, true), {}, 'not while failing');
   assert.equal(lookNow(high, empty, at, cp).btc.missing, true, 'recorded once storage works');
   assert.equal(lookNow(first, seen(1), at, cp, true).btc.confirmed, true, 'a payment seen is recorded while failing');
@@ -394,17 +395,17 @@ const clockAt = (t, fn) => { const real = Date.now; Date.now = () => t; try { re
 
 test('round 6: a look is judged against the order as stored when applied (Rift expired it while the look ran)', () => {
   const cp = T0 + 60 * 60_000 + BTC_GRACE_MS;
-  // A run of empty looks past the old checkpoint, left unfinished days ago (the page was closed).
-  const waiting = btcOrd({ btc: { emptyChecks: BTC_MISSING_AFTER - 1, emptySince: cp + 60_000 } });
+  // A run of empty looks past the old checkpoint, still going when Rift expired the order.
   const expiredAt = T0 + 7 * 864e5;
-  const expired = { ...waiting, status: 'expired', statusTimes: { expired: expiredAt } };
   const t = expiredAt + 30_000;
+  const waiting = btcOrd({ btc: { emptyChecks: BTC_MISSING_AFTER - 1, emptySince: cp + 60_000, emptyLastAt: t - 20_000 } });
+  const expired = { ...waiting, status: 'expired', statusTimes: { expired: expiredAt } };
   // Judged with the checkpoint of the order as it was when the look began, one answer after the expiry proved it.
   const stale = clockAt(t, () => btcLookPatch(expired.btc, EMPTY, { at: t, failing: false, checkpoint: btcCheckpoint(waiting) }));
   assert.equal(stale.btc.emptyAt, t, 'what the call sites did before');
   // Against the stored order's checkpoint, it starts a new run.
   const r = clockAt(t, () => btcLookChange(expired, EMPTY, { at: t, failing: false }));
-  assert.deepEqual({ ...r.btc }, { emptyChecks: 1, emptySince: t });
+  assert.deepEqual({ ...r.btc }, { emptyChecks: 1, emptySince: t, emptyLastAt: t });
   assert.equal(btcUnchecked({ ...expired, ...r }), true, 'one answer proves nothing');
 });
 
@@ -464,7 +465,7 @@ test('round 8: a look is timed and ordered by when it was asked, and judged fres
   const cp = T0 + 60 * 60_000 + BTC_GRACE_MS;
   const t = cp + 4 * 60_000;
   // A slow answer (asked at t, back 12 s later) applied as it arrives is fresh: its empty answer completes the run.
-  const run = { emptyChecks: BTC_MISSING_AFTER - 1, emptySince: cp + 60_000 };
+  const run = { emptyChecks: BTC_MISSING_AFTER - 1, emptySince: cp + 60_000, emptyLastAt: t - 20_000 };
   const r = clockAt(t + 12_000, () => btcLookPatch(run, EMPTY, { at: t, answeredAt: t + 12_000, failing: false, checkpoint: cp }));
   assert.equal(r.btc?.emptyChecks, BTC_MISSING_AFTER);
   assert.equal(r.btc?.emptyAt, t, 'proven as of when it was asked');
@@ -566,4 +567,83 @@ test('round 12: a pay window seen closed stays closed (a clock put back can\'t r
   assert.deepEqual(windowCloseChange(closed, T0 + 12 * 60_000), {}, 'recorded once');
   assert.deepEqual(windowCloseChange(o, T0 + 5 * 60_000), {}, 'nothing while it is open');
   assert.equal(payWindowOpen(btcOrd({ createdAt: T0, windowClosedAt: T0 + 61 * 60_000 }), 'bitcoin', T0 + 30 * 60_000), false, 'no QR code again');
+});
+
+// --- Round 14 ---
+
+test('round 14: a run of empty answers is one stretch of looking: a gap restarts it, so old answers can\'t make up its span', () => {
+  // Bitcoin auditor, Low 1: a payment seen at minute 10, one lagging empty answer at minute 20, nobody looking until
+  // minute 45, then four empty answers in 60 s: "five answers over two minutes", with a lag of only a minute.
+  const A = 'ab'.repeat(32);
+  const cp = T0 + 60 * 60_000 + BTC_GRACE_MS;
+  const min = m => T0 + m * 60_000;
+  let b = { txid: A, confirmations: 0, firstSeenAt: min(10), totalSats: '100000', payments: 1, lastSeenAt: min(10) };
+  const step = at => { const r = lookNow(b, EMPTY, at, cp); if (r.btc) b = r.btc; };
+  step(min(20));
+  for (const s of [0, 20, 40, 60]) step(min(45) + s * 1000);
+  assert.equal(b.missing, undefined, 'the answer before the gap doesn\'t count');
+  assert.equal(b.emptyChecks, 4);
+  assert.equal(b.emptySince, min(45));
+  step(min(45) + 80_000);
+  step(min(45) + 100_000);
+  assert.equal(b.missing, undefined, 'six answers, but over 100 s');
+  step(min(45) + 120_000);
+  assert.equal(b.missing, true, 'two minutes of looking, no gap');
+  // A gap of more than BTC_EMPTY_GAP_MS between answers (mempool.space unreachable meanwhile) also starts a new run.
+  b = { txid: A, confirmations: 0, firstSeenAt: min(10), totalSats: '100000', payments: 1, emptyChecks: 4, emptySince: min(40), emptyLastAt: min(41) };
+  step(min(41) + BTC_EMPTY_GAP_MS + 1);
+  assert.equal(b.emptyChecks, 1);
+  // A run stored by an older version (no latest answer's time) starts anew; so does one whose latest answer is "from the future".
+  b = { txid: A, confirmations: 0, firstSeenAt: min(10), totalSats: '100000', payments: 1, emptyChecks: 4, emptySince: min(40) };
+  step(min(43));
+  assert.equal(b.emptyChecks, 1);
+  b = { txid: A, confirmations: 0, firstSeenAt: min(10), totalSats: '100000', payments: 1, emptyChecks: 4, emptySince: min(40), emptyLastAt: min(90) };
+  step(min(43));
+  assert.equal(b.emptyChecks, 1);
+  assert.equal(b.emptyLastAt, min(43));
+});
+
+test('round 14: the unpaid proof needs a run with no gap too', () => {
+  const o = btcOrd();
+  const cp = btcCheckpoint(o);
+  let b;
+  const step = at => { const r = lookNow(b, EMPTY, at, cp); if (r.btc) b = r.btc; };
+  step(cp + 60_000); // one answer, then nobody looks for an hour
+  for (const s of [0, 20, 40, 60]) step(cp + 3600_000 + s * 1000);
+  assert.equal(b.emptyAt, undefined, 'not proven by an answer from before the gap');
+  assert.equal(btcUnchecked({ ...o, btc: b }, cp + 3600_000 + 60_000), true);
+  for (const s of [80, 100, 120]) step(cp + 3600_000 + s * 1000);
+  assert.equal(b.emptyAt, cp + 3600_000 + 120_000, 'proven after two minutes of looking');
+  // The background watcher's looks, 5 minutes apart, never make a run on their own.
+  b = undefined;
+  for (let i = 0; i < 8; i++) step(cp + i * 5 * 60_000);
+  assert.equal(b.emptyAt, undefined);
+  assert.equal(b.emptyChecks, 1);
+});
+
+test('round 14: the orders list doesn\'t show a Bitcoin order past its pay window as waiting for a payment', () => {
+  // Bitcoin auditor, Low 2: "Waiting for payment ~X iAERO" until a look proved the address unpaid, while its card says
+  // the window has closed and not to send.
+  const o = btcOrd();
+  const past = T0 + 61 * 60_000;
+  assert.equal(isOutOfDate(o, past), false, 'removal still waits for the look');
+  assert.equal(shownOutOfDate(o, past), true);
+  assert.equal(shownOutOfDate(o, T0 + 59 * 60_000), false, 'within the window');
+  assert.equal(shownOutOfDate(btcOrd({ btc: { txid: 'ab'.repeat(32), firstSeenAt: T0 } }), past), false, 'a payment seen');
+  assert.equal(shownOutOfDate(btcOrd({ btc: { missing: true } }), past), false, 'one seen, now not visible: its own badge');
+  assert.equal(shownOutOfDate(btcOrd({ rawStatus: 'held_for_review' }), past), false, 'a status this page doesn\'t know');
+  assert.equal(shownOutOfDate(btcOrd({ status: 'expired', statusTimes: { expired: past } }), past), false, 'expired: its own badge');
+  // EVM orders: as before (an unpaid one past its window is out of date already; one in doubt is not).
+  const unpaid = order({ createdAt: T0 });
+  assert.equal(shownOutOfDate(unpaid, T0 + PAY_WINDOW_MS + 1000), isOutOfDate(unpaid, T0 + PAY_WINDOW_MS + 1000));
+  const doubt = order({ createdAt: T0, payUnknown: true, payRequestedAt: T0 + 1000 });
+  assert.equal(shownOutOfDate(doubt, T0 + PAY_WINDOW_MS + 1000), false);
+});
+
+test('round 14: the run\'s latest answer time survives sanitizing', () => {
+  const o = btcOrd({ depositAddress: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq', fromAmount: '0.001', fromAmountRaw: '100000',
+    btc: { txid: 'ab'.repeat(32), firstSeenAt: T0, emptyChecks: 2, emptySince: T0 + 60_000, emptyLastAt: T0 + 80_000 } });
+  assert.ok(sanitizeOrder(o), 'a valid record');
+  assert.equal(sanitizeOrder(o).btc.emptyLastAt, T0 + 80_000);
+  assert.equal(sanitizeOrder({ ...o, btc: { ...o.btc, emptyLastAt: 'soon' } }).btc.emptyLastAt, undefined, 'not a number: dropped');
 });

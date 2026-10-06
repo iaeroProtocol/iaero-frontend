@@ -52,7 +52,8 @@ import {
   spotSendTypedData, usdcForFee,
 } from '@/lib/rift/hypercore';
 import {
-  DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, assessCost, costNeedsTick, costText, costVsMarketPct, costWorseThanAccepted, seenBaseline,
+  DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, afterGasOut, assessCost, cardCostCheck, clickQuoteMove, costNeedsTick, costText,
+  seenBaseline, type SeenQuote,
   ethereumGasDeskWei, formatPct, gasDeskChains, gasDeskUsd, gasSwallows, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
 import {
@@ -99,8 +100,8 @@ const LEVEL_WORD: Record<CostLevel, string> = { low: 'Low', medium: 'Moderate', 
 const CHAIN_NAMES: Record<number, string> = { 1: 'Ethereum', 42161: 'Arbitrum', 8453: 'Base' };
 const chainList = (ids: number[]) => ids.map(id => CHAIN_NAMES[id] ?? `chain ${id}`).join(' and ');
 
-/** A quote that got worse than the tolerance between seeing it and clicking Buy. */
-interface PriceMove { seenOut: string; quote: RiftQuote; fetchedAt: number; dropPct: number; limit: number }
+/** A quote that moved between what was seen (its amount, and the chains its route was charged gas on) and the click. */
+interface PriceMove { seenOut: string; seenChains: number[]; quote: RiftQuote; fetchedAt: number; dropPct: number; limit: number; routeChanged: boolean }
 /** The user's tick on a cost that needs one: for this token and amount, and this kind of check. */
 interface Ack { key: string; kind: CostCheck['kind']; pct: number }
 
@@ -507,15 +508,16 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   const needsAck = !!cost && costNeedsTick(cost.check) && !ackCovers(ack, cost.check);
   const tooSmall = !!cost?.tooSmall;
 
-  // What you saw: the quote on screen, or the one before it if it changed in the last 3 seconds
-  // (a refresh landing just before your click is not something you had time to read).
-  const shown = useRef<{ key: string; out: string; since: number; prevOut?: string } | null>(null);
+  // What you saw: the quote on screen (its amount and the chains its route is charged gas on), or the one before it if
+  // it changed in the last 3 seconds (a refresh landing just before your click is not something you had time to read).
+  const shown = useRef<{ key: string; view: SeenQuote; since: number; prev?: SeenQuote } | null>(null);
   useEffect(() => {
     if (!quote) return;
     const key = `${quote.from}|${quote.from_amount}`;
+    const view: SeenQuote = { out: quote.estimated_amount_out, chains: gasDeskChains(quote.route) };
     const s = shown.current;
-    if (s && s.key === key && s.out === quote.estimated_amount_out) return;
-    shown.current = { key, out: quote.estimated_amount_out, since: Date.now(), prevOut: s?.key === key ? s.out : undefined };
+    if (s && s.key === key && s.view.out === view.out && s.view.chains.join() === view.chains.join()) return;
+    shown.current = { key, view, since: Date.now(), prev: s?.key === key ? s.view : undefined };
   }, [quote]);
   // A price move belongs to the token and amount it was found for.
   useEffect(() => { setMoved(null); }, [token?.asset, quoteAmount]);
@@ -660,13 +662,17 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         // order was made (what a tick at Buy covers), needs a new order and its review.
         const hl = sourceKindOf(o.sourceChain) === 'hypercore' ? HL_NEW_ADDRESS_FEE_USDC : 0;
         const usdIn = payWei !== undefined && px.ethUsd ? Number(o.fromAmount) * px.ethUsd + hl : o.marketUsdIn ?? null;
-        // Without the payment's USD value (unpriced at Buy, not ETH or WETH), the gas charge's share of what Rift quotes is
-        // the cost's floor: a high one needs Buy's review all the same.
-        const nowPct = (usdIn ? costVsMarketPct(usdIn, after * px.iaeroUsd) : null)
-          ?? (1 - after / Number(q.estimated_amount_out)) * 100;
-        const thenPct = o.marketUsdIn && o.marketIaeroUsd && o.expectedOut ? costVsMarketPct(o.marketUsdIn, Number(o.expectedOut) * o.marketIaeroUsd) : null;
-        if (Number.isFinite(nowPct) && costWorseThanAccepted(nowPct, thenPct)) {
-          setError(`This order now costs ${usdIn ? '' : 'at least '}${formatPct(nowPct)} against market prices${thenPct !== null ? ` (${formatPct(thenPct)} when you made it)` : ''}. Nothing was sent. Start a new order to review it.`);
+        // (Without the payment's USD value: the gas charge's share of Rift's quote, now and as accepted at Buy.)
+        const cost = cardCostCheck({
+          afterOut: after, quoteOut: Number(q.estimated_amount_out), usdIn, iaeroUsd: px.iaeroUsd,
+          thenUsdIn: o.marketUsdIn, thenIaeroUsd: o.marketIaeroUsd, thenExpectedOut: o.expectedOut ? Number(o.expectedOut) : undefined,
+          thenQuoteOut: Number(o.estimatedOut),
+        });
+        if (cost?.refuse) {
+          const then = cost.thenPct !== null ? ` (${formatPct(cost.thenPct)} when you made it)` : '';
+          setError(cost.share
+            ? `Rift’s gas charge now takes ${formatPct(cost.pct)} of this order${then}. Nothing was sent. Start a new order to review it.`
+            : `This order now costs ${formatPct(cost.pct)} against market prices${then}. Nothing was sent. Start a new order to review it.`);
           return 'dropped';
         }
       }
@@ -965,7 +971,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       // The window closed on the way (a price check, a ledger read): not posted now. A transfer posted before stays
       // in doubt; one never posted is dropped, and nothing was sent.
       await patchPaymentAttempt(id, o.payAttemptId!, o.hlPostedAt ? { payRequestedAt: undefined, payUnknown: true } : { payRequestedAt: undefined, hlAction: undefined });
-      throw new Error('This order’s pay window closed before the transfer was sent. Nothing was sent now; start a new order if you still want iAERO.');
+      throw new Error(o.hlPostedAt
+        ? 'This order’s pay window closed before the transfer could be sent again. The transfer sent earlier may still have gone through: check the order card before starting a new order.'
+        : 'This order’s pay window closed before the transfer was sent. Nothing was sent now; start a new order if you still want iAERO.');
     }
     if (!begun) {
       throw new Error('This payment changed in another tab (or could not be saved) before it was sent. This tab sent nothing; check the order card.');
@@ -1044,8 +1052,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     const owner = address as Address;
     // What the user saw, at the click (not after the checks below, which take seconds): a quote that changed in the
     // 3 s before it is not what they reviewed, so the one before it is the baseline.
-    const seenOut = accepted ? accepted.quote.estimated_amount_out
-      : seenBaseline(shown.current, `${quote.from}|${quote.from_amount}`, quote.estimated_amount_out, Date.now());
+    const seen: SeenQuote = accepted ? { out: accepted.quote.estimated_amount_out, chains: gasDeskChains(accepted.quote.route) }
+      : seenBaseline(shown.current, `${quote.from}|${quote.from_amount}`, { out: quote.estimated_amount_out, chains: gasDeskChains(quote.route) }, Date.now());
     // What this purchase is for, fixed at the click: the form can change while it runs (another token, an amount
     // written by an order card), and nothing may be bought for anything other than what was reviewed.
     const want = { asset: token.asset, amount: quoteAmount, decimals: token.decimals, chain: chainKey };
@@ -1175,15 +1183,17 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       if (q.from_amount !== want.amount && normalizeDecimal(q.from_amount) !== want.amount) {
         throw new Error('The amount changed while buying. Nothing was sent; check it and buy again.');
       }
-      const dropPct = priceDropPct(seenOut, q.estimated_amount_out);
-      if (dropPct > tolerance) {
-        setMoved({ seenOut, quote: q, fetchedAt, dropPct, limit: tolerance });
+      // Rift's amount, and what arrives after its gas charge, against what was seen; a route that now has an Ethereum
+      // step is shown first (clickQuoteMove).
+      const px = market.at(Date.now());
+      const gasWei = gasAt(Date.now());
+      const move = clickQuoteMove(seen, { out: q.estimated_amount_out, chains: gasDeskChains(q.route) }, tolerance, gasWei, px);
+      if (move.moved) {
+        setMoved({ seenOut: seen.out, seenChains: seen.chains, quote: q, fetchedAt, dropPct: move.dropPct, limit: tolerance, routeChanged: move.routeChanged });
         return;
       }
       // The cost tick, against the price actually used and market prices as they are now (it can cross into
       // "high" with this refresh, or become unknown if a price source has gone quiet).
-      const px = market.at(Date.now());
-      const gasWei = gasAt(Date.now());
       const freshExpected = expectedFor(q, px, gasWei);
       const freshCost = costOf(q, px, gasWei);
       if (freshCost.tooSmall) throw new Error('This amount is too small: Rift’s gas charge is more than the order is worth.');
@@ -1318,11 +1328,13 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     await forget(o, { strict: true });
   };
 
-  // The price-moved panel shows the same after-gas figures as the quote panel.
-  const movedDeduction = moved ? Number(moved.quote.estimated_amount_out) - (expectedFor(moved.quote, market, gasNow)?.out ?? Number(moved.quote.estimated_amount_out)) : 0;
-  // The drop in what arrives, after that charge (the limit applies to Rift's own quote, which falls by less).
-  const movedSeen = moved ? Math.max(0, Number(moved.seenOut) - movedDeduction) : 0;
-  const movedNow = moved ? Math.max(0, Number(moved.quote.estimated_amount_out) - movedDeduction) : 0;
+  // The price-moved panel shows what arrives after Rift's gas charge, as the quote panel does, each quote on its own
+  // route (Rift's own amounts while either charge can't be valued).
+  const movedSeenAfter = moved ? afterGasOut(moved.seenOut, moved.seenChains, gasNow, market) : null;
+  const movedNowAfter = moved ? afterGasOut(moved.quote.estimated_amount_out, gasDeskChains(moved.quote.route), gasNow, market) : null;
+  const movedValued = movedSeenAfter !== null && movedNowAfter !== null;
+  const movedSeen = moved ? Math.max(0, movedValued ? movedSeenAfter : Number(moved.seenOut)) : 0;
+  const movedNow = moved ? Math.max(0, movedValued ? movedNowAfter : Number(moved.quote.estimated_amount_out)) : 0;
   const movedPct = moved && movedSeen > 0 ? Math.max(moved.dropPct, (1 - movedNow / movedSeen) * 100) : moved?.dropPct ?? 0;
 
   const cta = ((): { text: string; disabled: boolean; connect?: boolean } => {
@@ -1617,14 +1629,33 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
               <div className="flex gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
                 <div>
-                  The price moved. You saw <span className="font-semibold text-white">{fmt(movedSeen)} iAERO</span>; it is now{' '}
-                  <span className="font-semibold text-white">{fmt(movedNow)} iAERO</span>, {formatPct(movedPct)} less
-                  and more than your {moved.limit}% limit. Nothing was sent.
+                  {moved.routeChanged ? (
+                    <>
+                      Rift’s route for this order changed: it now has a step on Ethereum, where Rift charges gas once you have
+                      paid.{' '}
+                      {movedValued ? (
+                        <>
+                          You saw <span className="font-semibold text-white">{fmt(movedSeen)} iAERO</span> after charges; it is now{' '}
+                          <span className="font-semibold text-white">{fmt(movedNow)} iAERO</span>{movedPct > 0 && <>, {formatPct(movedPct)} less</>}.
+                        </>
+                      ) : (
+                        <>That charge can’t be valued yet: Rift quotes <span className="font-semibold text-white">{fmt(movedNow)} iAERO</span> before it.</>
+                      )}{' '}
+                      Nothing was sent.
+                    </>
+                  ) : (
+                    <>
+                      The price moved. You saw <span className="font-semibold text-white">{fmt(movedSeen)} iAERO</span>; it is now{' '}
+                      <span className="font-semibold text-white">{fmt(movedNow)} iAERO</span>, {formatPct(movedPct)} less
+                      and more than your {moved.limit}% limit. Nothing was sent.
+                    </>
+                  )}
                   {needsAck && <> The new price needs the cost confirmation above first.</>}
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button onClick={() => start(moved)} disabled={!!busy || needsAck || tooSmall || settlementAckKey !== quoteKey} className="bg-amber-600 text-white hover:bg-amber-700">
+                {/* A new Ethereum step is bought only once its charge is shown. */}
+                <Button onClick={() => start(moved)} disabled={!!busy || needsAck || tooSmall || settlementAckKey !== quoteKey || (moved.routeChanged && !movedValued)} className="bg-amber-600 text-white hover:bg-amber-700">
                   Buy at the new price
                 </Button>
                 <Button variant="outline" onClick={() => setMoved(null)} disabled={!!busy} className="border-slate-600 text-slate-200">Cancel</Button>

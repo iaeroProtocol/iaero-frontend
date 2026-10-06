@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { badgeStyle } from './status';
 import { phaseOf } from '@/lib/rift/timing';
 import { SOURCE_CHAINS } from '@/lib/rift/config';
-import { clearable, isFinalStatus, isOutOfDate, isTerminalStatus, needsAttention, phaseInput } from '@/lib/rift/order-state';
+import { clearable, isFinalStatus, isTerminalStatus, needsAttention, phaseInput, shownOutOfDate } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
 const ago = (ts: number) => {
@@ -49,7 +49,7 @@ export default function RecentOrders({ orders, activeId, onSelect, onClearFinish
       <CardContent className="space-y-2">
         {orders.map(o => {
           const phase = phaseOf(phaseInput(o, SOURCE_CHAINS[o.sourceChain].kind));
-          const stale = isOutOfDate(o, now);
+          const stale = shownOutOfDate(o, now);
           const style = badgeStyle(phase, stale, !!o.btc?.missing);
           const outcome = o.status === 'delivered' ? `${fmt(o.amountOut)} iAERO`
             : o.status === 'refunded' ? `refunded ${o.amountOut ? `${fmt(o.amountOut)} ` : ''}${o.token.symbol}`

@@ -368,9 +368,11 @@ test('while storage refuses writes, Bitcoin looks record what was seen and not t
   h.unblock();
   await a.patchOrder(x.id, {});
   const now = Date.now();
-  for (let i = 0; i < orderState.BTC_MISSING_AFTER - 1; i++) await look(empty, now + i * 20_000);
+  // Each look made with the clock at its time (a later look is a later time on this computer's clock too).
+  const lookAt = async (d, at) => { const real = Date.now; Date.now = () => at; try { return await look(d, at); } finally { Date.now = real; } };
+  for (let i = 0; i < orderState.BTC_MISSING_AFTER - 1; i++) await lookAt(empty, now + i * 20_000);
   assert.equal(h.read().btc.missing, undefined, 'quick empty answers are not enough (several tabs, one lagging backend)');
-  await look(empty, now + orderState.BTC_EMPTY_SPAN_MS + 1);
+  await lookAt(empty, now + orderState.BTC_EMPTY_SPAN_MS + 1);
   assert.equal(h.read().btc.missing, true, 'empty answers in a row over two minutes, once storage works');
   assert.equal(h.read().btc.txid, TXID);
   // Confirmations climbing during an outage: the first confirmation is recorded, the count is not.
