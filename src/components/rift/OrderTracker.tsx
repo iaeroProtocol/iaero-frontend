@@ -506,7 +506,10 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
             </div>
           )}
           {phase === 'expired' && (paidButExpired(order, now)
-            ? <div className="text-sm text-red-200">Rift closed this order, but a payment was sent to its deposit address. Please {supportLink} with the order ID below.</div>
+            ? kind === 'evm' && !order.depositConfirmedAt
+              // Sent, never confirmed here (its card wasn't open): tracking reads its receipt now.
+              ? <div className="text-sm text-amber-200">Rift closed this order while its payment wasn’t confirmed here; this page is checking that payment. If your wallet shows it went through, please {supportLink} with the order ID below.</div>
+              : <div className="text-sm text-red-200">Rift closed this order, but a payment was sent to its deposit address. Please {supportLink} with the order ID below.</div>
             : order.btc?.missing
               // Seen, then gone (dropped or replaced): most likely nothing reached Rift, but only the wallet can say.
               ? <div className="text-sm text-amber-200">Rift closed this order. The Bitcoin payment seen earlier is no longer visible, so it was most likely dropped or replaced. If your wallet shows it as confirmed, please {supportLink} with the order ID below.</div>
@@ -600,7 +603,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                     : <div className="text-slate-300">Nothing has reached the deposit address. Don’t pay this order now: its price is out of date. If your wallet shows the payment as pending, this order completes when it arrives; otherwise start a new order. You can hide this order: it stays tracked in the background.</div>)}
                   {checkSaid === 'reverted' && <div className="text-slate-300">The payment transaction reverted. Nothing reached Rift; you can try again while the price is current.</div>}
                   {checkSaid === 'partial' && <div className="text-amber-200">Part of the amount has reached the deposit address. Don’t pay again: if the rest doesn’t follow, Rift treats the order as underpaid, and you can {supportLink} with the order ID.</div>}
-                  {checkSaid === 'pending' && <div className="text-amber-200">A transaction was sent from your account after the payment was requested. If it is this payment, it shows up here once it confirms. Don’t pay again.</div>}
+                  {checkSaid === 'pending' && <div className="text-amber-200">A transaction was sent from your account after the payment was requested. If it is this payment, it shows up here once it confirms. Don’t pay again.{!windowOpen && ' You can hide this order: it stays tracked in the background.'}</div>}
                   {checkSaid === 'error' && <div className="text-amber-200">Couldn’t check right now (Rift or the network didn’t answer). Don’t pay again yet; try again in a moment.</div>}
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -610,7 +613,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
                   {checkSaid === 'nothing' && windowOpen && kind === 'hypercore' && (
                     <Button onClick={() => checkPayment(true)} disabled={!settlementAck || paying || checking} className="bg-gradient-to-r from-indigo-600 to-purple-600">Pay again</Button>
                   )}
-                  {checkSaid === 'nothing' && !windowOpen && (
+                  {(checkSaid === 'nothing' || checkSaid === 'pending') && !windowOpen && (
                     <>
                       <Button onClick={() => onReorder(order)} className="bg-gradient-to-r from-indigo-600 to-purple-600">New order at today’s price</Button>
                       {canHide(order, now) && (

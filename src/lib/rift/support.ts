@@ -87,12 +87,13 @@ const askLater = (asset: string) => {
 };
 
 /** What is known without asking Rift; undefined if a check is needed. */
-function knownSupport(h: Holding, cache: Cache, now: number): Support | undefined {
+export function knownSupport(h: Holding, cache: Cache, now: number): Support | undefined {
   const asset = h.asset.toLowerCase();
   if (ARRIVES_SHORT.has(asset)) return 'unsupported';
   if (KNOWN.has(asset)) return 'supported';
   const c = cache[asset];
-  if (c && now - c.at < c.ttl && (c.ok || checkedUsd(h) < 3 * c.usd)) return c.ok ? 'supported' : 'unsupported';
+  // A check stamped in the future (written while the clock ran ahead) is not trusted to be fresh.
+  if (c && c.at <= now + 1000 && now - c.at < c.ttl && (c.ok || checkedUsd(h) < 3 * c.usd)) return c.ok ? 'supported' : 'unsupported';
   if (h.chain === 'ethereum' && h.valueUsd < MIN_ETHEREUM_CHECK_USD) return 'unsupported';
   return undefined;
 }

@@ -88,3 +88,14 @@ test('round 6: a pause or route check stored while the clock ran ahead is droppe
   assert.equal(c.riftBudget('poll', now), false);
   assert.equal(c.riftBudget('probe', now + 5000), false, 'route checks stay spaced');
 });
+
+test('round 7: an automatic quote refresh waits 20 s after any answer, an error too, and never goes in a pause', () => {
+  const c = load();
+  const now = Date.now();
+  assert.equal(c.quoteMayRefresh(undefined, now), true, 'never fetched');
+  assert.equal(c.quoteMayRefresh({ dataUpdatedAt: 0, errorUpdatedAt: now - 5000 }, now), false, 'an error 5 s ago: not again on every return to the tab');
+  assert.equal(c.quoteMayRefresh({ dataUpdatedAt: 0, errorUpdatedAt: now - 25_000 }, now), true);
+  assert.equal(c.quoteMayRefresh({ dataUpdatedAt: now - 5000, errorUpdatedAt: 0 }, now), false);
+  c.store.set('iaero.rift.calls.v1', JSON.stringify({ t: [], pausedUntil: now + 30_000, lastProbe: 0 }));
+  assert.equal(c.quoteMayRefresh({ dataUpdatedAt: now - 60_000, errorUpdatedAt: 0 }, now), false, 'in a rate-limit pause');
+});

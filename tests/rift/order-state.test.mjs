@@ -438,3 +438,21 @@ test('round 6: the kept pre-send nonce moves past a transaction of this order th
   assert.deepEqual(nonceUsed(order({ preSendNonce: 7 }), undefined), {});
   assert.deepEqual(nonceUsed(order(), 7), {});
 });
+
+// --- Round 7 ---
+
+test('round 7: an answer older than the latest sighting recorded never sets that record back', () => {
+  const cp = T0 + 60 * 60_000 + BTC_GRACE_MS;
+  const t0 = T0 + 30 * 60_000;
+  const A = 'ab'.repeat(32), B = 'cd'.repeat(32);
+  // Tab B's look, taken at t0 + 3 s, saw a second payment and recorded it.
+  const newer = { txid: A, confirmations: 0, firstSeenAt: T0, totalSats: '200000', payments: 2, lastSeenAt: t0 + 3000 };
+  // Tab A's look, taken at t0, lands after it: one payment. It must not replace the record.
+  assert.deepEqual(lookNow(newer, { payments: [{ txid: A, confirmations: 0 }], totalSats: 100000n }, t0, cp), {});
+  // An empty answer taken at t0 + 1.5 s counts for nothing either.
+  assert.deepEqual(lookNow(newer, EMPTY, t0 + 1500, cp), {});
+  // A newer answer still records what it adds.
+  const later = lookNow(newer, { payments: [{ txid: A, confirmations: 1 }, { txid: B, confirmations: 1 }], totalSats: 200000n }, t0 + 6000, cp);
+  assert.equal(later.btc.confirmed, true);
+  assert.equal(later.btc.lastSeenAt, t0 + 6000);
+});

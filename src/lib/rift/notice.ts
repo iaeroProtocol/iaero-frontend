@@ -16,7 +16,10 @@ export function orderNotice(o: StoredOrder, now: number): string {
     case 'delivered': return `${fmt(o.amountOut)} iAERO arrived in your wallet.`;
     case 'refunded': return `Rift refunded your ${o.token.symbol}.`;
     case 'expired': return paidButExpired(o, now)
-      ? 'Rift closed an order that a payment was sent to. Open it for the order ID to give Rift.'
+      ? o.sourceChain !== 'bitcoin' && o.sourceChain !== 'hyperliquid' && !o.depositConfirmedAt
+        // Sent from this browser, never confirmed here: it may have failed. Its card reads the receipt.
+        ? 'Rift closed an order whose payment wasn’t confirmed here. Open it to check that payment.'
+        : 'Rift closed an order that a payment was sent to. Open it for the order ID to give Rift.'
       : o.btc?.missing
         ? 'An order expired after its Bitcoin payment disappeared from view. Check your wallet, and open the order for its ID.'
         : doubtButExpired(o, now)

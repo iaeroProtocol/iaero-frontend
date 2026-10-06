@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyLlamaPrices, candidatesToHoldings, parseNative, parseTokenBalances, probeAmount, rankHoldings, rawToNumber, splitRead, validDecimals, parseDecimals, blockscoutCandidates,
+  safeIcon,
 } from '../../src/lib/rift/holdings.ts';
 
 const IAERO = 'base.0x81034fb34009115f215f5d5f564aac9ffa46a1dc';
@@ -203,4 +204,22 @@ test('a Blockscout row whose fields can\u2019t be turned into text is skipped, n
   assert.deepEqual(parseTokenBalances('base', rows), []);
   assert.deepEqual(blockscoutCandidates(rows).filter(c => c.address !== `0x${'66'.repeat(20)}`), []);
   assert.equal(parseNative('base', { coin_balance: hostile, exchange_rate: '2000' }), null);
+});
+
+test('round 7: token icons only from the image hosts Blockscout uses: another host would learn who holds what', () => {
+  const coingecko = 'https://assets.coingecko.com/coins/images/279/small/ethereum.png';
+  assert.equal(safeIcon(coingecko), coingecko);
+  assert.equal(safeIcon('https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/info/logo.png'),
+    'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/info/logo.png');
+  for (const bad of ['https://tracker.example/pixel.png?u=1', 'http://assets.coingecko.com/x.png', 'javascript:alert(1)', 'data:image/svg+xml,<svg/>',
+    'https://assets.coingecko.com.evil.example/x.png', '//assets.coingecko.com/x.png', '', 7, null, ['https://assets.coingecko.com/x.png']]) {
+    assert.equal(safeIcon(bad), undefined, String(bad));
+  }
+  const USDC = '0xaf88d065e77c8cc2239327c5edb3a432268e5831';
+  const listed = parseTokenBalances('arbitrum', [tok(USDC, 'USDC', 6, '5000000', '1', { icon_url: 'https://tracker.example/usdc.png' })]);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].icon, undefined, 'a listed balance');
+  const found = blockscoutCandidates({ items: [tok(USDC, 'USDC', 6, '5000000', '1', { icon_url: 'https://tracker.example/usdc.png' })] }, []);
+  assert.equal(found.length, 1);
+  assert.equal(found[0].icon, undefined, 'a candidate');
 });

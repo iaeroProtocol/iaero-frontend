@@ -36,7 +36,9 @@ import OrderTracker from '@/components/rift/OrderTracker';
 import RecentOrders from '@/components/rift/RecentOrders';
 import RiftErrorBoundary from '@/components/rift/RiftErrorBoundary';
 import { CURATED_TOKENS, KNOWN_SYMBOLS, RIFT_DESTINATION, RIFT_SECURITY_URL, SOURCE_CHAINS } from '@/lib/rift/config';
-import { classifyRiftError, createOrder, explainRiftError, fetchQuote, getOrder, RiftApiError, riftPauseLeft, riftPricing } from '@/lib/rift/client';
+import {
+  classifyRiftError, createOrder, explainRiftError, fetchQuote, getOrder, QUOTE_FRESH_MS, quoteMayRefresh, RiftApiError, riftPauseLeft, riftPricing,
+} from '@/lib/rift/client';
 import { decimalToRaw, isContractCode, normalizeDecimal, parseOrder, parseOrderUpdate } from '@/lib/rift/validate';
 import { estimateRoute, formatRange } from '@/lib/rift/timing';
 import { isBtcAddress, lookAtBtcAddress, normalizeBtcAddress } from '@/lib/rift/bitcoin';
@@ -118,6 +120,10 @@ const fmtUsd = (n: number) => (Number.isFinite(n)
   ? n.toLocaleString(undefined, { style: 'currency', currency: 'USD', ...(n >= 1000 ? { minimumFractionDigits: 0, maximumFractionDigits: 0 } : { maximumFractionDigits: 2 }) })
   : '—');
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+/** What the quote query's refresh rules read of it (typed apart, so the query's own type is still inferred). */
+type QuoteQueryState = { state: { dataUpdatedAt: number; errorUpdatedAt: number } };
+/** Assets worth one ETH each: the gas desk's Ethereum charge, in ETH, compares with an amount of them directly. */
+const ETH_UNITS = new Set(CURATED_TOKENS.filter(t => t.chain !== 'bitcoin' && (t.symbol === 'ETH' || t.symbol === 'WETH')).map(t => t.asset.toLowerCase()));
 /** A part of the page that couldn't load (a page older than the site, or the network), not a damaged order. */
 const isLoadError = (e: Error) => e?.name === 'ChunkLoadError'
   || /loading (css )?chunk|dynamically imported module|importing a module script failed/i.test(e?.message ?? '');
@@ -406,13 +412,15 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     queryKey: ['rift-quote', token?.asset, quoteAmount],
     // Only once the amount has settled for the token shown: a token switch must not ask for the new token at an old amount.
     enabled: active && !!token && !!quoteAmount && amountState.normalized === quoteAmount && !busy && spent !== quoteKey,
-    refetchOnWindowFocus: () => riftPauseLeft() === 0,
-    refetchOnReconnect: () => riftPauseLeft() === 0,
+    refetchOnWindowFocus: (query: QuoteQueryState) => quoteMayRefresh(query.state),
+    refetchOnReconnect: (query: QuoteQueryState) => quoteMayRefresh(query.state),
     queryFn: async ({ signal, queryKey }) => {
-      // A refresh (this key has a quote) waits out Rift's rate-limit pause: a fetch the user didn't ask for never
-      // lands in it (the end of a purchase, a scheduled refresh, the tab shown again).
+      // Every fetch but a key's first (a quote or an error came back before) waits out Rift's rate-limit pause: a
+      // fetch the user didn't ask for never lands in it (the end of a purchase, a scheduled refresh, the tab shown
+      // again). A new amount, which the user is waiting on, goes at once.
       const wait = riftPauseLeft();
-      if (wait > 0 && queryClient.getQueryData(queryKey) !== undefined) {
+      const before = queryClient.getQueryState(queryKey);
+      if (wait > 0 && (before?.dataUpdatedAt || before?.errorUpdatedAt)) {
         await new Promise<void>((resolve, reject) => {
           const t = setTimeout(resolve, wait);
           signal.addEventListener('abort', () => { clearTimeout(t); reject(signal.reason); }, { once: true });
@@ -424,7 +432,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     },
     // Not while Rift's rate-limit pause lasts: the next refresh waits it out.
     refetchInterval: () => (moved || !active ? false : Math.max(30_000, riftPauseLeft())),
-    staleTime: 20_000,
+    staleTime: QUOTE_FRESH_MS,
     retry: (count, e) => classifyRiftError(e) === 'network' && count < 1,
     // A call that failed outright starts a short pause (client.ts): the retry waits it out.
     retryDelay: () => Math.max(3_000, riftPauseLeft()),
@@ -466,9 +474,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     const e = expectedFor(q, px, gasWei);
     const usdOut = e && px.iaeroUsd ? e.out * px.iaeroUsd : null;
     const atLeast = gasWei === undefined ? expectedFor(q, px, ETHEREUM_GAS_FLOOR_WEI) : e;
-    // Paid in ETH, the Ethereum gas charge is compared with the amount itself: no market price needed.
+    // Paid in ETH or WETH, the Ethereum gas charge is compared with the amount itself: no market price needed.
     let swallowed = false;
-    if (/^(ethereum|arbitrum|base)\.eth$/i.test(token?.asset ?? '')) {
+    if (ETH_UNITS.has(token?.asset.toLowerCase() ?? '')) {
       try { swallowed = decimalToRaw(q.from_amount, 18) <= ethereumGasDeskWei(gasDeskChains(q.route), gasWei ?? ETHEREUM_GAS_FLOOR_WEI); } catch { /* not a decimal: the quote check refuses it */ }
     }
     return { check: assessCost(usdIn, usdOut), usdIn, usdOut, tooSmall: swallowed || (usdOut !== null && usdOut <= 0) || (!!atLeast && atLeast.out <= 0) };
@@ -524,6 +532,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     payingRef.current.add(o.id);
     setPayingId(o.id);
     setError(null);
+    // Buy waits until this payment has finished (its own checks come before any wallet prompt).
+    if (!opts.fromStart) setBusy('Preparing the payment…');
     try {
       if (!payableNow(o.id, opts.repost)) return;
       const problem = await walletProblem(o.toAddress as Address, o.sourceChain);
@@ -614,13 +624,13 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       const stored = loadOrders().find(x => x.id === id);
       if (!warned && stored && (stored.status !== 'awaiting_deposit' || stored.rawStatus)) {
         warned = true;
-        setBusy(stored.status === 'expired' ? 'Rift has closed this order. Reject the request in your wallet.'
-          : stored.rawStatus ? 'Rift reports a status this page doesn’t know for this order. Reject the request in your wallet.'
-          : 'Rift already has a payment for this order. Reject the request in your wallet: approving it would pay twice.');
+        setBusy(stored.status === 'expired' ? 'Rift has closed this order. If your wallet still shows this request, reject it.'
+          : stored.rawStatus ? 'Rift reports a status this page doesn’t know for this order. If your wallet still shows this request, reject it.'
+          : 'Rift has registered a payment for this order. If your wallet still shows this request, reject it: approving it would pay twice. (If you already approved it, that was this payment.)');
       }
       if (at - started > MAX_PROMPT_MS) {
         clearInterval(beat);
-        if (!warned) setBusy('Your wallet hasn’t answered for 15 minutes. If it no longer shows this request, reload this page: the order card can then check whether anything was sent.');
+        setBusy(`${warned ? 'Rift has registered a payment for this order, or closed it. ' : ''}Your wallet hasn’t answered for 15 minutes. If it no longer shows this request, reload this page: the order card can then check whether anything was sent.`);
         return;
       }
       void patchPaymentAttempt(id, attemptId, prev => (prev.payRequestedAt ? { payRequestedAt: at } : {}));
@@ -901,7 +911,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   /** Wallets that can't pay or receive here. A smart-contract wallet that exists on the paying chain but not
    *  on Base could not use the iAERO delivered there. And a smart-contract wallet can't pay at all: Safe-style
    *  wallets queue the payment for other signers (it would go out later, at that time's price, under a hash this
-   *  page can't follow), and Hyperliquid accepts signatures only from regular wallets. */
+   *  page can't follow), and Hyperliquid accepts signatures only from regular wallets. Its code on any of the three
+   *  chains counts: a smart account deploys on a chain at its first use there, so the paying chain may not show it
+   *  yet. */
   async function walletProblem(owner: Address, sourceChain: StoredOrder['sourceChain']): Promise<string | null> {
     const source = SOURCE_CHAINS[sourceChain];
     if (source.kind === 'bitcoin') {
@@ -920,17 +932,24 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     const payChain = source.kind === 'evm' ? source.chainId : arbitrum.id;
     const client = payChain ? publicFor(payChain) : undefined;
     if (!client || !basePublic) throw new Error('Could not reach the network to check your wallet. Nothing was sent; try again in a moment.');
-    const [code, onBase] = await Promise.all([client.getCode({ address: owner }), payChain === base.id ? undefined : basePublic.getCode({ address: owner })]);
-    if (!isContractCode(code)) return null;
-    if (payChain !== base.id && !isContractCode(onBase)) {
+    // The paying chain and Base must answer; Ethereum or Arbitrum not answering skips that chain's check.
+    const [code, onBase, onEth, onArb] = await Promise.all([
+      client.getCode({ address: owner }), payChain === base.id ? undefined : basePublic.getCode({ address: owner }),
+      payChain === mainnet.id ? undefined : ethPublic?.getCode({ address: owner }).catch(() => undefined),
+      payChain === arbitrum.id ? undefined : arbPublic?.getCode({ address: owner }).catch(() => undefined),
+    ]);
+    if (isContractCode(code) && payChain !== base.id && !isContractCode(onBase)) {
       return `Your wallet is a smart-contract wallet on ${CHAIN_NAMES[payChain!]} but not on Base, so it could not receive iAERO there.`;
     }
+    if (![code, onBase, onEth, onArb].some(isContractCode)) return null;
     return 'Payments from smart-contract wallets (Safe, smart accounts) aren’t supported here: they can go out later, at a different price, in a way this page can’t follow. Use a regular wallet, or swap on Aerodrome.';
   }
 
   /** Buy. `accepted` is a new price the user agreed to after a move; otherwise the baseline is what they saw. */
   async function start(accepted?: PriceMove) {
     if (startingRef.current || !address || !token || !quote || !amountState.raw || !quoteAmount) return;
+    // An order card's payment still in its first checks has no wallet prompt yet: one payment at a time.
+    if (payingRef.current.size) { setError('Finish the payment in progress on the order card first.'); return; }
     startingRef.current = true;
     const owner = address as Address;
     // What this purchase is for, fixed at the click: the form can change while it runs (another token, an amount
@@ -1200,6 +1219,10 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
 
   // The price-moved panel shows the same after-gas figures as the quote panel.
   const movedDeduction = moved ? Number(moved.quote.estimated_amount_out) - (expectedFor(moved.quote, market, gasNow)?.out ?? Number(moved.quote.estimated_amount_out)) : 0;
+  // The drop in what arrives, after that charge (the limit applies to Rift's own quote, which falls by less).
+  const movedSeen = moved ? Math.max(0, Number(moved.seenOut) - movedDeduction) : 0;
+  const movedNow = moved ? Math.max(0, Number(moved.quote.estimated_amount_out) - movedDeduction) : 0;
+  const movedPct = moved && movedSeen > 0 ? Math.max(moved.dropPct, (1 - movedNow / movedSeen) * 100) : moved?.dropPct ?? 0;
 
   const cta = ((): { text: string; disabled: boolean; connect?: boolean } => {
     if (!isConnected) return { text: 'Connect a wallet to get iAERO', disabled: !openConnectModal, connect: true };
@@ -1493,8 +1516,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
               <div className="flex gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
                 <div>
-                  The price moved. You saw <span className="font-semibold text-white">{fmt(Math.max(0, Number(moved.seenOut) - movedDeduction))} iAERO</span>; it is now{' '}
-                  <span className="font-semibold text-white">{fmt(Math.max(0, Number(moved.quote.estimated_amount_out) - movedDeduction))} iAERO</span>, {formatPct(moved.dropPct)} less
+                  The price moved. You saw <span className="font-semibold text-white">{fmt(movedSeen)} iAERO</span>; it is now{' '}
+                  <span className="font-semibold text-white">{fmt(movedNow)} iAERO</span>, {formatPct(movedPct)} less
                   and more than your {moved.limit}% limit. Nothing was sent.
                   {needsAck && <> The new price needs the cost confirmation above first.</>}
                 </div>

@@ -603,3 +603,37 @@ test('two tabs creating orders at once keep both; without Web Locks nothing is w
   await t.patchOrder(h.read().id, { notify: true });
   assert.equal(h.all().filter(r => r.schema === 'v99').length, 14);
 });
+
+// --- Round 7 ---
+
+test('round 7: a poll stamp written while the clock ran ahead does not stop the tabs sharing polls and looks', () => {
+  const h = harness([]);
+  const t = h.tab();
+  const now = Date.now();
+  t.markPolled('btc:x', now + 2 * 3600_000); // the clock two hours ahead
+  assert.equal(t.polledWithin('btc:x', 5 * 60_000, now), false);
+  t.markPolled('btc:x', now); // put back: this tab looks, and says so
+  assert.equal(t.polledWithin('btc:x', 5 * 60_000, now + 1000), true, 'this tab');
+  assert.equal(h.tab().polledWithin('btc:x', 5 * 60_000, now + 1000), true, 'another tab');
+});
+
+test('round 7: a status flipping while storage is full is carried once, not once per poll; a status that moved is kept', async () => {
+  const o = order();
+  const h = harness(o);
+  const t = h.tab();
+  h.block();
+  for (let i = 0; i < 100; i++) {
+    await t.applyStatusUpdate(o.id, { rawStatus: 'held_for_review' });
+    await t.applyStatusUpdate(o.id, { status: 'awaiting_deposit' });
+  }
+  assert.ok(t.unsavedChanges() <= 1, `${t.unsavedChanges()} carried`);
+  await t.applyStatusUpdate(o.id, { status: 'funded' });
+  for (let i = 0; i < 20; i++) await t.applyStatusUpdate(o.id, { rawStatus: 'held_for_review' });
+  assert.ok(t.unsavedChanges() <= 2, `${t.unsavedChanges()} carried`);
+  h.unblock();
+  assert.equal(await t.saveCarriedNow(), 'unchanged');
+  const saved = h.read();
+  assert.equal(saved.status, 'funded', 'the move to funded was kept');
+  assert.equal(saved.rawStatus, 'held_for_review');
+  assert.equal(t.unsavedChanges(), 0);
+});

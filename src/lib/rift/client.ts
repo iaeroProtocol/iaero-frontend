@@ -89,6 +89,15 @@ export function riftPauseLeft(now = Date.now()): number {
   return Math.max(0, readLog(now).pausedUntil - now);
 }
 
+/** A quote is fresh this long after its last answer, a quote or an error. */
+export const QUOTE_FRESH_MS = 20_000;
+/** When a quote is refreshed without the user asking (the tab shown again, the network back): outside a pause, and
+ *  not within QUOTE_FRESH_MS of its last answer. An answer that was an error counts too: a quote with no data would
+ *  otherwise be refetched on every return to the tab. */
+export function quoteMayRefresh(state: { dataUpdatedAt: number; errorUpdatedAt: number } | undefined, now = Date.now()): boolean {
+  return riftPauseLeft(now) === 0 && now - Math.max(state?.dataUpdatedAt ?? 0, state?.errorUpdatedAt ?? 0) > QUOTE_FRESH_MS;
+}
+
 function logCall(kind: RiftCallKind, now: number) {
   if (typeof window === 'undefined') return;
   const log = readLog(now);

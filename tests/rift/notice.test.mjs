@@ -28,7 +28,7 @@ test('round 6: the expiry notice for a payment in doubt says what its card says,
   assert.match(doubt, /most likely nothing was taken/);
   assert.doesNotMatch(doubt, /before a payment arrived/);
   assert.equal(orderNotice(order(), now), 'An order expired before a payment arrived. Nothing was taken.', 'an order never paid');
-  assert.match(orderNotice(order({ depositSentAt: T0 + 1000, depositTxHash: `0x${'ab'.repeat(32)}` }), now), /a payment was sent/);
+  assert.match(orderNotice(order({ depositSentAt: T0 + 1000, depositTxHash: `0x${'ab'.repeat(32)}`, depositConfirmedAt: T0 + 9000 }), now), /a payment was sent to/);
 });
 
 test('notices for the other statuses worth one', () => {
@@ -37,4 +37,11 @@ test('notices for the other statuses worth one', () => {
   assert.match(orderNotice(order({ status: 'frozen' }), T0), /on hold/);
   assert.match(orderNotice(order({ status: 'underfunded' }), T0), /less than an order needs/);
   assert.equal(orderNotice(order({ status: 'funded' }), T0), '');
+});
+
+test('round 7: an EVM payment sent but never confirmed here (its card was closed) is checked, not "a payment was sent"', () => {
+  const now = EXPIRED_AT + 60_000;
+  const sent = orderNotice(order({ depositSentAt: T0 + 1000, depositTxHash: `0x${'ab'.repeat(32)}` }), now);
+  assert.match(sent, /wasn’t confirmed here\. Open it to check that payment/);
+  assert.doesNotMatch(sent, /a payment was sent to/);
 });

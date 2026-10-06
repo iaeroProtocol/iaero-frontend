@@ -41,8 +41,18 @@ let writeFailed = false;
  *  computed on top of the earlier ones, so dropping one could lose what it recorded (a payment seen, a hash). The
  *  list stays small because changes that record nothing new are not made while storage is failing (a poll that
  *  only stamps its time, a Bitcoin look that only moves a counter) or are no-ops (an observation that matches
- *  what is shown). */
-let unsaved: Change[] = [];
+ *  what is shown). The one exception: a status poll that didn't move its order's status (a status this page
+ *  doesn't know, set or cleared) is replaced by that order's next poll, so a flipping answer can't pile up.
+ *  `poll`: the order such a poll is about. */
+type Carried = { change: Change; poll?: string };
+let unsaved: Carried[] = [];
+/** Carry a change that couldn't be saved. `poll`: it is a status poll of this order, which supersedes the order's
+ *  carried polls that didn't move its status; one that didn't move it either is superseded in turn. */
+function carry(change: Change, before: StoredOrder[], after: StoredOrder[], poll?: string) {
+  if (poll) unsaved = unsaved.filter(u => u.poll !== poll);
+  const moved = poll !== undefined && before.find(o => o.id === poll)?.status !== after.find(o => o.id === poll)?.status;
+  unsaved.push({ change, poll: poll !== undefined && !moved ? poll : undefined });
+}
 /** While storage refuses writes (with changes carried or not: a refused payment claim or new order carries none),
  *  saving is tried again this often, so the page notices storage working again even when nothing else writes. */
 const RETRY_SAVE_MS = 15_000;
@@ -82,7 +92,7 @@ function current(): StoredOrder[] | null {
   const stored = readStorage();
   if (!stored) return null;
   let list = stored;
-  for (const c of unsaved) list = c(list) ?? list;
+  for (const c of unsaved) list = c.change(list) ?? list;
   return list;
 }
 
@@ -140,14 +150,14 @@ export type WriteResult = 'saved' | 'unchanged' | 'failed';
 /** Read, change and save the list under the cross-tab lock. `change` returns null for "nothing to save".
  *  The change is applied to what storage holds now (with this page's unsaved changes); this page's copy is used
  *  only when storage can't be read. */
-function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: boolean } = {}): Promise<WriteResult> {
+function mutate(change: Change, { keepOnFailure = true, poll }: { keepOnFailure?: boolean; poll?: string } = {}): Promise<WriteResult> {
   const run = (): WriteResult => {
     const stored = current();
     if (!stored) {
       // Storage can't be read: nothing is written over what it holds, unseen. A change that changes something is
       // shown on this page (over its last view) and waits, carried, for storage.
       const seen = change(memory ?? []);
-      if (seen && keepOnFailure) { unsaved.push(change); memory = seen; }
+      if (seen && keepOnFailure) { carry(change, memory ?? [], seen, poll); memory = seen; }
       writeFailed = true;
       retryLater();
       window.dispatchEvent(new Event(EVENT));
@@ -183,7 +193,7 @@ function mutate(change: Change, { keepOnFailure = true }: { keepOnFailure?: bool
       return 'failed';
     }
     // Kept for this page's lifetime, and cleared by the next successful save.
-    unsaved.push(change);
+    carry(change, base, next, poll);
     retryLater();
     window.dispatchEvent(new Event(EVENT));
     return 'failed';
@@ -204,7 +214,9 @@ export function upsertOrder(order: StoredOrder, opts: { keepOnFailure?: boolean 
 
 /** Change one order. Nothing is written when nothing changes, and statuses only move forward (a late poll
  *  from another tab can land after a newer one): order-state.ts canMoveTo. */
-export function patchOrder(id: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>)): Promise<WriteResult> {
+export function patchOrder(
+  id: string, patch: Partial<StoredOrder> | ((o: StoredOrder) => Partial<StoredOrder>), { poll = false }: { poll?: boolean } = {},
+): Promise<WriteResult> {
   return mutate(list => {
     const i = list.findIndex(o => o.id === id);
     if (i < 0) return null;
@@ -216,7 +228,7 @@ export function patchOrder(id: string, patch: Partial<StoredOrder> | ((o: Stored
     const copy = list.slice();
     copy[i] = next;
     return copy;
-  });
+  }, { poll: poll ? id : undefined });
 }
 
 /** A refusal raised here, whose message already says that nothing was sent. */
@@ -340,7 +352,7 @@ export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now()):
       // Rift saw none, which settles nothing about a payment in doubt (it must not read as "a payment was sent").
       ...(u.status !== 'awaiting_deposit' && u.status !== 'expired' ? { payUnknown: false, payRequestedAt: undefined } : {}),
     };
-  });
+  }, { poll: true });
 }
 
 /** Remove orders from this browser, each only if `canRemove` still holds for it when the change is applied (another
@@ -361,11 +373,16 @@ const POLLED_KEY = 'iaero.rift.polled.v1';
 /** This page's own stamps, kept too: while storage refuses writes, the stored ones go stale. */
 const polledHere: Record<string, number> = {};
 
-function readPolled(): Record<string, number> {
-  let stored: Record<string, number> = {};
+/** A stamp from the future (written while the clock ran ahead, then put back) is dropped: it would stop the tabs
+ *  sharing polls and looks until the clock caught up. */
+const fromFuture = (t: number, now: number) => t > now + 1000;
+
+function readPolled(now = Date.now()): Record<string, number> {
+  let stored: Record<string, unknown> = {};
   try { stored = JSON.parse(window.localStorage.getItem(POLLED_KEY) ?? '{}') ?? {}; } catch { /* this page's own */ }
-  const out = { ...stored };
-  for (const [k, t] of Object.entries(polledHere)) if (!(out[k] >= t)) out[k] = t;
+  const out: Record<string, number> = {};
+  for (const [k, t] of Object.entries(stored)) if (typeof t === 'number' && !fromFuture(t, now)) out[k] = t;
+  for (const [k, t] of Object.entries(polledHere)) if (!fromFuture(t, now) && !(out[k] >= t)) out[k] = t;
   return out;
 }
 
@@ -373,10 +390,11 @@ function readPolled(): Record<string, number> {
 export const pollStamps = () => readPolled();
 
 export function markPolled(id: string, now = Date.now()) {
-  polledHere[id] = Math.max(polledHere[id] ?? 0, now);
-  for (const k of Object.keys(polledHere)) if (now - polledHere[k] > 3600_000) delete polledHere[k];
+  const before = polledHere[id];
+  polledHere[id] = before !== undefined && !fromFuture(before, now) ? Math.max(before, now) : now;
+  for (const k of Object.keys(polledHere)) if (now - polledHere[k] > 3600_000 || fromFuture(polledHere[k], now)) delete polledHere[k];
   try {
-    const m = readPolled();
+    const m = readPolled(now);
     m[id] = now;
     // Only recent stamps matter.
     for (const k of Object.keys(m)) if (now - m[k] > 3600_000) delete m[k];
@@ -386,7 +404,7 @@ export function markPolled(id: string, now = Date.now()) {
 
 /** Whether any tab polled this order less than `withinMs` ago. */
 export function polledWithin(id: string, withinMs: number, now = Date.now()): boolean {
-  const t = readPolled()[id];
+  const t = readPolled(now)[id];
   return typeof t === 'number' && now - t >= 0 && now - t < withinMs;
 }
 
@@ -396,12 +414,17 @@ export function useStoredOrders(): StoredOrder[] {
   const refresh = useCallback(() => setOrders(loadOrders()), []);
   useEffect(() => {
     refresh();
-    const onStorage = (e: StorageEvent) => { if (e.key === KEY) refresh(); };
+    // Also when another tab clears all storage (key null), and when the page comes back from the browser's
+    // back/forward cache: what it showed may be stale (a payment recorded meanwhile).
+    const onStorage = (e: StorageEvent) => { if (e.key === KEY || e.key === null) refresh(); };
+    const onShow = (e: PageTransitionEvent) => { if (e.persisted) refresh(); };
     window.addEventListener(EVENT, refresh);
     window.addEventListener('storage', onStorage);
+    window.addEventListener('pageshow', onShow);
     return () => {
       window.removeEventListener(EVENT, refresh);
       window.removeEventListener('storage', onStorage);
+      window.removeEventListener('pageshow', onShow);
     };
   }, [refresh]);
   return orders;

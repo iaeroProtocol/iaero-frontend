@@ -140,10 +140,22 @@ export function parseTokenBalances(chain: HoldingChain, json: unknown, exclude: 
     out.push({
       chain, asset, symbol: symbol.slice(0, 16), name: (text(t.name) || symbol).slice(0, 48), decimals,
       address: address as `0x${string}`, balanceRaw, priceUsd,
-      valueUsd: usdValue(priceUsd, balanceRaw, decimals), icon: text(t.icon_url) || undefined,
+      valueUsd: usdValue(priceUsd, balanceRaw, decimals), icon: safeIcon(t.icon_url),
     });
   }
   return out;
+}
+
+/** Token icons are shown only from the image hosts Blockscout's metadata uses (CoinGecko, token lists on GitHub): an
+ *  icon from anywhere else would tell that host who looks at which token. */
+const ICON_HOSTS = new Set(['assets.coingecko.com', 'coin-images.coingecko.com', 'raw.githubusercontent.com']);
+export function safeIcon(v: unknown): string | undefined {
+  const s = text(v);
+  if (!s) return undefined;
+  try {
+    const u = new URL(s);
+    return u.protocol === 'https:' && ICON_HOSTS.has(u.hostname) ? u.href : undefined;
+  } catch { return undefined; }
 }
 
 /** Native ETH from Blockscout's /addresses/{address}. */
@@ -243,7 +255,7 @@ export function blockscoutCandidates(
     const c: TokenCandidate = {
       address: address as `0x${string}`, symbol, name: (text(t.name) || symbol).slice(0, 48), decimals,
       priceUsd: usdPrice(t.exchange_rate),
-      icon: text(t.icon_url) || undefined,
+      icon: safeIcon(t.icon_url),
     };
     if (c.priceUsd > 0) { priced.push(c); seen.add(address); }
     else {

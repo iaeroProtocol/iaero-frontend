@@ -183,7 +183,7 @@ export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcL
   if (seen === 'known') {
     // The payment recorded is still there: a run of empty answers (or "missing") ends.
     if (!prev?.emptyChecks && !prev?.missing) return {};
-    const btc = { ...prev, lastSeenAt: look.at };
+    const btc = { ...prev, lastSeenAt: Math.max(look.at, prev?.lastSeenAt ?? 0) };
     delete btc.emptyChecks; delete btc.emptySince; delete btc.missing;
     return { btc };
   }
@@ -196,8 +196,10 @@ export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcL
     const proven = emptyChecks >= BTC_MISSING_AFTER && look.at - emptySince >= BTC_EMPTY_SPAN_MS;
     return { btc: { ...prev, emptyChecks, emptySince, ...(proven ? { emptyAt: look.at } : {}) } };
   }
-  // An empty answer older than the run it would extend, or than the latest sighting recorded, counts for nothing.
-  if (!seen.payments.length && ((prev?.emptySince !== undefined && look.at < prev.emptySince) || look.at < (prev?.lastSeenAt ?? 0))) return {};
+  // An answer older than the latest sighting recorded counts for nothing: a newer look has been recorded since (a
+  // sighting from it must not set that record back). Nor does an empty answer older than the run it would extend.
+  if (look.at < (prev?.lastSeenAt ?? 0)) return {};
+  if (!seen.payments.length && prev?.emptySince !== undefined && look.at < prev.emptySince) return {};
   const btc = nextBtcRecord(prev, seen, look.at);
   if (btc === prev || (positiveOnly && !btcPositive(prev, btc))) return {};
   if (!seen.payments.length) return { btc };
