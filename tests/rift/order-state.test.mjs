@@ -247,12 +247,12 @@ test('Bitcoin "nothing was sent" waits for a look at the address past its checkp
   assert.deepEqual(lookNow(looked.btc, empty, cp + BTC_EMPTY_SPAN_MS + 9, cp), {}, 'recorded once');
   // Expired by Rift: cleared, and "Nothing was taken", only after a look since then.
   const expired = btc({ status: 'expired', statusTimes: { awaiting_deposit: T0, expired: T0 + 7 * 864e5 } });
-  assert.equal(btcUnchecked(expired), true);
+  assert.equal(btcUnchecked(expired, T0 + 8 * 864e5), true);
   assert.equal(clearable(expired, T0 + 8 * 864e5), false);
-  assert.equal(btcNeedsLook(expired), true);
+  assert.equal(btcNeedsLook(expired, T0 + 8 * 864e5), true);
   const checked = btc({ ...expired, btc: { emptyAt: T0 + 7 * 864e5 + 1 } });
   assert.equal(clearable(checked, T0 + 8 * 864e5), true);
-  assert.equal(btcNeedsLook(checked), false);
+  assert.equal(btcNeedsLook(checked, T0 + 8 * 864e5), false);
   // An expired order whose unconfirmed payment was seen keeps being looked at; a confirmed one needs support only.
   assert.equal(btcNeedsLook(btc({ status: 'expired', btc: { txid: 'ab'.repeat(32), confirmations: 0 } })), true);
   assert.equal(btcNeedsLook(btc({ status: 'expired', btc: { txid: 'ab'.repeat(32), confirmations: 2, confirmed: true } })), false);
@@ -500,4 +500,39 @@ test('round 9: an unfinished order a week past Rift\'s deposit deadline can be r
   assert.equal(pastDeadline(o, T0 + 15 * 864e5), true);
   assert.equal(pastDeadline(order({ status: 'delivered' }), T0 + 30 * 864e5), false, 'a finished order is cleared as usual');
   assert.equal(pastDeadline(order({ depositDeadline: 'soon' }), T0 + 30 * 864e5), false, 'no readable deadline: never');
+});
+
+// --- Round 10 ---
+
+test('round 10: an expiry or a proof stored from the future (the clock ran ahead) neither holds a check up nor proves it', () => {
+  const now = T0 + 8 * 864e5;
+  // "Expired" recorded five hours ahead; Rift's own deadline (T0 + 7 days) is the checkpoint instead.
+  const expired = btcOrd({ status: 'expired', statusTimes: { expired: now + 5 * 3600_000 }, btc: { emptyAt: now - 3600_000 } });
+  assert.equal(btcCheckpoint(expired, now), T0 + 7 * 864e5);
+  assert.equal(btcUnchecked(expired, now), false, 'a run of looks after the deadline counts');
+  // A proof of "nothing was sent" made by a clock three hours ahead, during the pay window: not a proof.
+  const open = btcOrd({ btc: { emptyChecks: 3, emptySince: T0 + 3 * 3600_000, emptyAt: T0 + 3 * 3600_000 + BTC_EMPTY_SPAN_MS } });
+  const justPast = T0 + 61 * 60_000;
+  assert.equal(btcUnchecked(open, justPast), true);
+  assert.equal(isAbandoned(open, justPast), false, 'no Dismiss, no "wasn\'t paid": the grace for a last-minute payment stands');
+  // A look at the order drops it and starts a run of its own.
+  const cp = btcCheckpoint(open, justPast);
+  const r = lookNow(open.btc, EMPTY, cp + 1000, cp);
+  assert.equal(r.btc?.emptyAt, undefined);
+  assert.equal(r.btc?.emptyChecks, 1);
+});
+
+test('round 10: a payment recorded without its time still counts as seen (no QR code)', () => {
+  assert.equal(phaseInput(btcOrd({ btc: { txid: 'ab'.repeat(32), confirmations: 0 } }), 'bitcoin').btcSeenAt, T0);
+  assert.equal(phaseInput(btcOrd({ btc: { txid: 'ab'.repeat(32), missing: true } }), 'bitcoin').btcSeenAt, undefined, 'missing: paying again shows');
+});
+
+test('round 10: a prompt or a cooldown stamped by a clock that ran ahead doesn\'t hold the order up', () => {
+  const now = T0 + 5 * 60_000;
+  // Stamped three hours "ahead": the prompt can't be known to be open (unknown, checkable), not "requesting" for hours.
+  assert.equal(payState(order({ payRequestedAt: now + 3 * 3600_000 }), now), 'unknown');
+  assert.equal(payState(order({ payRequestedAt: now - 30_000 }), now), 'requesting');
+  // A cooldown from the future doesn't block Pay for hours.
+  assert.equal(canPay(order({ depositFailed: true, depositFailReason: 'pre_send', preSendAt: now + 3 * 3600_000 }), 'evm', now), true);
+  assert.equal(canPay(order({ depositFailed: true, depositFailReason: 'pre_send', preSendAt: now - 10_000 }), 'evm', now), false);
 });

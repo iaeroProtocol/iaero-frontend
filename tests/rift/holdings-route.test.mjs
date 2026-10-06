@@ -8,7 +8,7 @@ import ts from 'typescript';
 import * as holdings from '../../src/lib/rift/holdings.ts';
 
 const src = readFileSync(new URL('../../src/app/api/rift/holdings/route.ts', import.meta.url), 'utf8')
-  + '\nexport const __readBalances = readBalances;\nexport const __chainHoldings = chainHoldings;';
+  + '\nexport const __readBalances = readBalances;\nexport const __chainHoldings = chainHoldings;\nexport const __lookupOrder = lookupOrder;';
 const cjs = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 
 const addr = i => `0x${(0xabc000 + i).toString(16).padStart(40, '0')}`;
@@ -38,7 +38,7 @@ function load(chain, rows = []) {
       '@/lib/public-rpcs': { rpcUrls: () => ['http://rpc'] },
     })[n] ?? (() => { throw new Error(`unexpected import ${n}`); })(),
   });
-  return { readBalances: exports.__readBalances, chainHoldings: exports.__chainHoldings };
+  return { readBalances: exports.__readBalances, chainHoldings: exports.__chainHoldings, lookupOrder: exports.__lookupOrder };
 }
 
 /** A chain where token i holds 1000+i and has decimals 8+(i%10). `hostile` tokens break any batch they are in;
@@ -176,4 +176,16 @@ test('ETH whose batch failed while the tokens\u2019 answered comes from Blocksco
   const out = await exports.__chainHoldings('base', 8453, 'https://blockscout.invalid', owner, true, report, soon());
   assert.equal([...out].find(h => h.symbol === 'ETH')?.balanceRaw, '555');
   assert.ok(report.warnings.some(w => /ETH balance could not be checked on-chain/.test(w)), report.warnings.join(' | '));
+});
+
+test('round 10: our major tokens are priced from DeFiLlama first, even when Blockscout gave them a price', () => {
+  const { lookupOrder } = load({});
+  const major = { chain: 'base', asset: `base.${MAJORS[0]}`, address: MAJORS[0], symbol: 'M0', priceUsd: 1e-7, valueUsd: 0.0005 };
+  const priced = { chain: 'base', asset: `base.${addr(50)}`, address: addr(50), symbol: 'X', priceUsd: 2, valueUsd: 10 };
+  const unpriced = { chain: 'base', asset: `base.${addr(51)}`, address: addr(51), symbol: 'Y', priceUsd: 0, valueUsd: 0 };
+  const ids = lookupOrder([priced, unpriced, major]).map(h => h.symbol);
+  assert.ok(ids.includes('M0'), 'a wrong tiny price from Blockscout must not hide a real balance');
+  assert.ok(ids.includes('Y'));
+  assert.ok(!ids.includes('X'), 'other priced tokens keep their price');
+  assert.equal(ids[0], 'M0', 'major tokens first');
 });

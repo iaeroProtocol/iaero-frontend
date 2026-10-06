@@ -55,7 +55,7 @@ const V2_ABI = [
 async function llama(ids: string[], signal?: AbortSignal) {
   const res = await fetch(`https://coins.llama.fi/prices/current/${ids.join(',')}?searchWidth=4h`, { signal });
   if (!res.ok) throw new Error(`DeFiLlama HTTP ${res.status}`);
-  return parseLlamaQuotes(await res.json(), Date.now());
+  return parseLlamaQuotes(await res.json(), Date.now(), ETH_ID);
 }
 
 export interface MarketPrices { iaeroUsd?: number; inputUsd?: number; ethUsd?: number }

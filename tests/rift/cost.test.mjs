@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { costLevel, costVsMarketPct, deliveredVsQuotedPct, formatPct, gasSwallows, parseLlamaQuotes, priceDropPct } from '../../src/lib/rift/cost.ts';
+import { costLevel, costVsMarketPct, costWorseThanAccepted, deliveredVsQuotedPct, formatPct, gasSwallows, parseLlamaQuotes, priceDropPct } from '../../src/lib/rift/cost.ts';
 
 test('cost against market prices, from a real quote', () => {
   // $500 in, 830 iAERO out at $0.5976: $496.01 of iAERO, so 0.8%.
@@ -148,14 +148,39 @@ test('round 9: with this computer\'s clock running slow, a price hours old is st
     'coingecko:ethereum': { price: 4000, timestamp: Math.floor(real / 1000) - 60, confidence: 0.99 },
     'base:0xstale': { price: 1, timestamp: Math.floor(real / 1000) - 2 * 3600, confidence: 0.99 },
   } };
-  const q = parseLlamaQuotes(answer, slow);
+  const q = parseLlamaQuotes(answer, slow, 'coingecko:ethereum');
   assert.ok(q['coingecko:ethereum'], 'a fresh price is kept');
-  assert.equal(q['base:0xstale'], undefined, 'two hours older than the newest price in the answer: left out');
+  assert.equal(q['base:0xstale'], undefined, 'two hours older than ETH\'s price in the same answer: left out');
   // A correct clock gives the same answer.
-  assert.equal(parseLlamaQuotes(answer, real)['base:0xstale'], undefined);
+  assert.equal(parseLlamaQuotes(answer, real, 'coingecko:ethereum')['base:0xstale'], undefined);
 });
 
 test('round 9: a gas price of zero counts as unknown (the floor applies)', () => {
   assert.equal(gasSwallows({ chains: [1, 8453], gasWei: 0n, ethUsd: 4000, payUsd: 2 }), true);
   assert.equal(gasSwallows({ chains: [1, 8453], gasWei: 0n, payWei: 500_000_000_000_000n }), true);
+});
+
+test('round 10: one odd entry dated ahead doesn\'t age the other prices out; the server keeps its own clock', () => {
+  const now = Date.now();
+  const sec = Math.floor(now / 1000);
+  const answer = { coins: {
+    'coingecko:ethereum': { price: 4000, timestamp: sec - 60, confidence: 0.99 },
+    'base:0xusdc': { price: 1, timestamp: sec - 120, confidence: 0.99 },
+    'base:0xjunk': { price: 0.01, timestamp: sec + 2 * 3600, confidence: 0.2 }, // an airdropped token, oddly dated
+  } };
+  assert.ok(parseLlamaQuotes(answer, now, 'coingecko:ethereum')['base:0xusdc'], 'the page');
+  assert.ok(parseLlamaQuotes(answer, now)['base:0xusdc'], 'the holdings route');
+});
+
+test('round 10: ETH and WETH are compared with the Layer 2 charges too', () => {
+  // An Arbitrum-to-Base route: $0.20 of Layer 2 charges, about 0.00005 ETH at $4,000.
+  assert.equal(gasSwallows({ chains: [42161, 8453], ethUsd: 4000, payWei: 10_000_000_000_000n }), true, '0.00001 ETH');
+  assert.equal(gasSwallows({ chains: [42161, 8453], ethUsd: 4000, payWei: 1_000_000_000_000_000n }), false, '0.001 ETH');
+});
+
+test('round 10: a card\'s Pay asks for a new order when the cost is now high and worse than when it was made', () => {
+  assert.equal(costWorseThanAccepted(3.5, 2.6), true, 'moderate then, high now');
+  assert.equal(costWorseThanAccepted(3.5, 3.2), false, 'high then too, and within half a point: the tick at Buy covers it');
+  assert.equal(costWorseThanAccepted(2.9, 1), false, 'not high');
+  assert.equal(costWorseThanAccepted(4, null), true, 'unknown then');
 });

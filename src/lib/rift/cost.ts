@@ -44,6 +44,13 @@ export function assessCost(usdIn: number | null, usdOut: number | null): CostChe
   return { kind: 'ok', pct, level: costLevel(pct) };
 }
 
+/** Whether a cost found when paying from an order card needs the review Buy would ask for, beyond what was accepted
+ *  when the order was made: high now, and more than half a point worse than then (what a tick at Buy covers). */
+export function costWorseThanAccepted(nowPct: number, thenPct: number | null): boolean {
+  if (costLevel(nowPct) !== 'high') return false;
+  return thenPct === null || nowPct > thenPct + 0.5;
+}
+
 /** Whether Buy needs the confirmation tick for this cost. */
 export const costNeedsTick = (c: CostCheck) => c.kind !== 'ok' || c.level === 'high';
 
@@ -106,16 +113,19 @@ export const PRICE_MAX_AGE_SEC = 1800;
 /** A price and when DeFiLlama last updated it (seconds). */
 export interface LlamaQuote { price: number; ts: number }
 
-/** USD prices with their timestamps by DeFiLlama id from a /prices/current response. */
-export function parseLlamaQuotes(json: unknown, nowMs: number): Record<string, LlamaQuote> {
+/** USD prices with their timestamps by DeFiLlama id from a /prices/current response. `referenceId`: a liquid coin
+ *  (ETH) asked for alongside, whose accepted price dates the answer: with this computer's clock running slow, a price
+ *  hours old would otherwise pass. (Not one of the others: a single odd entry must not age the rest out. The server,
+ *  whose clock is right, passes none.) */
+export function parseLlamaQuotes(json: unknown, nowMs: number, referenceId?: string): Record<string, LlamaQuote> {
   const coins = (json as { coins?: Record<string, { price?: unknown; timestamp?: unknown; confidence?: unknown }> } | null)?.coins;
   const out: Record<string, LlamaQuote> = {};
   if (!coins || typeof coins !== 'object') return out;
-  // Ages are judged against the newest price in the answer too: with this computer's clock running slow, a price
-  // hours old would otherwise pass. (A liquid coin, ETH, is asked for with every price for that.) A time from the
-  // future can only make prices count as stale, the safe side; beyond a day ahead it is ignored as nonsense.
-  const newest = Math.max(0, ...Object.values(coins).map(c => Number(c?.timestamp)).filter(t => Number.isFinite(t) && t * 1000 <= nowMs + 864e5));
-  const nowSec = Math.max(nowMs / 1000, newest);
+  const ref = referenceId ? coins[referenceId] : undefined;
+  const refTs = Number(ref?.timestamp);
+  const refOk = !!ref && Number(ref.price) > 0 && (ref.confidence === undefined || Number(ref.confidence) >= 0.9)
+    && Number.isFinite(refTs) && refTs * 1000 <= nowMs + 864e5;
+  const nowSec = Math.max(nowMs / 1000, refOk ? refTs : 0);
   for (const [id, c] of Object.entries(coins)) {
     const price = Number(c?.price);
     const ts = Number(c?.timestamp);
@@ -171,7 +181,12 @@ export const ethereumGasDeskWei = (chains: number[], ethGasPriceWei: bigint): bi
 export function gasSwallows(x: { chains: number[]; gasWei?: bigint; ethUsd?: number; payWei?: bigint; payUsd?: number | null }): boolean {
   // A gas price of zero (a node answering nonsense) counts as unknown.
   const gas = x.gasWei !== undefined && x.gasWei > 0n ? x.gasWei : ETHEREUM_GAS_FLOOR_WEI;
-  if (x.payWei !== undefined) return x.payWei <= ethereumGasDeskWei(x.chains, gas);
+  if (x.payWei !== undefined) {
+    // The Layer 2 charges (in USD) too, when ETH's price is known.
+    const l2Usd = x.chains.filter(c => c !== 1).length * L2_GAS_DESK_USD;
+    const l2Wei = x.ethUsd && x.ethUsd > 0 ? BigInt(Math.ceil((l2Usd / x.ethUsd) * 1e18)) : 0n;
+    return x.payWei <= ethereumGasDeskWei(x.chains, gas) + l2Wei;
+  }
   const usd = gasDeskUsd(x.chains, gas, x.ethUsd);
   return x.payUsd != null && x.payUsd > 0 && usd !== null && usd > 0 && usd >= x.payUsd;
 }

@@ -33,7 +33,7 @@ import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, RIFT_SUPP
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
 import { costText, costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
 import {
-  BTC_MISSING_AFTER, btcConfirmed, btcLookChange, btcLookEveryMs, btcNeedsLook, nonceUsed, pastDeadline, btcUnchecked, canHide, doubtButExpired, isFinalStatus, isOutOfDate, isTerminalStatus, missingButExpired, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput, PRE_SEND_COOLDOWN_MS,
+  BTC_MISSING_AFTER, btcConfirmed, btcLookChange, btcLookEveryMs, btcNeedsLook, fromFuture, nonceUsed, pastDeadline, btcUnchecked, canHide, doubtButExpired, isFinalStatus, isOutOfDate, isTerminalStatus, missingButExpired, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput, PRE_SEND_COOLDOWN_MS,
 } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
@@ -412,7 +412,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
   const style = badgeStyle(phase, stale, !!order.btc?.missing);
   // A status this page doesn't know: nothing is offered for payment until Rift says what it is.
   const windowOpen = payWindowOpen(order, kind, now) && !order.rawStatus;
-  const coolingDown = order.preSendAt !== undefined && now - order.preSendAt < PRE_SEND_COOLDOWN_MS;
+  const coolingDown = order.preSendAt !== undefined && now - order.preSendAt < PRE_SEND_COOLDOWN_MS && !fromFuture(order.preSendAt, now);
   const wrongAccount = !!account && account.toLowerCase() !== order.toAddress.toLowerCase();
 
   const links: Partial<Record<string, StepLink>> = {};

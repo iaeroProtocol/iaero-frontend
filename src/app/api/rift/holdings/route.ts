@@ -318,11 +318,12 @@ async function chainHoldings(chain: EvmHoldingChain, chainId: 1 | 42161 | 8453, 
   return out;
 }
 
-/** Unpriced tokens to look up, major tokens first, then taking turns across chains (Base first), so one
- *  chain's long tail cannot use up every lookup. */
+/** Tokens to look up: every major token held (its price from DeFiLlama first: a wrong tiny price from Blockscout
+ *  would hide a real balance), then unpriced ones, taking turns across chains (Base first), so one chain's long tail
+ *  cannot use up every lookup. */
 function lookupOrder(holdings: Holding[]): Holding[] {
   const unpriced = holdings.filter(h => !(h.priceUsd > 0) && h.address);
-  const major = unpriced.filter(h => MAJOR.has(h.asset));
+  const major = holdings.filter(h => h.address && MAJOR.has(h.asset));
   const byChain: Holding[][] = (['base', 'arbitrum', 'ethereum'] as const).map(c => unpriced.filter(h => h.chain === c && !MAJOR.has(h.asset)));
   const rest: Holding[] = [];
   for (let i = 0; byChain.some(l => i < l.length); i++) for (const l of byChain) if (i < l.length) rest.push(l[i]);

@@ -336,8 +336,9 @@ export function applyStatusUpdate(id: string, u: OrderUpdate, now = Date.now(), 
   return patchOrder(id, prev => {
     // While storage refuses writes, a poll that only stamps its time records nothing worth carrying (see unsaved).
     const stamp = writeFailed ? prev.lastPolledAt : !prev.lastPolledAt || now - prev.lastPolledAt > POLL_STAMP_MS ? now : prev.lastPolledAt;
-    // (An ask time stored from the future, by a clock since put back, counts as absent.)
-    if (prev.statusAskedAt !== undefined && prev.statusAskedAt <= now + 1000 && asked < prev.statusAskedAt) return { lastPolledAt: stamp };
+    // (An ask time stored from the future, by a clock since put back, counts as absent: judged by the clock now, when
+    // the change is applied, which can be long after the poll was answered: a change carried through an outage.)
+    if (prev.statusAskedAt !== undefined && prev.statusAskedAt <= Math.max(now, Date.now()) + 1000 && asked < prev.statusAskedAt) return { lastPolledAt: stamp };
     // A status this page doesn't know: never on a finished order (final statuses don't change, and it is no longer
     // polled to clear it). Repeated, it is still the newest answer: its ask time keeps an older, slower answer from
     // clearing it.

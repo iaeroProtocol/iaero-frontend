@@ -39,7 +39,9 @@ export function payState(o: StoredOrder, now: number): PayState {
   if (evm && (o.depositFailReason === 'lost'
     || (o.payAttemptAt && !o.payRequestedAt && !o.depositTxHash && !o.depositFailed && !o.depositSentAt))) return 'unknown';
   if (o.depositSentAt && !o.depositFailed) return 'sent';
-  if (o.payRequestedAt) return now - o.payRequestedAt > UNKNOWN_AFTER_MS ? 'unknown' : 'requesting';
+  // A prompt stamped by a clock that ran ahead (since put back) can't be known to be open: unknown, not "requesting"
+  // until the clock catches up. (An open prompt's heartbeat stamps it again.)
+  if (o.payRequestedAt) return now - o.payRequestedAt > UNKNOWN_AFTER_MS || fromFuture(o.payRequestedAt, now) ? 'unknown' : 'requesting';
   if (o.depositFailed) return !evm || ['reverted', 'cancelled', 'pre_send', 'replaced'].includes(o.depositFailReason ?? '') ? 'failed' : 'unknown';
   return 'none';
 }
@@ -70,7 +72,7 @@ export const PRE_SEND_COOLDOWN_MS = 60_000;
 export function canPay(o: StoredOrder, kind: SourceKind, now: number): boolean {
   // Never while Rift reports a status this page doesn't know, nor just after a "nothing was sent" failure.
   if (kind === 'bitcoin' || o.rawStatus || !payWindowOpen(o, kind, now)) return false;
-  if (o.preSendAt !== undefined && now - o.preSendAt < PRE_SEND_COOLDOWN_MS) return false;
+  if (o.preSendAt !== undefined && now - o.preSendAt < PRE_SEND_COOLDOWN_MS && !fromFuture(o.preSendAt, now)) return false;
   const s = payState(o, now);
   return s === 'none' || s === 'failed';
 }
@@ -90,7 +92,7 @@ export function isAbandoned(o: StoredOrder, now: number): boolean {
   if (o.status !== 'awaiting_deposit' || o.rawStatus || payWindowOpen(o, kind, now) || o.btc?.txid || o.btc?.missing) return false;
   // Bitcoin is paid from any wallet, out of this page's sight: only a look at the address made well after the
   // window closed shows that nothing was sent.
-  if (kind === 'bitcoin') return !btcUnchecked(o);
+  if (kind === 'bitcoin') return !btcUnchecked(o, now);
   const s = payState(o, now);
   return s === 'none' || s === 'failed';
 }
@@ -117,7 +119,8 @@ export function phaseInput(o: StoredOrder, kind: SourceKind) {
     sourceKind: kind,
     depositSentAt: o.depositSentAt && !o.depositFailed && !unknown ? o.depositSentAt : undefined,
     depositConfirmedAt: o.depositFailed || unknown ? undefined : o.depositConfirmedAt,
-    btcSeenAt: o.btc?.missing ? undefined : o.btc?.firstSeenAt,
+    // A payment recorded without its time (never written so, but a record can be damaged) still counts as seen.
+    btcSeenAt: o.btc?.missing ? undefined : o.btc?.firstSeenAt ?? (o.btc?.txid ? o.createdAt : undefined),
   };
 }
 
@@ -184,11 +187,12 @@ export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcL
   const positiveOnly = look.failing || Date.now() - (look.answeredAt ?? look.at) > BTC_LOOK_FRESH_MS;
   // Times stored from the future (the clock ran ahead, then was put back) count as absent: they would stop every look
   // from counting until the clock caught up.
-  const ahead = (t?: number) => t !== undefined && t > Date.now() + 1000;
-  if (prev && (ahead(prev.lastSeenAt) || ahead(prev.emptySince))) {
+  const ahead = fromFuture;
+  if (prev && (ahead(prev.lastSeenAt) || ahead(prev.emptySince) || ahead(prev.emptyAt))) {
     prev = { ...prev };
     if (ahead(prev.lastSeenAt)) delete prev.lastSeenAt;
     if (ahead(prev.emptySince)) { delete prev.emptySince; delete prev.emptyChecks; }
+    if (ahead(prev.emptyAt)) delete prev.emptyAt;
   }
   if (seen === 'known') {
     // The payment recorded is still there: a run of empty answers (or "missing") ends.
@@ -229,7 +233,7 @@ export const btcLookChange = (prev: StoredOrder, seen: BtcSeen, look: Omit<BtcLo
  *  looks past its checkpoint is deciding "nothing was sent" (about two minutes; not while storage refuses writes, when
  *  that run can't complete); otherwise every 10 minutes. Failed looks back off, doubling up to 10 minutes. */
 export function btcLookEveryMs(o: StoredOrder, now: number, { errors = 0, failing = false } = {}): number {
-  const deciding = btcUnchecked(o) && now >= btcCheckpoint(o) && !failing;
+  const deciding = btcUnchecked(o, now) && now >= btcCheckpoint(o, now) && !failing;
   const base = (o.status === 'awaiting_deposit' && now < o.createdAt + BTC_PAY_WINDOW_MS + BTC_GRACE_MS) || deciding ? 20_000 : 10 * 60_000;
   return Math.min(base * 2 ** Math.min(errors, 10), 10 * 60_000);
 }
@@ -238,15 +242,27 @@ export function btcLookEveryMs(o: StoredOrder, now: number, { errors = 0, failin
  *  nothing counts: a payment sent at the last minute takes a while to show. */
 export const BTC_GRACE_MS = 15 * 60_000;
 
+/** A time this page stored that is in the future: written while the clock ran ahead, since put back. It counts as
+ *  absent (or is replaced), never as fresh: it would hold things up, or prove them, until the clock caught up. */
+export const fromFuture = (t: number | undefined, now = Date.now()) => t !== undefined && t > now + 1000;
+
 /** From when a look finding nothing at a Bitcoin order's address is evidence that nothing was sent: well after its
- *  pay window closed, or once Rift has expired the order. */
-export const btcCheckpoint = (o: StoredOrder) =>
-  o.status === 'expired' ? (o.statusTimes.expired ?? o.createdAt) : o.createdAt + BTC_PAY_WINDOW_MS + BTC_GRACE_MS;
+ *  pay window closed, or once Rift has expired the order (from Rift's own deadline if the expiry was recorded by a
+ *  clock since put back). */
+export function btcCheckpoint(o: StoredOrder, now = Date.now()): number {
+  const window = o.createdAt + BTC_PAY_WINDOW_MS + BTC_GRACE_MS;
+  if (o.status !== 'expired') return window;
+  const expired = o.statusTimes.expired ?? o.createdAt;
+  if (!fromFuture(expired, now)) return expired;
+  const deadline = Date.parse(o.depositDeadline);
+  return Number.isFinite(deadline) && !fromFuture(deadline, now) ? Math.max(deadline, window) : window;
+}
 
 /** A Bitcoin order with no payment seen that no look past its checkpoint has shown to be unpaid: never "nothing was
- *  sent" (Dismiss, "Clear finished", "Nothing was taken" wait for that look). */
-export const btcUnchecked = (o: StoredOrder) =>
-  KIND_OF[o.sourceChain] === 'bitcoin' && !o.btc?.txid && !o.btc?.missing && (o.btc?.emptyAt ?? 0) < btcCheckpoint(o);
+ *  sent" (Dismiss, "Clear finished", "Nothing was taken" wait for that look). A proof from the future doesn't count. */
+export const btcUnchecked = (o: StoredOrder, now = Date.now()) =>
+  KIND_OF[o.sourceChain] === 'bitcoin' && !o.btc?.txid && !o.btc?.missing
+  && ((o.btc?.emptyAt ?? 0) < btcCheckpoint(o, now) || fromFuture(o.btc?.emptyAt, now));
 
 /** An unfinished order this long past Rift's deposit deadline is one Rift no longer settles or answers for: polled
  *  now and then, and the user may remove it. */
@@ -266,7 +282,7 @@ export function btcNeedsLook(o: StoredOrder, now = Date.now()): boolean {
   // Still waiting two weeks past Rift's deposit deadline: an order Rift no longer answers for (gone stale).
   if (o.status === 'awaiting_deposit' || o.status === 'underfunded') return !(now - Date.parse(o.depositDeadline) > BTC_LOOK_AFTER_EXPIRY_MS);
   if (o.status !== 'expired') return false;
-  if (!o.btc?.txid) return btcUnchecked(o);
+  if (!o.btc?.txid) return btcUnchecked(o, now);
   return !btcConfirmed(o.btc) && now - (o.statusTimes.expired ?? o.createdAt) < BTC_LOOK_AFTER_EXPIRY_MS;
 }
 
@@ -290,7 +306,7 @@ export const paidButExpired = (o: StoredOrder, now: number) =>
  *  the removal is applied (storage.ts removeOrders): another tab may have recorded a payment since. */
 export const clearable = (o: StoredOrder, now: number) =>
   (isFinalStatus(o.status) && !needsAttention(o.status) && !paidButExpired(o, now) && !missingButExpired(o)
-    && !doubtButExpired(o, now) && !(o.status === 'expired' && btcUnchecked(o)))
+    && !doubtButExpired(o, now) && !(o.status === 'expired' && btcUnchecked(o, now)))
   || isAbandoned(o, now);
 
 /** A Bitcoin order no payment was ever seen for, still open or expired: removed only at the user's request, after a

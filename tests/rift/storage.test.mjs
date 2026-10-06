@@ -708,3 +708,22 @@ test('round 9: a look whose save is the first storage refuses doesn\'t decide "m
   assert.equal(t.loadOrders()[0].btc.missing, undefined, '"missing" waits for storage (another tab may be seeing the payment)');
   assert.equal(t.loadOrders()[0].btc.txid, 'ab'.repeat(32));
 });
+
+// --- Round 10 ---
+
+test('round 10: a status poll carried through an outage, replayed later, doesn\'t override newer answers from other tabs', async () => {
+  const t0 = Date.now() - 60_000; // all of this happened in the last minute
+  const o = { ...order(), rawStatus: 'held_for_review', statusAskedAt: t0 - 5000 };
+  const h = harness(o);
+  const a = h.tab({ own: true });
+  const b = h.tab();
+  a.blockMe(); // tab A's writes are refused: its poll is carried
+  assert.equal(await a.applyStatusUpdate(o.id, known('awaiting_deposit'), t0 + 500, t0), 'failed');
+  // Tab B asks twenty and forty seconds later, and saves: Rift's newest answer is the unknown status again.
+  await b.applyStatusUpdate(o.id, known('awaiting_deposit'), t0 + 20_500, t0 + 20_000);
+  await b.applyStatusUpdate(o.id, unknownStatus('held_for_review'), t0 + 40_500, t0 + 40_000);
+  assert.equal(a.loadOrders()[0].rawStatus, 'held_for_review', 'tab A\'s older answer, replayed, doesn\'t lift the pause');
+  a.unblockMe();
+  await a.saveCarriedNow();
+  assert.equal(h.read().rawStatus, 'held_for_review', '...nor when tab A saves');
+});

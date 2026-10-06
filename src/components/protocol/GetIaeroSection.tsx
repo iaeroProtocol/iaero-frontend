@@ -52,8 +52,8 @@ import {
   spotSendTypedData, usdcForFee,
 } from '@/lib/rift/hypercore';
 import {
-  DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, assessCost, costNeedsTick, costText, ethereumGasDeskWei, formatPct,
-  gasDeskChains, gasDeskUsd, gasSwallows, priceDropPct, type CostCheck, type CostLevel,
+  DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, assessCost, costNeedsTick, costText, costVsMarketPct, costWorseThanAccepted,
+  ethereumGasDeskWei, formatPct, gasDeskChains, gasDeskUsd, gasSwallows, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
 import {
   btcLookChange, btcUnpaid, canPay, canRetryUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, PAY_HEARTBEAT_MS, paymentFacts, payState,
@@ -401,6 +401,9 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   // Market prices (prices.ts): iAERO from its Aerodrome pool, the token from DeFiLlama, each checked for age when
   // used. The list's price shows the amount's value, but never feeds the cost check.
   const market = useMarketPrices(token?.asset, active);
+  // As of the latest render: a payment can wait minutes (a network switch) before its price check runs.
+  const marketRef = useRef(market);
+  marketRef.current = market;
   const displayPriceUsd = market.inputUsd ?? (holding && !holding.priceMissing ? holding.priceUsd : 0);
   const amountUsd = amountState.normalized && displayPriceUsd ? Number(amountState.normalized) * displayPriceUsd : 0;
 
@@ -528,6 +531,13 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   // Saved records this version can't show, read again whenever the saved orders change.
   const unreadable = useMemo(() => unreadableOrderIds(), [allOrders]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /** An order of this wallet's, waiting for its payment, whose payment may have gone out (a lost wallet answer, or a
+   *  prompt open elsewhere): not one the user hid after a check found nothing, but still one hidden after a check
+   *  found a transaction that may be its payment. */
+  const otherInDoubt = (owner: string, except?: string) => loadOrders().find(x => x.id !== except
+    && x.toAddress.toLowerCase() === owner.toLowerCase() && x.status === 'awaiting_deposit' && (!x.hiddenAt || x.hiddenPending)
+    && (payState(x, Date.now()) === 'unknown' || payState(x, Date.now()) === 'requesting'));
+
   /** Pay an order, once: only the wallet it delivers to, only while its price is current, never while a
    *  previous attempt might still be on its way, and only if Rift's price for it has not dropped by more than the
    *  tolerance since it was made (`quoteAt`: when a just-created order's quote was fetched; a quote that recent
@@ -540,6 +550,14 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     // One payment at a time across order cards too: two wallet prompts could both be approved (and a second card's
     // network switch could disturb the first's).
     if (payingRef.current.size) { setError('Finish the payment in progress first.'); return; }
+    // Another of this wallet's orders whose payment may have gone out: as Buy asks, so does a card's Pay.
+    if (!opts.fromStart) {
+      const other = otherInDoubt(o.toAddress, o.id);
+      if (other && !window.confirm(`This page couldn’t confirm whether the payment for order ${other.id} went out. If it did, paying this order too buys twice. Pay anyway?`)) {
+        setError('Nothing was sent: check the other order first.');
+        return;
+      }
+    }
     payingRef.current.add(o.id);
     setPayingId(o.id);
     setError(null);
@@ -597,7 +615,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       // Rift's quote leaves its gas charge out (cost.ts), and Ethereum's gas may have risen since the order was made:
       // the same rules as at Buy, with the gas price and market prices as they are now.
       const chains = gasDeskChains(q.route);
-      const px = market.at(Date.now());
+      const px = marketRef.current.at(Date.now());
       let gasWei: bigint | undefined;
       if (chains.includes(1)) {
         try { const g = await ethPublic?.getGasPrice(); if (g !== undefined && g > 0n) gasWei = g; } catch { /* the floor */ }
@@ -608,11 +626,27 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         return 'dropped';
       }
       const gasUsd = gasDeskUsd(chains, gasWei, px.ethUsd);
+      // On a route Rift charges Ethereum gas for, a charge that can't be valued now isn't paid on trust (Buy would ask):
+      // no gas price, no ETH or iAERO price, or an order made before this page recorded what it expected.
+      if (chains.includes(1) && (gasUsd === null || !px.iaeroUsd || !o.expectedOut)) {
+        setError('Couldn’t value Rift’s gas charge for this order right now (a market price or Ethereum’s gas price is unavailable). Nothing was sent; try again in a moment.');
+        return 'error';
+      }
       if (o.expectedOut && gasUsd !== null && px.iaeroUsd) {
         const after = Math.max(0, Number(q.estimated_amount_out) - gasUsd / px.iaeroUsd);
         const dropAfter = priceDropPct(o.expectedOut, String(after));
         if (dropAfter > tolerance) {
           setError(`After Rift’s gas charge, this order now gets ${formatPct(dropAfter)} less iAERO than when you made it, more than your ${tolerance}% limit. Nothing was sent. Start a new order at today’s price.`);
+          return 'dropped';
+        }
+        // Buy's cost rule: a cost against market prices that is high now, and more than half a point worse than when the
+        // order was made (what a tick at Buy covers), needs a new order and its review.
+        const hl = sourceKindOf(o.sourceChain) === 'hypercore' ? HL_NEW_ADDRESS_FEE_USDC : 0;
+        const usdIn = payWei !== undefined && px.ethUsd ? Number(o.fromAmount) * px.ethUsd + hl : o.marketUsdIn ?? null;
+        const nowPct = usdIn ? costVsMarketPct(usdIn, after * px.iaeroUsd) : null;
+        const thenPct = o.marketUsdIn && o.marketIaeroUsd ? costVsMarketPct(o.marketUsdIn, Number(o.expectedOut) * o.marketIaeroUsd) : null;
+        if (nowPct !== null && costWorseThanAccepted(nowPct, thenPct)) {
+          setError(`This order now costs ${formatPct(nowPct)} against market prices${thenPct !== null ? ` (${formatPct(thenPct)} when you made it)` : ''}. Nothing was sent. Start a new order to review it.`);
           return 'dropped';
         }
       }
@@ -988,6 +1022,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     if (payingRef.current.size) { setError('Finish the payment in progress on the order card first.'); return; }
     startingRef.current = true;
     const owner = address as Address;
+    // What the user saw, at the click (not after the checks below, which take seconds): a quote that changed in the
+    // 3 s before it is not what they reviewed, so the one before it is the baseline.
+    const shownAtClick = shown.current;
+    const justChanged = !accepted && !!shownAtClick?.prevOut && shownAtClick.key === `${quote.from}|${quote.from_amount}` && Date.now() - shownAtClick.since < 3000;
+    const seenOut = accepted ? accepted.quote.estimated_amount_out : justChanged ? shownAtClick!.prevOut! : quote.estimated_amount_out;
     // What this purchase is for, fixed at the click: the form can change while it runs (another token, an amount
     // written by an order card), and nothing may be bought for anything other than what was reviewed.
     const want = { asset: token.asset, amount: quoteAmount, decimals: token.decimals, chain: chainKey };
@@ -1014,8 +1053,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       // A payment this page couldn't confirm (a lost wallet answer) may have gone out: buying again could buy twice.
       // Not for an order the user hid after a check found nothing (but still for one hidden after a check found a
       // transaction that may be its payment).
-      const doubtful = mine.find(x => (!x.hiddenAt || x.hiddenPending)
-        && (payState(x, Date.now()) === 'unknown' || payState(x, Date.now()) === 'requesting'));
+      const doubtful = otherInDoubt(owner);
       if (doubtful && !window.confirm(`This page couldn’t confirm whether the payment for order ${doubtful.id} went out. If it did, another order buys twice. Create another order anyway?`)) {
         throw new Error('Kept the order whose payment is unconfirmed. Nothing was created: check that order first.');
       }
@@ -1103,9 +1141,6 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       // than 20 s, close to expiry, or already used for an order (Rift would return that order) is fetched
       // again; if it is worse than the baseline by more than the tolerance, stop and ask instead of buying.
       const used = (id: string) => loadOrders().some(x => x.quoteId === id);
-      const s = shown.current;
-      const justChanged = !!s?.prevOut && s.key === `${quote.from}|${quote.from_amount}` && Date.now() - s.since < 3000;
-      const seenOut = accepted ? accepted.quote.estimated_amount_out : justChanged ? s!.prevOut! : quote.estimated_amount_out;
       let q = accepted?.quote ?? quote;
       let fetchedAt = accepted?.fetchedAt ?? quoteQuery.dataUpdatedAt;
       if (Date.now() - fetchedAt > RECHECK_AFTER_MS || Date.now() < fetchedAt || Date.parse(q.expires_at) - Date.now() < 60_000 || used(q.id)) {
