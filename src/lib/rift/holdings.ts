@@ -5,7 +5,7 @@
 // held and prices most of them; the balances themselves are read on-chain, because Blockscout's can be stale
 // (on 2026-10-02 it showed 1,402.6 USDC on Base for a wallet holding none, and missed its cbBTC). Tokens
 // Blockscout cannot price are looked up on DeFiLlama (also keyless).
-// Pure parsing here; the fetching runs server side in /api/rift/holdings.
+// Pure parsing here; fetching runs in /api/rift/holdings and, if its token list fails, in the browser fallback.
 
 export type EvmHoldingChain = 'ethereum' | 'arbitrum' | 'base';
 export type HoldingChain = EvmHoldingChain | 'hyperliquid';
@@ -190,6 +190,69 @@ const rankFinite = (holdings: Holding[]) => [
   ...holdings.filter(h => !h.priceMissing && h.valueUsd >= MIN_VALUE_USD).sort((a, b) => b.valueUsd - a.valueUsd),
   ...holdings.filter(h => h.priceMissing && h.balanceRaw !== '0').sort((a, b) => a.symbol.localeCompare(b.symbol)),
 ];
+
+/** Alchemy's browser-side portfolio list, used when Blockscout cannot discover a chain's ERC-20s. Only
+ *  priced holdings worth at least $1, or tokens already on Rift's list, are offered. The values are for
+ *  discovery and display; Buy checks the contract's decimals and transfer on-chain before asking for money. */
+export function parseAlchemyHoldings(
+  chain: EvmHoldingChain, owner: string, rows: unknown, known: ReadonlySet<string>, exclude: ReadonlySet<string>, nowMs: number,
+): Holding[] {
+  if (!Array.isArray(rows)) return [];
+  const network = { ethereum: 'eth-mainnet', arbitrum: 'arb-mainnet', base: 'base-mainnet' }[chain];
+  const addressRe = /^0x[0-9a-f]{40}$/i;
+  const seen = new Set<string>();
+  const out: Holding[] = [];
+  for (const value of rows) {
+    const row = value && typeof value === 'object' ? value as Record<string, unknown> : null;
+    if (row?.network !== network || text(row.address).toLowerCase() !== owner.toLowerCase()) continue;
+    const address = text(row.tokenAddress).toLowerCase();
+    const asset = `${chain}.${address}`;
+    if (!addressRe.test(address) || exclude.has(asset) || seen.has(asset)) continue;
+    const hex = row.tokenBalance;
+    if (typeof hex !== 'string' || !/^0x[0-9a-f]{1,64}$/i.test(hex)) continue;
+    const balanceRaw = BigInt(hex).toString();
+    if (balanceRaw === '0') continue;
+    const metadata = row.tokenMetadata && typeof row.tokenMetadata === 'object' ? row.tokenMetadata as Record<string, unknown> : null;
+    const decimals = metadata?.decimals;
+    if (!validDecimals(decimals)) continue;
+    const prices = Array.isArray(row.tokenPrices) ? row.tokenPrices : [];
+    let priceUsd = 0;
+    for (const item of prices) {
+      if (!item || typeof item !== 'object') continue;
+      const p = item as Record<string, unknown>;
+      const at = typeof p.lastUpdatedAt === 'string' ? Date.parse(p.lastUpdatedAt) : NaN;
+      if (typeof p.currency === 'string' && p.currency.toLowerCase() === 'usd' && Number.isFinite(at)
+          && at <= nowMs + 60_000 && nowMs - at <= 30 * 60_000) {
+        priceUsd = usdPrice(p.value);
+        if (priceUsd) break;
+      }
+    }
+    const valueUsd = usdValue(priceUsd, balanceRaw, decimals);
+    const priceMissing = priceUsd === 0 && known.has(asset);
+    if (!priceMissing && valueUsd < MIN_VALUE_USD) continue;
+    const symbol = text(metadata?.symbol).trim().slice(0, 16) || `${address.slice(0, 6)}…`;
+    out.push({
+      chain, asset, address: address as `0x${string}`, symbol, name: text(metadata?.name).trim().slice(0, 48) || symbol,
+      decimals, balanceRaw, priceUsd, valueUsd, ...(priceMissing ? { priceMissing: true } : {}),
+      icon: safeIcon(metadata?.logo),
+    });
+    seen.add(asset);
+  }
+  return out;
+}
+
+/** The server's on-chain balances win for tokens it already found; among extra sources, the first wins. */
+export function mergeRecoveredHoldings(primary: Holding[], recovered: Holding[]): Holding[] {
+  const seen = new Set(primary.map(h => h.asset.toLowerCase()));
+  const extras: Holding[] = [];
+  for (const h of recovered) {
+    const asset = h.asset.toLowerCase();
+    if (seen.has(asset)) continue;
+    seen.add(asset);
+    extras.push(h);
+  }
+  return rankHoldings([...primary, ...extras]);
+}
 
 /** Route checks use at most this much of a holding, so a big balance does not fail on liquidity alone. */
 export const PROBE_USD = 100;

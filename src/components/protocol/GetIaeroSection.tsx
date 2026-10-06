@@ -42,7 +42,9 @@ import {
 import { decimalToRaw, isContractCode, normalizeDecimal, parseOrder, parseOrderUpdate } from '@/lib/rift/validate';
 import { estimateRoute, formatRange } from '@/lib/rift/timing';
 import { isBtcAddress, lookAtBtcAddress, normalizeBtcAddress } from '@/lib/rift/bitcoin';
-import { rawToNumber, type Holding } from '@/lib/rift/holdings';
+import { mergeRecoveredHoldings, rawToNumber, usdValue, validDecimals, type EvmHoldingChain, type Holding } from '@/lib/rift/holdings';
+import { fetchAlchemyFallback } from '@/lib/rift/alchemy-fallback';
+import { ALCHEMY_KEY } from '@/lib/public-rpcs';
 import { useRiftSupport } from '@/lib/rift/support';
 import { checkQuote, riftNames } from '@/lib/rift/quote-check';
 import { useMarketPrices, type MarketPrices } from '@/lib/rift/prices';
@@ -54,7 +56,7 @@ import {
 import {
   DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, afterGasOut, assessCost, cardCostCheck, clickQuoteMove, costNeedsTick, costText,
   gasSharePct, nextShown, seenBaseline, tickCovers, type CostTick, type SeenQuote, type ShownQuotes,
-  ethereumGasDeskWei, formatPct, gasDeskChains, gasDeskUsd, gasSwallows, priceDropPct, type CostCheck, type CostLevel,
+  ethereumGasDeskWei, formatPct, gasDeskChains, gasDeskUsd, gasSwallows, parseLlamaPrices, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
 import {
   btcLookChange, btcStillPayable, btcUnpaid, canPay, canRetryUnknown, clearable, isOutOfDate, isTerminalStatus, needsAttention, PAY_HEARTBEAT_MS, paymentFacts,
@@ -78,6 +80,7 @@ const RECHECK_AFTER_MS = 20_000;
  *  about 10 calls a minute); older, or paid from the order card, it does. */
 const FRESH_QUOTE_MS = 30_000;
 const HOLDINGS_TIMEOUT_MS = 45_000;
+const MANUAL_CHAIN_ID: Record<EvmHoldingChain, EvmChainId> = { ethereum: 1, arbitrum: 42161, base: 8453 };
 /** A wallet prompt open this long gets a reminder that Rift fills at the price when the payment arrives. */
 const SLOW_PROMPT_MS = 3 * 60_000;
 /** A wallet prompt this old is no longer kept fresh: other tabs then treat its outcome as unknown and can check it. */
@@ -175,7 +178,7 @@ function warningText(w: string): string {
   const name = chain.charAt(0).toUpperCase() + chain.slice(1);
   if (/balances unavailable/.test(w)) return chain === 'hyperliquid' ? 'Hyperliquid balances unavailable' : `${name}: balances unavailable`;
   if (/some balances could not be checked/.test(w)) return `${name}: some balances could not be checked`;
-  if (/token list unavailable/.test(w)) return `${name}: only major tokens checked`;
+  if (/token list (unavailable|unreadable)/.test(w)) return `${name}: only major tokens checked`;
   if (/token list incomplete/.test(w)) return `${name}: some tokens may be missing`;
   if (/on-chain/.test(w)) return `${name}: balances may be out of date`;
   if (chain === 'prices') return 'some prices unavailable';
@@ -232,6 +235,11 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   walletChainRef.current = walletChainId;
 
   const [selected, setSelected] = useState<string | null>(null);
+  const [manualChain, setManualChain] = useState<EvmHoldingChain>('base');
+  const [manualAddress, setManualAddress] = useState('');
+  const [manualHolding, setManualHolding] = useState<{ owner: string; holding: Holding } | null>(null);
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
   const [amountText, setAmountText] = useState('');
   const [btcRefund, setBtcRefund] = useState('');
   const notifySupported = typeof Notification !== 'undefined';
@@ -254,6 +262,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   /** Why this browser can't keep orders (and so can't buy here), or null. */
   const [storeBlock, setStoreBlock] = useState<string | null>(null);
   const startingRef = useRef(false);
+  const manualRequestRef = useRef(0);
+  const manualInFlightRef = useRef(false);
   const payingRef = useRef(new Set<string>());
   // Storage working again: what this page carries is saved as soon as the page is looked at again; leaving while
   // something is carried, or a wallet prompt is open, asks first (a refresh would drop it).
@@ -323,13 +333,35 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
-  const holdings = useMemo(() => holdingsQuery.data?.holdings ?? [], [holdingsQuery.data]);
-  const support = useRiftSupport(holdings, active);
-  const usable = useMemo(() => holdings.filter(h => support[h.asset] === 'supported'), [holdings, support]);
-  const checking = holdings.filter(h => support[h.asset] === 'checking').length;
+  // Blockscout's public token API can refuse a Worker even when the on-chain balance reads still work. The
+  // site's origin-restricted public Alchemy key fills only those chains' missing token lists in the browser.
+  const tokenListGaps = useMemo((): EvmHoldingChain[] => {
+    const missing = new Set<EvmHoldingChain>();
+    for (const warning of holdingsQuery.data?.warnings ?? []) {
+      const match = /^(ethereum|arbitrum|base): token list (?:unavailable|unreadable|incomplete)/.exec(warning);
+      if (match) missing.add(match[1] as EvmHoldingChain);
+    }
+    return [...missing];
+  }, [holdingsQuery.data]);
+  const alchemyQuery = useQuery({
+    queryKey: ['rift-alchemy-fallback', address, tokenListGaps.join('|')],
+    enabled: !!address && active && !!ALCHEMY_KEY && tokenListGaps.length > 0,
+    queryFn: ({ signal }) => fetchAlchemyFallback(address!, tokenListGaps, ALCHEMY_KEY, signal),
+    retry: false,
+    staleTime: 10 * 60_000,
+  });
+  const custom = manualHolding && manualHolding.owner.toLowerCase() === address?.toLowerCase() ? manualHolding.holding : null;
+  const holdings = useMemo(() => mergeRecoveredHoldings(holdingsQuery.data?.holdings ?? [], [
+    ...(custom ? [custom] : []), ...(alchemyQuery.data?.holdings ?? []),
+  ]), [holdingsQuery.data, alchemyQuery.data, custom]);
+  const support = useRiftSupport(holdings.filter(h => h.asset !== custom?.asset), active);
+  // A token entered by contract is deliberately offered for a direct quote; the quote and Buy's on-chain
+  // transfer check still decide whether Rift can use it.
+  const usable = useMemo(() => holdings.filter(h => h.asset === custom?.asset || support[h.asset] === 'supported'), [holdings, support, custom]);
+  const checking = holdings.filter(h => h.asset !== custom?.asset && support[h.asset] === 'checking').length;
 
   // A new account starts over.
-  useEffect(() => { setSelected(null); setAmountText(''); setAck(null); setSettlementAckKey(null); setMoved(null); setError(null); setSpent(null); }, [address]);
+  useEffect(() => { manualRequestRef.current++; manualInFlightRef.current = false; setSelected(null); setAmountText(''); setAck(null); setSettlementAckKey(null); setMoved(null); setError(null); setSpent(null); setManualHolding(null); setManualAddress(''); setManualError(null); setManualBusy(false); }, [address]);
 
   // Start on the most valuable usable token, and keep a choice that drops out of a single refresh (a slow
   // source for a minute) instead of jumping to another token mid-review.
@@ -1051,7 +1083,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
 
   /** Buy. `accepted` is a new price the user agreed to after a move; otherwise the baseline is what they saw. */
   async function start(accepted?: PriceMove) {
-    if (startingRef.current || !address || !token || !quote || !amountState.raw || !quoteAmount) return;
+    if (startingRef.current || manualInFlightRef.current || !address || !token || !quote || !amountState.raw || !quoteAmount) return;
     // An order card's payment still in its first checks has no wallet prompt yet: one payment at a time.
     if (payingRef.current.size) { setError('Finish the payment in progress on the order card first.'); return; }
     startingRef.current = true;
@@ -1360,6 +1392,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   const cta = ((): { text: string; disabled: boolean; connect?: boolean } => {
     if (!isConnected) return { text: 'Connect a wallet to get iAERO', disabled: !openConnectModal, connect: true };
     if (!token) return { text: 'Choose a token to pay with', disabled: true };
+    if (manualBusy) return { text: 'Checking token…', disabled: true };
     if (amountState.error) return { text: amountState.error, disabled: true };
     if (!amountState.normalized) return { text: 'Enter an amount', disabled: true };
     if (busy) return { text: busy, disabled: true };
@@ -1384,15 +1417,92 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
   })();
 
   const choose = (asset: string) => {
-    if (asset === selected || busy) return;
+    if (asset === selected || busy || manualInFlightRef.current) return;
     setSelected(asset);
     if (asset !== BTC_ASSET) lastHolding.current = usable.find(h => h.asset === asset) ?? null;
     typeAmount('');
     setError(null);
   };
 
-  const warnings = [...new Set((holdingsQuery.data?.warnings ?? []).map(warningText))];
+  const addManualToken = async () => {
+    if (!address || manualInFlightRef.current || busy || startingRef.current) return;
+    const owner = address;
+    const contract = manualAddress.trim();
+    const asset = `${manualChain}.${contract.toLowerCase()}`;
+    if (!isAddress(contract) || (manualChain === 'base' && asset === RIFT_DESTINATION)) {
+      setManualError('Enter a valid ERC-20 contract address on the selected chain.');
+      return;
+    }
+    const client = publicFor(MANUAL_CHAIN_ID[manualChain]);
+    if (!client) { setManualError('Could not reach this chain. Try again in a moment.'); return; }
+    const requestId = ++manualRequestRef.current;
+    const current = () => manualRequestRef.current === requestId && addressRef.current?.toLowerCase() === owner.toLowerCase();
+    manualInFlightRef.current = true;
+    setManualBusy(true);
+    setManualError(null);
+    try {
+      const tokenAddress = contract as Address;
+      const reads = Promise.all([
+        client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: 'balanceOf', args: [owner] }),
+        client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: 'decimals' }),
+        client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: 'symbol' }).catch(() => ''),
+        client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: 'name' }).catch(() => ''),
+      ]);
+      let readTimer: ReturnType<typeof setTimeout> | undefined;
+      const [balance, decimals, symbol, name] = await Promise.race([
+        reads,
+        new Promise<never>((_, reject) => { readTimer = setTimeout(() => reject(new Error('token read timed out')), 20_000); }),
+      ]).finally(() => { if (readTimer) clearTimeout(readTimer); });
+      if (!validDecimals(Number(decimals))) throw new Error('invalid decimals');
+      if (balance <= 0n) {
+        if (current()) setManualError('This wallet has no balance of that token on the selected chain.');
+        return;
+      }
+      let priceUsd = 0;
+      const priceController = new AbortController();
+      const priceTimer = setTimeout(() => priceController.abort(), 6_000);
+      try {
+        const res = await fetch(`https://coins.llama.fi/prices/current/${manualChain}:${contract.toLowerCase()},coingecko:ethereum?searchWidth=4h`, { signal: priceController.signal });
+        if (res.ok) priceUsd = parseLlamaPrices(await res.json(), Date.now())[`${manualChain}:${contract.toLowerCase()}`] ?? 0;
+      } catch { /* A token without a price can still get a real Rift quote. */ }
+      finally { clearTimeout(priceTimer); }
+      const balanceRaw = balance.toString();
+      const valueUsd = usdValue(priceUsd, balanceRaw, Number(decimals));
+      if (priceUsd > 0 && valueUsd < 1) {
+        if (current()) setManualError('This balance is worth less than $1, too small for a Rift order.');
+        return;
+      }
+      if (!current()) return;
+      const short = `${contract.slice(0, 6)}…`;
+      const cleanSymbol = symbol.trim().slice(0, 16) || short;
+      const holding: Holding = {
+        chain: manualChain, asset, address: contract.toLowerCase() as `0x${string}`,
+        symbol: cleanSymbol, name: name.trim().slice(0, 48) || cleanSymbol, decimals: Number(decimals), balanceRaw,
+        priceUsd, valueUsd, ...(priceUsd ? {} : { priceMissing: true }),
+      };
+      setManualHolding({ owner, holding });
+      lastHolding.current = holding;
+      setSelected(asset);
+      typeAmount('');
+    } catch {
+      if (current()) setManualError('Could not read that ERC-20 token on the selected chain. Check its contract address and try again.');
+    } finally {
+      if (current()) { manualInFlightRef.current = false; setManualBusy(false); }
+    }
+  };
+
+  const warnings = [...new Set((holdingsQuery.data?.warnings ?? []).flatMap(w => {
+    const match = /^(ethereum|arbitrum|base): token list (?:unavailable|unreadable|incomplete)/.exec(w);
+    const chain = match?.[1] as EvmHoldingChain | undefined;
+    if (chain && alchemyQuery.data?.covered.includes(chain)) return [];
+    if (chain && alchemyQuery.data?.limited.includes(chain)) return [`${chain}: token list incomplete; some tokens may be missing`];
+    return [w];
+  }).map(warningText))];
   const holdingsNote = noteText(holdingsQuery.data?.notes ?? []);
+  const extraSearching = tokenListGaps.length > 0 && alchemyQuery.isFetching;
+  const alchemyNote = alchemyQuery.data?.holdings.length
+    ? 'Some extra token balances may lag the chain; each payment is checked before sending.'
+    : null;
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -1420,7 +1530,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
               <div role="group" aria-labelledby="rift-pay-with" className="max-h-80 divide-y divide-slate-800 overflow-y-auto rounded-xl border border-slate-700/40 bg-slate-900/40">
                 {usable.map(h => (
                   <button
-                    key={h.asset} type="button" onClick={() => choose(h.asset)} disabled={!!busy} aria-pressed={selected === h.asset}
+                    key={h.asset} type="button" onClick={() => choose(h.asset)} disabled={!!busy || manualBusy} aria-pressed={selected === h.asset}
                     aria-label={`${h.symbol} on ${SOURCE_CHAINS[h.chain].name}, ${fmt(rawToNumber(h.balanceRaw, h.decimals), 6)} ${h.symbol}${h.priceMissing ? ', price unavailable' : `, ${fmtUsd(h.valueUsd)}`}`}
                     className={`flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors ${selected === h.asset ? 'bg-indigo-500/15' : 'hover:bg-slate-800/60'}`}
                   >
@@ -1437,7 +1547,10 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
                     </div>
                   </button>
                 ))}
-                {!usable.length && !checking && (
+                {!usable.length && !checking && extraSearching && (
+                  <div className="flex items-center gap-2 p-4 text-sm text-slate-300"><Loader2 className="h-4 w-4 animate-spin" /> Checking more of your tokens…</div>
+                )}
+                {!usable.length && !checking && !extraSearching && (
                   <div className="p-4 text-sm text-slate-400">No tokens worth $1 or more that Rift can route were found in this wallet on Ethereum, Arbitrum, Base or Hyperliquid.</div>
                 )}
                 {!usable.length && checking > 0 && (
@@ -1449,18 +1562,41 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
               <div className="text-xs text-amber-300/90">Some balances may be incomplete ({warnings.join('; ')}). Refresh to try again.</div>
             )}
             {holdingsNote && <div className="text-xs text-slate-500">{holdingsNote}</div>}
+            {alchemyNote && <div className="text-xs text-slate-500">{alchemyNote}</div>}
             {isConnected && !holdingsQuery.isLoading && (
               <div className="flex items-center justify-between gap-2 text-xs text-slate-400">
                 <span>
                   {checking > 0 ? `Checking routes for ${checking} more token${checking === 1 ? '' : 's'}…` : 'Highest value first. Tokens under $1, small Ethereum balances and tokens without a route are hidden.'}
                 </span>
-                <button type="button" onClick={() => { freshRef.current = true; holdingsQuery.refetch(); }} className="flex shrink-0 items-center gap-1 hover:text-white">
-                  <RefreshCw className={`h-3.5 w-3.5 ${holdingsQuery.isFetching ? 'animate-spin' : ''}`} /> Refresh
+                <button type="button" onClick={() => { freshRef.current = true; void holdingsQuery.refetch(); if (tokenListGaps.length) void alchemyQuery.refetch(); }} className="flex shrink-0 items-center gap-1 hover:text-white">
+                  <RefreshCw className={`h-3.5 w-3.5 ${holdingsQuery.isFetching || alchemyQuery.isFetching ? 'animate-spin' : ''}`} /> Refresh
                 </button>
               </div>
             )}
+            {isConnected && (
+              <details className="rounded-lg border border-slate-700/50 bg-slate-900/30 p-3 text-sm text-slate-300">
+                <summary className="cursor-pointer text-indigo-300">Token missing? Add its contract address</summary>
+                <form className="mt-3 space-y-2" onSubmit={e => { e.preventDefault(); void addManualToken(); }}>
+                  <div className="flex gap-2">
+                    <select aria-label="Token chain" value={manualChain} onChange={e => { setManualChain(e.target.value as EvmHoldingChain); setManualError(null); }}
+                      disabled={manualBusy || !!busy} className="rounded-md border border-slate-600 bg-slate-900 px-2 text-white">
+                      <option value="ethereum">Ethereum</option>
+                      <option value="arbitrum">Arbitrum</option>
+                      <option value="base">Base</option>
+                    </select>
+                    <Input aria-label="Token contract address" value={manualAddress} onChange={e => { setManualAddress(e.target.value); setManualError(null); }}
+                      disabled={manualBusy || !!busy} autoComplete="off" placeholder="0x… contract address" className="min-w-0 flex-1 border-slate-600 bg-slate-900 text-white" />
+                  </div>
+                  <Button type="submit" size="sm" variant="outline" disabled={manualBusy || !!busy || !manualAddress.trim()}>
+                    {manualBusy ? 'Checking token…' : 'Check token'}
+                  </Button>
+                  {manualError && <div role="alert" className="text-xs text-red-300">{manualError}</div>}
+                  <p className="text-xs text-slate-500">Use the token contract on the chain you pay from. Its balance and decimals are read from that chain, then checked again before payment.</p>
+                </form>
+              </details>
+            )}
             <button
-              type="button" onClick={() => choose(BTC_ASSET)} disabled={!!busy} aria-pressed={selected === BTC_ASSET}
+              type="button" onClick={() => choose(BTC_ASSET)} disabled={!!busy || manualBusy} aria-pressed={selected === BTC_ASSET}
               className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
                 selected === BTC_ASSET ? 'border-indigo-500 bg-indigo-500/15 text-white' : 'border-slate-700/50 text-slate-400 hover:border-slate-500 hover:text-slate-200'
               }`}
