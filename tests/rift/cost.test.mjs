@@ -1,7 +1,7 @@
 // Run: npm run test:rift (Node strips the TypeScript types).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { costLevel, costVsMarketPct, costWorseThanAccepted, deliveredVsQuotedPct, formatPct, gasDeskUsd, gasSwallows, parseLlamaQuotes, priceDropPct } from '../../src/lib/rift/cost.ts';
+import { costLevel, costVsMarketPct, costWorseThanAccepted, deliveredVsQuotedPct, formatPct, gasDeskUsd, gasSwallows, parseLlamaQuotes, priceDropPct, seenBaseline } from '../../src/lib/rift/cost.ts';
 
 test('cost against market prices, from a real quote', () => {
   // $500 in, 830 iAERO out at $0.5976: $496.01 of iAERO, so 0.8%.
@@ -194,4 +194,15 @@ test('round 11: a nonsense ETH price (from a broken source) counts as none, and 
   const sec = Math.floor(Date.now() / 1000);
   assert.deepEqual(Object.keys(parseLlamaQuotes({ coins: { a: { price: 1e12, timestamp: sec }, b: { price: 2, timestamp: sec } } }, Date.now())), ['b'],
     'a price of a billion or more is none');
+});
+
+test('round 13: the quote "seen" at Buy: one that changed within 3 s isn\'t what was read; a change "in the future" takes the higher', () => {
+  const now = 1_790_930_000_000;
+  const shown = { key: 'k', since: now - 20_000, prevOut: '99' };
+  assert.equal(seenBaseline(shown, 'k', '100', now), '100', 'read for 20 s');
+  assert.equal(seenBaseline({ ...shown, since: now - 1000 }, 'k', '100', now), '99', 'changed a second ago: the one before');
+  assert.equal(seenBaseline({ ...shown, since: now + 5 * 60_000 }, 'k', '100', now), '100', 'the clock put back: the higher, not the older');
+  assert.equal(seenBaseline({ ...shown, prevOut: '101', since: now + 5 * 60_000 }, 'k', '100', now), '101');
+  assert.equal(seenBaseline(shown, 'other', '100', now), '100', 'another token or amount');
+  assert.equal(seenBaseline(null, 'k', '100', now), '100');
 });

@@ -743,3 +743,19 @@ test('round 12: the first change after storage becomes unreadable can\'t decide 
   assert.equal(t.loadOrders()[0].btc.missing, undefined, '"missing" waits for storage');
   assert.equal(t.loadOrders()[0].btc.txid, 'ab'.repeat(32));
 });
+
+// --- Round 13 ---
+
+test('round 13: a pay window seen closed stays closed when that record is carried through an outage and the clock is put back', async () => {
+  const now = Date.now();
+  const o = { ...order(), createdAt: now - 5 * 60_000 }; // 5 minutes old by the clock as it is now
+  const h = harness(o);
+  const t = h.tab();
+  h.block();
+  // Seen closed while the clock ran six minutes ahead (11 minutes in): the record is carried, not saved.
+  assert.equal(await t.recordWindowClosed(o.id, now + 6 * 60_000), 'failed');
+  h.unblock(); // storage back; the clock has been put right meanwhile
+  await t.saveCarriedNow();
+  assert.equal(h.read().windowClosedAt, now + 6 * 60_000, 'judged as seen, not again under the corrected clock');
+  assert.equal(orderState.payWindowOpen(h.read(), 'evm', Date.now()), false);
+});

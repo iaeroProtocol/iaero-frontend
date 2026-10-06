@@ -109,9 +109,10 @@ export function useRiftSupport(holdings: Holding[], enabled = true): Record<stri
 
   useEffect(() => {
     let stop = false;
+    // Counted in timer ticks, not to a time on the clock: a clock put back must not stretch the wait.
     const sleep = (ms: number) => new Promise<void>(resolve => {
-      const end = Date.now() + ms;
-      const t = setInterval(() => { if (stop || Date.now() >= end) { clearInterval(t); resolve(); } }, 250);
+      let left = Math.ceil(ms / 250);
+      const t = setInterval(() => { if (stop || --left <= 0) { clearInterval(t); resolve(); } }, 250);
     });
     const cache = load();
     const now = Date.now();
@@ -129,7 +130,8 @@ export function useRiftSupport(holdings: Holding[], enabled = true): Record<stri
     (async () => {
       while (!stop && queue.length) {
         // Wait for a turn: a visible tab, a free slot in Rift's budget, and this token's back-off.
-        const ready = queue.findIndex(a => (retryAt.get(a) ?? 0) <= Date.now());
+        // (A back-off ending further ahead than the longest one is from a clock since put back: over.)
+        const ready = queue.findIndex(a => { const at = retryAt.get(a) ?? 0; return at <= Date.now() || at - Date.now() > RETRY_MAX_MS; });
         if (ready < 0 || document.hidden || !riftBudget('probe')) { await sleep(2000); continue; }
         const [asset] = queue.splice(ready, 1);
         const h = holdingsRef.current.find(x => x.asset === asset);

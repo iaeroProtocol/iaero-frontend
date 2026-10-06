@@ -17,7 +17,7 @@
 import { useEffect, useRef } from 'react';
 import { getOrder, riftBudget } from './client';
 import { parseOrderUpdate } from './validate';
-import { applyStatusUpdate, loadOrders, markPolled, patchOrder, polledWithin, pollStamps, storageFailing } from './storage';
+import { applyStatusUpdate, loadOrders, markPolled, patchOrder, polledWithin, pollStamps, recordWindowClosed, storageFailing } from './storage';
 import { lookAtBtcAddress } from './bitcoin';
 import { orderNotice } from './notice';
 import { btcLookChange, btcNeedsLook, isOutOfDate, isTerminalStatus, pastDeadline, pendingByLeastRecentPoll, windowCloseChange } from './order-state';
@@ -75,7 +75,7 @@ export function useOrderWatcher(
           const now = Date.now();
           if (stop) break;
           // A pay window seen closed stays closed (order-state.ts windowClosedAt).
-          if (Object.keys(windowCloseChange(o, now)).length) void patchOrder(o.id, prev => windowCloseChange(prev, Date.now()));
+          if (Object.keys(windowCloseChange(o, now)).length) void recordWindowClosed(o.id, now);
           const idle = o.status === 'frozen' || isOutOfDate(o, now) || pastDeadline(o, now);
           if (polledWithin(o.id, idle ? IDLE_POLL_MS : POLL_MS - 5000, now)) continue;
           if (!riftBudget('poll', now)) break;

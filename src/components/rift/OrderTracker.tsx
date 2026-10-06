@@ -25,7 +25,7 @@ import RouteSteps, { type StepLink } from './RouteSteps';
 import { badgeStyle } from './status';
 import { classifyRiftError, getOrder, riftBudget } from '@/lib/rift/client';
 import { parseOrderUpdate } from '@/lib/rift/validate';
-import { applyStatusUpdate, markPolled, patchOrder, polledWithin, storageFailing } from '@/lib/rift/storage';
+import { applyStatusUpdate, markPolled, patchOrder, polledWithin, recordWindowClosed, storageFailing } from '@/lib/rift/storage';
 import { btcToSats, lookAtBtcAddress } from '@/lib/rift/bitcoin';
 import { hyperCoreToken } from '@/lib/rift/hypercore';
 import { accountNonce, evmDepositEvidence, hyperDepositEvidence, minedPayment } from '@/lib/rift/payment-io';
@@ -33,7 +33,7 @@ import { BASESCAN_TX, IAERO_ADDRESS, KNOWN_SYMBOLS, RIFT_SECURITY_URL, RIFT_SUPP
 import { computeProgress, estimateRoute, formatClock, formatDuration, formatRange } from '@/lib/rift/timing';
 import { costText, costVsMarketPct, deliveredVsQuotedPct, formatPct } from '@/lib/rift/cost';
 import {
-  BTC_MISSING_AFTER, btcConfirmed, btcLookChange, btcLookEveryMs, btcNeedsLook, fromFuture, nonceUsed, pastDeadline, windowCloseChange, btcUnchecked, canHide, doubtButExpired, isFinalStatus, isOutOfDate, isTerminalStatus, missingButExpired, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput, PRE_SEND_COOLDOWN_MS,
+  BTC_MISSING_AFTER, btcConfirmed, btcLookChange, btcLookEveryMs, btcNeedsLook, fromFuture, nonceUsed, pastDeadline, btcUnchecked, canHide, doubtButExpired, isFinalStatus, isOutOfDate, isTerminalStatus, missingButExpired, paidButExpired, payState, payWindowMs, payWindowOpen, phaseInput, PRE_SEND_COOLDOWN_MS,
 } from '@/lib/rift/order-state';
 import type { StoredOrder } from '@/lib/rift/types';
 
@@ -87,7 +87,8 @@ interface Props {
   /** Remove an out-of-date order that was never paid. */
   onDismiss: (order: StoredOrder) => void;
   /** Remove from this browser at the user's explicit request, whatever its state (they keep the ID). */
-  onForget: (order: StoredOrder) => void;
+  /** `strict`: the removal waits for a look at an unpaid Bitcoin address (it isn't offered because one can't be had). */
+  onForget: (order: StoredOrder, opts?: { strict?: boolean }) => void;
   onGoToStake?: () => void;
   showToast?: (message: string, type: 'success' | 'error' | 'info' | 'warning') => void;
 }
@@ -415,7 +416,7 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
   // A pay window seen closed stays closed (order-state.ts windowClosedAt).
   const closedUnrecorded = order.status === 'awaiting_deposit' && order.windowClosedAt === undefined && !payWindowOpen(order, kind, now);
   useEffect(() => {
-    if (closedUnrecorded) void patchOrder(order.id, prev => windowCloseChange(prev, Date.now()));
+    if (closedUnrecorded) void recordWindowClosed(order.id);
   }, [closedUnrecorded, order.id]);
   const coolingDown = order.preSendAt !== undefined && now - order.preSendAt < PRE_SEND_COOLDOWN_MS && !fromFuture(order.preSendAt, now);
   const wrongAccount = !!account && account.toLowerCase() !== order.toAddress.toLowerCase();
@@ -547,7 +548,13 @@ export default function OrderTracker({ order, account, walletChainId, onPay, pay
             || pastDeadline(order, now)) && (
             <button
               type="button"
-              onClick={() => { if (window.confirm(`Remove this order from this browser? Keep its ID first if you may need Rift’s support: ${order.id}`)) onForget(order); }}
+              onClick={() => {
+                if (!window.confirm(`Remove this order from this browser? Keep its ID first if you may need Rift’s support: ${order.id}`)) return;
+                // Offered because the address can't be checked (or Rift no longer answers for the order): it goes ahead
+                // without a look then; otherwise an unpaid Bitcoin address is looked at first.
+                const uncheckable = (phase === 'expired' && btcUnchecked(order) && btcErrors >= 3) || pastDeadline(order, now);
+                onForget(order, { strict: !uncheckable });
+              }}
               className="text-xs text-slate-400 underline hover:text-slate-200"
             >
               Remove from this browser

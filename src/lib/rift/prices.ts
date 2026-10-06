@@ -112,7 +112,8 @@ export function useMarketPrices(asset: string | undefined, enabled = true): Mark
     const poolFresh = aeroPerIaero !== undefined && now - poolsAt <= POOL_MAX_AGE_MS && now >= poolsAt - 1000;
     return {
       iaeroUsd: poolFresh && aeroUsd ? aeroPerIaero * aeroUsd : undefined,
-      inputUsd: inputId ? (BASE_IDS.includes(inputId) ? pick(coreData, coreAt, inputId) : pick(tokenData, tokenAt, inputId)) : undefined,
+      inputUsd: inputId ? (BASE_IDS.includes(inputId) ? (p => (inputId !== ETH_ID || plausibleEthUsd(p) ? p : undefined))(pick(coreData, coreAt, inputId))
+        : pick(tokenData, tokenAt, inputId)) : undefined,
       ethUsd: (p => (plausibleEthUsd(p) ? p : undefined))(pick(coreData, coreAt, ETH_ID)),
     };
   }, [coreData, coreAt, tokenData, tokenAt, poolsAt, aeroPerIaero, inputId]);

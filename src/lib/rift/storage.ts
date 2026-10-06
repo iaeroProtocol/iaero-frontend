@@ -15,7 +15,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { canMoveTo, canPay, canRetryUnknown, capOrders, isFinalStatus, payWindowOpen, sanitizeOrder, sourceKindOf } from './order-state';
+import { canMoveTo, canPay, canRetryUnknown, capOrders, isFinalStatus, payWindowOpen, sanitizeOrder, sourceKindOf, windowCloseChange } from './order-state';
 import { ORDERS_KEY } from './keys';
 import type { OrderUpdate } from './validate';
 import type { StoredOrder } from './types';
@@ -230,6 +230,13 @@ export function patchOrder(
     copy[i] = next;
     return copy;
   }, { poll: poll ? id : undefined });
+}
+
+/** Record that an order's pay window is closed (order-state.ts windowCloseChange), as seen at `at`: taken here, not in
+ *  the change, which a storage outage can carry and apply again later, when a clock put back meanwhile would find
+ *  the window open. */
+export function recordWindowClosed(id: string, at = Date.now()): Promise<WriteResult> {
+  return patchOrder(id, prev => windowCloseChange(prev, at));
 }
 
 /** A refusal raised here, whose message already says that nothing was sent. */

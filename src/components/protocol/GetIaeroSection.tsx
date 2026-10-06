@@ -52,7 +52,7 @@ import {
   spotSendTypedData, usdcForFee,
 } from '@/lib/rift/hypercore';
 import {
-  DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, assessCost, costNeedsTick, costText, costVsMarketPct, costWorseThanAccepted,
+  DEFAULT_TOLERANCE_PCT, ETHEREUM_GAS_FLOOR_WEI, TOLERANCE_CHOICES, assessCost, costNeedsTick, costText, costVsMarketPct, costWorseThanAccepted, seenBaseline,
   ethereumGasDeskWei, formatPct, gasDeskChains, gasDeskUsd, gasSwallows, priceDropPct, type CostCheck, type CostLevel,
 } from '@/lib/rift/cost';
 import {
@@ -660,10 +660,13 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
         // order was made (what a tick at Buy covers), needs a new order and its review.
         const hl = sourceKindOf(o.sourceChain) === 'hypercore' ? HL_NEW_ADDRESS_FEE_USDC : 0;
         const usdIn = payWei !== undefined && px.ethUsd ? Number(o.fromAmount) * px.ethUsd + hl : o.marketUsdIn ?? null;
-        const nowPct = usdIn ? costVsMarketPct(usdIn, after * px.iaeroUsd) : null;
+        // Without the payment's USD value (unpriced at Buy, not ETH or WETH), the gas charge's share of what Rift quotes is
+        // the cost's floor: a high one needs Buy's review all the same.
+        const nowPct = (usdIn ? costVsMarketPct(usdIn, after * px.iaeroUsd) : null)
+          ?? (1 - after / Number(q.estimated_amount_out)) * 100;
         const thenPct = o.marketUsdIn && o.marketIaeroUsd && o.expectedOut ? costVsMarketPct(o.marketUsdIn, Number(o.expectedOut) * o.marketIaeroUsd) : null;
-        if (nowPct !== null && costWorseThanAccepted(nowPct, thenPct)) {
-          setError(`This order now costs ${formatPct(nowPct)} against market prices${thenPct !== null ? ` (${formatPct(thenPct)} when you made it)` : ''}. Nothing was sent. Start a new order to review it.`);
+        if (Number.isFinite(nowPct) && costWorseThanAccepted(nowPct, thenPct)) {
+          setError(`This order now costs ${usdIn ? '' : 'at least '}${formatPct(nowPct)} against market prices${thenPct !== null ? ` (${formatPct(thenPct)} when you made it)` : ''}. Nothing was sent. Start a new order to review it.`);
           return 'dropped';
         }
       }
@@ -1041,9 +1044,8 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
     const owner = address as Address;
     // What the user saw, at the click (not after the checks below, which take seconds): a quote that changed in the
     // 3 s before it is not what they reviewed, so the one before it is the baseline.
-    const shownAtClick = shown.current;
-    const justChanged = !accepted && !!shownAtClick?.prevOut && shownAtClick.key === `${quote.from}|${quote.from_amount}` && Date.now() - shownAtClick.since < 3000;
-    const seenOut = accepted ? accepted.quote.estimated_amount_out : justChanged ? shownAtClick!.prevOut! : quote.estimated_amount_out;
+    const seenOut = accepted ? accepted.quote.estimated_amount_out
+      : seenBaseline(shown.current, `${quote.from}|${quote.from_amount}`, quote.estimated_amount_out, Date.now());
     // What this purchase is for, fixed at the click: the form can change while it runs (another token, an amount
     // written by an order card), and nothing may be bought for anything other than what was reviewed.
     const want = { asset: token.asset, amount: quoteAmount, decimals: token.decimals, chain: chainKey };
@@ -1715,7 +1717,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
               key={activeOrder.id}
               order={activeOrder} account={address} walletChainId={walletChainId}
               onPay={(o, opts) => { void pay(o, opts); }} paying={payingId === activeOrder.id} onReorder={reorder}
-              onDismiss={o => { void dismiss(o); }} onForget={o => { void forget(o); }} onGoToStake={onGoToStake} showToast={showToast}
+              onDismiss={o => { void dismiss(o); }} onForget={(o, opts) => { void forget(o, opts); }} onGoToStake={onGoToStake} showToast={showToast}
             />
           </RiftErrorBoundary>
         ) : (

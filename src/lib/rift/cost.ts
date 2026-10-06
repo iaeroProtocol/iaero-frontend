@@ -54,6 +54,16 @@ export function costWorseThanAccepted(nowPct: number, thenPct: number | null): b
 /** Whether Buy needs the confirmation tick for this cost. */
 export const costNeedsTick = (c: CostCheck) => c.kind !== 'ok' || c.level === 'high';
 
+/** The quote the user saw when clicking Buy: a refresh that landed within 3 s of the click isn't what they read, so
+ *  the one before it is; a refresh "in the future" (the clock since put back) can't be placed, so the higher of
+ *  the two. `shown`: the latest change on screen (its key, when, and the quote before it). */
+export function seenBaseline(shown: { key: string; since: number; prevOut?: string } | null, key: string, out: string, now: number): string {
+  if (!shown?.prevOut || shown.key !== key) return out;
+  const age = now - shown.since;
+  if (age < 0) return Number(shown.prevOut) >= Number(out) ? shown.prevOut : out;
+  return age < 3000 ? shown.prevOut : out;
+}
+
 /** How much worse (in %) a fresh quote is than the one shown; negative when it improved. */
 export function priceDropPct(shownOut: string, freshOut: string): number {
   const shown = Number(shownOut), fresh = Number(freshOut);
