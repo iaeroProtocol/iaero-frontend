@@ -208,6 +208,11 @@ export interface BtcLook { at: number; answeredAt?: number; failing: boolean; ch
  *  recorded earlier (its address index can lag behind), so nothing new (bitcoin.ts lookAtBtcAddress). */
 export type BtcSeen = { payments: { txid: string; confirmations: number }[]; totalSats: bigint } | 'known';
 
+/** The unconfirmed payment recorded, listed again as it was: nothing new but that it is still there. */
+const isRepeatSighting = (prev: StoredOrder['btc'], seen: Exclude<BtcSeen, 'known'>) =>
+  !!prev?.txid && seen.payments.length > 0 && seen.payments[0].txid === prev.txid && seen.payments.length === prev.payments
+  && seen.totalSats.toString() === prev.totalSats && seen.payments.every(p => p.confirmations === 0);
+
 /** The change a look makes to an order's Bitcoin record (OrderTracker.tsx and watch.ts apply it; a change storage
  *  refused is applied again later, over newer records). Only a fresh look made while storage works counts its
  *  empty answers ("missing", or a run of them past the checkpoint proving nothing was sent, btcUnchecked); one
@@ -224,23 +229,21 @@ export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcL
     if (ahead(prev.emptySince) || ahead(prev.emptyLastAt)) { delete prev.emptySince; delete prev.emptyChecks; delete prev.emptyLastAt; }
     if (ahead(prev.emptyAt)) delete prev.emptyAt;
   }
-  // A delayed "still known" answer or a repeat unconfirmed sighting must not erase another tab's newer empty
-  // evidence. A first payment, replacement or confirmation is new evidence even if its answer arrives late.
-  const repeatUnconfirmed = seen !== 'known' && !!prev?.txid && seen.payments.length > 0
-    && seen.payments[0].txid === prev.txid && seen.payments.length === prev.payments
-    && seen.totalSats.toString() === prev.totalSats && seen.payments.every(p => p.confirmations === 0);
-  const firstConfirmation = seen !== 'known' && !btcConfirmed(prev) && seen.payments.some(p => p.confirmations > 0);
-  if ((seen === 'known' || repeatUnconfirmed)
-    && look.at < Math.max(prev?.lastSeenAt ?? 0, prev?.emptyLastAt ?? 0, prev?.emptyAt ?? 0)) return {};
-  if (seen !== 'known' && !seen.payments.length && prev?.emptyLastAt !== undefined
-    && look.at - prev.emptyLastAt < BTC_EMPTY_MIN_GAP_MS) return {};
-  if (seen === 'known') {
-    // The payment recorded is still there: a run of empty answers (or "missing") ends.
-    if (!prev?.emptyChecks && !prev?.missing) return {};
+  // The payment recorded is still there (a "still known" answer, or the same unconfirmed sighting again): a run of
+  // empty answers, or the "missing" it decided, ends. Unless the answer came in before that run began (a slow answer,
+  // or one replayed after a storage outage): it is older than all of the run's evidence. One that came in since shows
+  // the run's empty answers weren't in a row, even if it was asked before the latest of them or reaches this page last
+  // (two tabs' looks overlap): a false "missing" puts the QR code back for a payment on its way, the riskier mistake.
+  // With no run, one asked before the latest sighting is old.
+  if (seen === 'known' || isRepeatSighting(prev, seen)) {
+    const old = prev?.emptySince !== undefined ? (look.answeredAt ?? look.at) < prev.emptySince : look.at < (prev?.lastSeenAt ?? 0);
+    if (old || (!prev?.emptyChecks && !prev?.missing)) return {};
     const btc = { ...prev, lastSeenAt: Math.max(look.at, prev?.lastSeenAt ?? 0) };
     delete btc.emptyChecks; delete btc.emptySince; delete btc.emptyLastAt; delete btc.missing;
     return { btc };
   }
+  // Empty answers from looks made at once (several tabs) count as one.
+  if (!seen.payments.length && prev?.emptyLastAt !== undefined && look.at - prev.emptyLastAt < BTC_EMPTY_MIN_GAP_MS) return {};
   if (!seen.payments.length && !prev?.txid && !prev?.missing) {
     if (positiveOnly || look.at < look.checkpoint || (prev?.emptyAt ?? 0) >= look.checkpoint) return {};
     // A run of empty answers past the checkpoint: one lagging answer is not evidence that nothing was sent.
@@ -251,17 +254,23 @@ export function btcLookPatch(prev: StoredOrder['btc'], seen: BtcSeen, look: BtcL
     const proven = emptyChecks >= BTC_MISSING_AFTER && look.at - emptySince >= BTC_EMPTY_SPAN_MS;
     return { btc: { ...prev, emptyChecks, emptySince, emptyLastAt, ...(proven ? { emptyAt: look.at } : {}) } };
   }
-  // An answer older than the latest sighting recorded counts for nothing, except a first confirmation: it proves
-  // the payment on-chain even when a newer address lookup saw it unconfirmed. Older empty answers cannot extend a run.
-  if (look.at < (prev?.lastSeenAt ?? 0) && !firstConfirmation) return {};
+  // An answer older than the latest sighting recorded counts for nothing, except a first confirmation: the payment is in
+  // a block even when a newer address lookup saw it unconfirmed. Only that is taken from it (the newer sighting's
+  // payments and total stand), and a confirmed payment is never missing. Older empty answers cannot extend a run.
+  if (look.at < (prev?.lastSeenAt ?? 0)) {
+    if (btcConfirmed(prev) || !seen.payments.some(p => p.confirmations > 0)) return {};
+    const btc = { ...prev!, confirmed: true, confirmations: Math.max(prev!.confirmations ?? 0, Math.min(...seen.payments.map(p => p.confirmations))) };
+    delete btc.emptyChecks; delete btc.emptySince; delete btc.emptyLastAt; delete btc.missing;
+    return { btc };
+  }
   if (!seen.payments.length && prev?.emptySince !== undefined && look.at < prev.emptySince) return {};
   const btc = nextBtcRecord(prev, seen, look.at);
   if (btc === prev || (positiveOnly && !btcPositive(prev, btc))) return {};
   if (!seen.payments.length) return { btc };
-  // A sighting is recorded only when it changes something. A late first confirmation keeps the newer ask time.
+  // A sighting is recorded only when it changes something, and then with its time (lastSeenAt).
   const before = prev ? { ...prev } : undefined;
   if (before) delete before.lastSeenAt;
-  return JSON.stringify(btc) === JSON.stringify(before) ? {} : { btc: { ...btc, lastSeenAt: Math.max(look.at, prev?.lastSeenAt ?? 0) } };
+  return JSON.stringify(btc) === JSON.stringify(before) ? {} : { btc: { ...btc, lastSeenAt: look.at } };
 }
 
 /** btcLookPatch over the order as stored when the change is applied, with that order's checkpoint: Rift may have

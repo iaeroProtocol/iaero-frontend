@@ -481,41 +481,65 @@ test('stale Bitcoin lookups cannot erase newer empty evidence or hide a new paym
   const t = T0 + 3 * 3600_000;
   const txid = 'ab'.repeat(32);
   const empty = { payments: [], totalSats: 0n };
-  let btc = { txid, confirmations: 0, firstSeenAt: t - 4 * 60_000, lastSeenAt: t - 4 * 60_000, totalSats: '100000', payments: 1 };
+  const cp = t - 300_000;
+  const look = (prev, seen, at, answeredAt, appliedAt, failing = false) =>
+    clockAt(appliedAt, () => btcLookPatch(prev, seen, { at, answeredAt, failing, checkpoint: cp }));
+  const seenAt = { txid, confirmations: 0, firstSeenAt: t - 4 * 60_000, lastSeenAt: t - 4 * 60_000, totalSats: '100000', payments: 1 };
+  let btc = seenAt;
   // Five fresh looks spanning two minutes find that the unconfirmed payment is gone.
-  for (const at of [t - 120_000, t - 90_000, t - 60_000, t - 30_000, t]) btc = lookNow(btc, empty, at, t - 300_000).btc;
+  for (const at of [t - 120_000, t - 90_000, t - 60_000, t - 30_000, t]) btc = lookNow(btc, empty, at, cp).btc;
   assert.equal(btc.missing, true);
-  // Another tab asked whether the transaction was still known before the final empty look, but its slow answer
-  // arrives afterward. It cannot undo the later evidence or suppress the warning before another order.
-  assert.deepEqual(lookNow(btc, 'known', t - 15_000, t - 300_000, false, t + 1_000), {});
-  assert.equal(btcStillPayable(order({ sourceChain: 'bitcoin', btc }), t + 1_000), 'missing',
-    'the next Buy still warns about the payment that went missing');
-  assert.deepEqual(lookNow(btc, 'known', t - 15_000, t - 300_000, true, t + 60_000), {},
-    'an old positive answer replayed after a storage outage is still old');
   const payment = { payments: [{ txid, confirmations: 0 }], totalSats: 100000n };
-  assert.deepEqual(lookNow(btc, payment, t - 15_000, t - 300_000, false, t + 1_000), {},
-    'an old address sighting cannot undo a newer empty run either');
+  // An answer that came in before the run began (slow, or replayed after a storage outage) is older than all of its
+  // evidence: it can't undo the "missing" the run decided, nor the warning before another order.
+  for (const s of ['known', payment]) {
+    const stale = look(btc, s, t - 150_000, t - 140_000, t + 1_000);
+    assert.deepEqual(stale, {});
+    assert.equal(btcStillPayable(order({ sourceChain: 'bitcoin', btc: stale.btc ?? btc }), t + 1_000), 'missing',
+      'the next Buy still warns about the payment that went missing');
+    assert.deepEqual(look(btc, s, t - 150_000, t - 140_000, t + 60_000, true), {}, 'replayed after a storage outage: still old');
+  }
+  // Round 18 (7fc7d90 regression, found by both re-auditors): one that came in during the run shows its empty answers
+  // weren't in a row, so it ends the run and the "missing" it decided, even when it was asked before the latest of them
+  // and reaches this page last.
+  for (const s of ['known', payment]) {
+    const r = look(btc, s, t - 15_000, t + 1_000, t + 1_000).btc;
+    assert.ok(r, 'recorded');
+    assert.equal(r.missing, undefined);
+    assert.equal(r.emptyChecks, undefined);
+    assert.equal(btcStillPayable(order({ sourceChain: 'bitcoin', btc: r }), t + 1_000), null, 'seen: no "missing" to act on');
+  }
+  // ...and two tabs' looks overlapping: one asked before the run's first empty answer, answered just after it.
+  const run = lookNow(seenAt, empty, t - 120_000, cp).btc;
+  assert.equal(run.emptyChecks, 1);
+  const overlap = look(run, 'known', t - 125_000, t - 119_000, t - 118_500).btc;
+  assert.equal(overlap?.emptyChecks, undefined, 'the overlapping "still known" answer ends the run');
   // A direct lookup begun after the empty run can still clear a stale address index's false missing result.
-  const fresh = lookNow(btc, 'known', t + 20_000, t - 300_000, false, t + 20_000).btc;
+  const fresh = lookNow(btc, 'known', t + 20_000, cp, false, t + 20_000).btc;
   assert.equal(fresh.missing, undefined);
   assert.equal(fresh.emptyChecks, undefined);
-  assert.equal(lookNow(btc, payment, t + 20_000, t - 300_000).btc.missing, undefined,
+  assert.equal(lookNow(btc, payment, t + 20_000, cp).btc.missing, undefined,
     'a newer address sighting can clear a false missing result');
   const confirmed = { payments: [{ txid, confirmations: 1 }], totalSats: 100000n };
-  assert.equal(lookNow(btc, confirmed, t - 15_000, t - 300_000, false, t + 1_000).btc.confirmed, true,
+  assert.equal(lookNow(btc, confirmed, t - 15_000, cp, false, t + 1_000).btc.confirmed, true,
     'a first confirmation is stronger evidence than the later empty address index');
   const replacement = { payments: [{ txid: 'cd'.repeat(32), confirmations: 0 }], totalSats: 100000n };
-  assert.equal(lookNow(btc, replacement, t - 15_000, t - 300_000, false, t + 1_000).btc.txid, replacement.payments[0].txid,
+  assert.equal(lookNow(btc, replacement, t - 15_000, cp, false, t + 1_000).btc.txid, replacement.payments[0].txid,
     'a newly discovered transaction must be recorded even when its address lookup was older');
   const unpaidProof = { emptyChecks: 5, emptySince: t - 120_000, emptyLastAt: t, emptyAt: t };
-  assert.equal(lookNow(unpaidProof, payment, t - 15_000, t - 300_000, false, t + 1_000).btc.txid, txid,
+  assert.equal(lookNow(unpaidProof, payment, t - 15_000, cp, false, t + 1_000).btc.txid, txid,
     'a first payment must not be lost behind a later empty-address proof');
-  const unconfirmedSeenLater = { txid, confirmations: 0, firstSeenAt: t - 60_000, lastSeenAt: t,
-    totalSats: '100000', payments: 1 };
-  const lateConfirmation = lookNow(unconfirmedSeenLater, confirmed, t - 15_000, t - 300_000, false, t + 1_000).btc;
+  // A first confirmation asked before the latest sighting: only the confirmation is taken from it (round 18: it used to
+  // set the newer sighting's payments and total back).
+  const two = { txid, confirmations: 0, firstSeenAt: t - 60_000, lastSeenAt: t, totalSats: '200000', payments: 2 };
+  const lateConfirmation = lookNow(two, confirmed, t - 15_000, cp, false, t + 1_000).btc;
   assert.equal(lateConfirmation.confirmed, true,
     'an older answer proving a first confirmation outranks a newer unconfirmed sighting');
+  assert.equal(lateConfirmation.payments, 2, 'the newer sighting\'s payments stand');
+  assert.equal(lateConfirmation.totalSats, '200000');
+  assert.equal(lateConfirmation.txid, txid);
   assert.equal(lateConfirmation.lastSeenAt, t, 'the confirmation does not move the latest sighting time backward');
+  assert.deepEqual(lookNow({ ...two, confirmed: true }, confirmed, t - 15_000, cp, false, t + 1_000), {}, 'already confirmed');
 });
 
 test('concurrent empty Bitcoin looks do not count as separate checks', () => {
