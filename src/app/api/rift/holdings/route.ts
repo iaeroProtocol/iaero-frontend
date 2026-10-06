@@ -39,7 +39,6 @@ import { collectTokenPages, type TokenPages } from '@/lib/rift/blockscout-pages'
 import { RateLimiter, rateKey, touch } from '@/lib/rift/rate-limit';
 import { rpcUrls } from '@/lib/public-rpcs';
 
-export const runtime = 'edge';
 
 const SOURCE_TIMEOUT_MS = 8_000;
 const RPC_TIMEOUT_MS = 4_000;
