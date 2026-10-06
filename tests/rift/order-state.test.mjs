@@ -513,7 +513,8 @@ test('stale Bitcoin lookups cannot erase newer empty evidence or hide a new paym
   const run = lookNow(seenAt, empty, t - 120_000, cp).btc;
   assert.equal(run.emptyChecks, 1);
   const overlap = look(run, 'known', t - 125_000, t - 119_000, t - 118_500).btc;
-  assert.equal(overlap?.emptyChecks, undefined, 'the overlapping "still known" answer ends the run');
+  assert.ok(overlap, 'recorded, not dropped');
+  assert.equal(overlap.emptyChecks, undefined, 'the overlapping "still known" answer ends the run');
   // A direct lookup begun after the empty run can still clear a stale address index's false missing result.
   const fresh = lookNow(btc, 'known', t + 20_000, cp, false, t + 20_000).btc;
   assert.equal(fresh.missing, undefined);
@@ -540,6 +541,15 @@ test('stale Bitcoin lookups cannot erase newer empty evidence or hide a new paym
   assert.equal(lateConfirmation.txid, txid);
   assert.equal(lateConfirmation.lastSeenAt, t, 'the confirmation does not move the latest sighting time backward');
   assert.deepEqual(lookNow({ ...two, confirmed: true }, confirmed, t - 15_000, cp, false, t + 1_000), {}, 'already confirmed');
+  // ...and on a record marked missing (asked before its latest sighting, so taken as a late confirmation), it ends
+  // that: a confirmed payment is never missing (its QR code stays hidden).
+  assert.ok(t - 250_000 < btc.lastSeenAt);
+  const lateOnMissing = lookNow(btc, confirmed, t - 250_000, cp, false, t + 1_000).btc;
+  assert.equal(btc.missing, true);
+  assert.equal(lateOnMissing.confirmed, true);
+  assert.equal(lateOnMissing.missing, undefined);
+  assert.equal(lateOnMissing.emptyChecks, undefined);
+  assert.equal(btcStillPayable(order({ sourceChain: 'bitcoin', btc: lateOnMissing }), t + 1_000), null);
 });
 
 test('concurrent empty Bitcoin looks do not count as separate checks', () => {
