@@ -255,8 +255,12 @@ test('Bitcoin "nothing was sent" waits for a look at the address past its checkp
   assert.equal(clearable(checked, T0 + 8 * 864e5), true);
   assert.equal(btcNeedsLook(checked, T0 + 8 * 864e5), false);
   // An expired order whose unconfirmed payment was seen keeps being looked at; a confirmed one needs support only.
-  assert.equal(btcNeedsLook(btc({ status: 'expired', btc: { txid: 'ab'.repeat(32), confirmations: 0 } })), true);
-  assert.equal(btcNeedsLook(btc({ status: 'expired', btc: { txid: 'ab'.repeat(32), confirmations: 2, confirmed: true } })), false);
+  assert.equal(btcNeedsLook(btc({ status: 'expired', btc: { txid: 'ab'.repeat(32), confirmations: 0 } }), T0 + 8 * 864e5), true);
+  assert.equal(btcNeedsLook(btc({ status: 'expired', btc: { txid: 'ab'.repeat(32), confirmations: 2, confirmed: true } }), T0 + 8 * 864e5), false);
+  const legacySeen = btc({ status: 'expired', btc: { txid: 'ab'.repeat(32), confirmations: 0 } });
+  const deadline = Date.parse(legacySeen.depositDeadline);
+  assert.equal(btcNeedsLook(legacySeen, deadline + 13 * 864e5), true, 'a legacy record without an expiry time uses Rift’s deadline');
+  assert.equal(btcNeedsLook(legacySeen, deadline + 15 * 864e5), false);
   assert.equal(btcNeedsLook(order()), false, 'not a Bitcoin order');
 });
 
