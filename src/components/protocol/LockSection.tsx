@@ -8,9 +8,10 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Lock, AlertTriangle, Loader2, CheckCircle, History } from "lucide-react";
+import { Lock, AlertTriangle, Loader2, CheckCircle, History, PauseCircle } from "lucide-react";
 import { useProtocol } from "../contexts/ProtocolContext";
 import { useVault } from "../contracts/hooks/useVault";
+import { DEPOSITS_PAUSED_MESSAGE, useVaultDepositsPaused } from "../contracts/hooks/useVaultDepositsPaused";
 import {
   parseInputToBigNumber,
   formatBigNumber,
@@ -23,7 +24,7 @@ import { getContractAddress } from '@/components/contracts/addresses';
 import { ABIS } from '@/components/contracts/abis';
 import { useProtocolPublicClient } from '@/lib/protocol-chain';
 import { SwitchToBaseCard } from '@/components/SwitchToBase';
-import { knownTxError } from '@/components/lib/tx-errors';
+import { isEnforcedPause, knownTxError } from '@/components/lib/tx-errors';
 
 interface LockSectionProps {
   showToast: (message: string, type: "success" | "error" | "info" | "warning") => void;
@@ -46,6 +47,7 @@ const MAX_DUST = BigInt(1000000000000000);
 const msgFromError = (e: any, fallback = "Transaction failed") => {
   const known = knownTxError(e);
   if (known) return known;
+  if (isEnforcedPause(e)) return DEPOSITS_PAUSED_MESSAGE;
   const m = String(e?.message || "").toLowerCase();
   if (m.includes("insufficient funds")) return "Insufficient ETH for gas fees";
   return fallback;
@@ -96,6 +98,8 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
     loading: vaultLoading,
   } = useVault();
   const publicClient = useProtocolPublicClient();
+  // The vault refuses deposits while it moves its veAERO to Aero: say so before anything is approved or signed.
+  const depositsPaused = useVaultDepositsPaused();
   // Tabs: deposit iAERO + LIQ, deposit existing veNFT, add to existing veNFT
   const [lockType, setLockType] = useState<"deposit" | "depositNFT">("deposit");
 
@@ -350,6 +354,7 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
 
   // Actions
   const handleDepositAero = async () => {
+    if (depositsPaused) return showToast(DEPOSITS_PAUSED_MESSAGE, "warning");
     const validation = validateTokenAmount(depositAmount, aeroBN, 18, MIN_LOCK_AMOUNT);
     if (!validation.valid) return showToast(validation.error || "Invalid amount", "error");
     const hasGas = await estimateGasForAction("deposit"); 
@@ -388,6 +393,7 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
   };
 
   const handleDepositVeNFT = async () => {
+    if (depositsPaused) return showToast(DEPOSITS_PAUSED_MESSAGE, "warning");
     if (!veNFTTokenId || isNaN(Number(veNFTTokenId))) {
       return showToast("Please enter a valid veNFT ID", "error");
     }
@@ -428,6 +434,7 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
   // CTA label + disabled logic
   const getPrimaryCta = () => {
     if (isProcessing) return progressStep || "Processing...";
+    if (depositsPaused) return "Paused for the Aero upgrade";
     if (!connected) return "Connect Wallet";
     if (!networkSupported) return "Switch Network";
     if (lockType === "deposit") {
@@ -449,7 +456,7 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
   };
 
   const isPrimaryDisabled = () => {
-    if (!connected || !networkSupported || isProcessing || vaultLoading) return true;
+    if (depositsPaused || !connected || !networkSupported || isProcessing || vaultLoading) return true;
     if (lockType === "deposit") return depositAmountBN === 0n || depositAmountBN > aeroBN || !!depositError;
     if (lockType === "depositNFT") return !veNFTTokenId || isNaN(Number(veNFTTokenId));
     return addAmountBN === 0n || addAmountBN > aeroBN || selectedNFT == null || !!addError;
@@ -468,6 +475,17 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-6">
+          {depositsPaused && (
+            <div className="bg-sky-500/10 border border-sky-500/20 rounded-xl p-4">
+              <div className="flex items-start space-x-3">
+                <PauseCircle className="w-5 h-5 text-sky-400 mt-0.5 shrink-0" />
+                <div>
+                  <p className="font-medium text-sky-400">Deposits are paused</p>
+                  <p className="text-sm text-slate-300 mt-1">iAERO&apos;s vault is moving its position to Aero, so depositing AERO or veAERO can&apos;t mint iAERO right now. Minting reopens through the new vault after the migration, and we&apos;ll announce it on Discord. Nothing you already hold is affected.</p>
+                </div>
+              </div>
+            </div>
+          )}
           <Tabs value={lockType} onValueChange={(v) => setLockType(v as any)}>
             <TabsList className="grid grid-cols-2 w-full">
               <TabsTrigger value="deposit" disabled={isProcessing}>Deposit AERO</TabsTrigger>

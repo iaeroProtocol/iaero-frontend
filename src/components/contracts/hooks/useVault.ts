@@ -221,6 +221,10 @@ export const useVault = () => {
       onProgress?.("Confirming…");
       const receipt = await publicClient?.waitForTransactionReceipt({ hash });
 
+      if (!receipt || receipt.status !== 'success') {
+        throw new Error("deposit reverted on-chain.");
+      }
+
       onProgress?.("Updating balances…");
       await Promise.all([loadBalances(), loadAllowances()]);
 

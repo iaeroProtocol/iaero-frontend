@@ -9,7 +9,8 @@
     "deploy": "npm run pages:build && wrangler pages deploy .vercel/output/static",
     "start": "next start",
     "lint": "next lint",
-    "test:rift": "node --test tests/rift/*.test.mjs"
+    "test:rift": "node --test tests/rift/*.test.mjs",
+    "test:vault": "node --test tests/vault/*.test.mjs"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.12",
