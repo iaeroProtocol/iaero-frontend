@@ -355,7 +355,7 @@ export function btcNeedsLook(o: StoredOrder, now = Date.now()): boolean {
   if (o.status === 'awaiting_deposit' || o.status === 'underfunded') return !(now - Date.parse(o.depositDeadline) > BTC_LOOK_AFTER_EXPIRY_MS);
   if (o.status !== 'expired') return false;
   if (!o.btc?.txid) return btcUnchecked(o, now);
-  return !btcConfirmed(o.btc) && now - (o.statusTimes.expired ?? o.createdAt) < BTC_LOOK_AFTER_EXPIRY_MS;
+  return !btcConfirmed(o.btc) && now - btcCheckpoint(o, now) < BTC_LOOK_AFTER_EXPIRY_MS;
 }
 
 /** Whether another Bitcoin order, paid as well, could buy twice with this one (Buy asks first): it still waits for its
