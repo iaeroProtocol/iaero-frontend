@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 export const runtime = 'edge';
 export const revalidate = 300;
 import { ethers } from 'ethers';
-import { getLIQinUSDC, getPegIAEROinAERO, getAEROinUSDC } from '@/lib/amm';
+import { getLIQinUSDC, getPegIAEROinAERO, getAEROinUSDC, serverRpc } from '@/lib/amm';
 import { safeErrorText } from '@/lib/safe-error';
 
 // Contract ABIs (minimal)
@@ -33,9 +33,7 @@ const CONTRACTS = {
 const PROTOCOL_AERO_STAKE_ID = BigInt(process.env.PROTOCOL_AERO_STAKE_ID || '1584');
 const ESCROW_ABI = ['function staked(uint256) view returns (tuple(uint128 amount, uint48 end, bool isPermanent))'];
 
-// RPC: an explicit RPC_URL, else Alchemy with the site's key (the public endpoint refuses edge requests), else public.
-const ALCHEMY = process.env.ALCHEMY_KEY || process.env.NEXT_PUBLIC_ALCHEMY_KEY;
-const RPC_URL = process.env.RPC_URL || (ALCHEMY ? `https://base-mainnet.g.alchemy.com/v2/${ALCHEMY}` : 'https://mainnet.base.org');
+// RPC: resolved per request by serverRpc() (lib/amm.ts): RPC_URL, else ALCHEMY_KEY, else the public browser key.
 
 // Cache configuration
 let cache: any = null;
@@ -51,7 +49,8 @@ export async function GET() {
     }
 
     // Initialize provider
-    const provider = new ethers.JsonRpcProvider(RPC_URL);
+    const rpc = serverRpc();
+    const provider = new ethers.JsonRpcProvider(rpc.url);
     
     // Initialize contracts
     const vault = new ethers.Contract(CONTRACTS.vault, VAULT_ABI, provider);
@@ -209,7 +208,11 @@ export async function GET() {
     return NextResponse.json(
       { 
         error: 'Failed to fetch stats',
-        message: safeErrorText(error)
+        message: safeErrorText(error),
+        // Which key source was used (never the key) and the RPC's own reply, to tell an allowlisted key from a
+        // missing one.
+        rpcSource: serverRpc().source,
+        rpcReply: safeErrorText((error as any)?.info?.responseBody ?? '').slice(0, 200)
       },
       { status: 500 }
     );
