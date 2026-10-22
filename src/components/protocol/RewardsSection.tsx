@@ -52,6 +52,9 @@ const REGISTRY_ADDRESS = "0xd3e32B22Da6Bf601A5917ECd344a7Ec46BCA072c" as Address
 
 // ✅ AERODROME CONFIGURATION
 const AERODROME_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" as Address;
+// The AERO->iAERO leg used Aerodrome's iAERO/AERO pool, drained when liquidity moved to Aero on 2026-10-22.
+// Keep the iAERO sweep off until that leg routes through the Aero pools.
+const IAERO_SWEEP_ENABLED = false;
 const AERODROME_FACTORY = "0x420DD381b31aEf6683db6B902084cB0FFECe40Da" as Address;
 
 const AERO_ADDR = "0x940181a94A35A4569E4529A3CDfB74e38FD98631" as Address;
@@ -2972,6 +2975,13 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         args: [aeroBalance, routes]
       }) as readonly bigint[];
       if (amounts && amounts.length > 0) amountOutMin = (amounts[amounts.length - 1] * 9500n) / 10000n;
+      // A drained pool still quotes a tiny non-zero amount, which would pass the zero check below and swap the
+      // user's whole AERO balance for dust. iAERO trades near 1 AERO, so a quote under half of the AERO in
+      // means the pool cannot be used: fail closed.
+      if (amounts && amounts.length > 0 && amounts[amounts.length - 1] * 2n < aeroBalance) {
+        console.error('  ❌ AERO->iAERO quote is under 0.5 iAERO per AERO; pool unusable, failing closed');
+        amountOutMin = 0n;
+      }
     } catch (quoteErr) {
       console.error('  ❌ AERO->iAERO getAmountsOut failed; will fail closed:', quoteErr);
     }
@@ -3317,6 +3327,10 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
   };
 
   const handleConfirmSweep = async (mode: 'USDC' | 'iAERO') => {
+    if (mode === 'iAERO' && !IAERO_SWEEP_ENABLED) {
+      showToast('Sweep to iAERO is paused while iAERO liquidity moves to Aero. Sweep to USDC instead.', 'warning');
+      return;
+    }
     const selectedCandidates = candidates.filter(t => selectedTokens.has(t.address));
     
     if (selectedCandidates.length === 0) {
@@ -3929,10 +3943,11 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                   </Button>
                   <Button
                     onClick={() => handleConfirmSweep('iAERO')}
-                    disabled={selectedTokens.size === 0}
+                    disabled={selectedTokens.size === 0 || !IAERO_SWEEP_ENABLED}
+                    title={IAERO_SWEEP_ENABLED ? undefined : 'Paused while iAERO liquidity moves to Aero'}
                     className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700"
                   >
-                    Sweep to iAERO
+                    {IAERO_SWEEP_ENABLED ? 'Sweep to iAERO' : 'Sweep to iAERO (paused)'}
                   </Button>
                 </div>
               </div>
