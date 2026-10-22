@@ -1,4 +1,5 @@
 /* eslint-disable no-console */
+import { serverRpc } from '@/lib/amm';
 import { NextResponse } from 'next/server';
 export const runtime = 'edge';
 export const revalidate = 300;
@@ -120,7 +121,8 @@ export async function GET(req: Request) {
     const AERO = NET.AERO!.toLowerCase() as `0x${string}`;
 
     // Public client (Edge-friendly)
-    const rpcUrl = `https://base-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_KEY || process.env.NEXT_PUBLIC_ALCHEMY_KEY}`;
+    const rpc = serverRpc();
+    const rpcUrl = rpc.url;
     const client = createPublicClient({ chain: base, transport: http(rpcUrl) });
 
     // 1) Llama batch
@@ -196,7 +198,7 @@ export async function GET(req: Request) {
       out[t] = px || 0;
     }
 
-    return NextResponse.json({ prices: out });
+    return NextResponse.json({ prices: out }, { headers: { 'x-rpc-source': rpc.source } });
   } catch (err: any) {
     // Never the raw message: viem errors repeat the RPC URL, which carries the Alchemy key.
     console.error('prices/token error:', safeErrorText(err));

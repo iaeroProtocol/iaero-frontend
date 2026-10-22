@@ -3,8 +3,14 @@ import { ethers } from "ethers";
 import { getContractAddress } from "@/components/contracts/addresses";
 
 // Server-side only (API routes). Prefer the server key: the public browser key is domain-allowlisted, and
-// Alchemy refuses requests from the edge, which carry no browser Origin (HTTP 403).
-const BASE_RPC_URL = `https://base-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_KEY || process.env.NEXT_PUBLIC_ALCHEMY_KEY}`;
+// Alchemy refuses requests from the edge, which carry no browser Origin (HTTP 403). Resolved per call, because
+// on Cloudflare Pages runtime variables exist only inside a request, not when this module is first loaded.
+export function serverRpc(): { url: string; source: 'RPC_URL' | 'ALCHEMY_KEY' | 'NEXT_PUBLIC_ALCHEMY_KEY' | 'public' } {
+  if (process.env.RPC_URL) return { url: process.env.RPC_URL, source: 'RPC_URL' };
+  if (process.env.ALCHEMY_KEY) return { url: `https://base-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_KEY}`, source: 'ALCHEMY_KEY' };
+  if (process.env.NEXT_PUBLIC_ALCHEMY_KEY) return { url: `https://base-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_KEY}`, source: 'NEXT_PUBLIC_ALCHEMY_KEY' };
+  return { url: 'https://mainnet.base.org', source: 'public' };
+}
 
 // Aero pools (iAERO and LIQ liquidity moved from Aerodrome on 2026-10-22; the old pools are drained)
 const IAERO_AERO_POOL = getContractAddress("iAERO_AERO_Pool", 8453);
@@ -25,7 +31,7 @@ const ERC20_ABI = ["function decimals() view returns (uint8)"] as const;
 
 function provider() {
   // v6 provider, fine in Node and browser; we’ll call from API route (server)
-  return new ethers.JsonRpcProvider(BASE_RPC_URL, 8453, { staticNetwork: true });
+  return new ethers.JsonRpcProvider(serverRpc().url, 8453, { staticNetwork: true });
 }
 
 async function decimalsOf(addr: string, p = provider()): Promise<number> {
