@@ -56,9 +56,7 @@ const REGISTRY_ADDRESS = "0xd3e32B22Da6Bf601A5917ECd344a7Ec46BCA072c" as Address
 // iAERO step is refused above IAERO_STEP_MAX_IMPACT_BPS against the pools' mid price, leaving the USDC in the
 // wallet. Flip to false to pause it again from one place: it gates every path to iAERO (Sweep to iAERO, Sweep ALL
 // to iAERO & Stake, Compound & Stake) and the USDC -> iAERO step itself.
-// Paused 2026-10-22: the AERO/iAERO v2 pool was too thin for the whole sweep; stays paused until this route is
-// verified on a fork.
-const IAERO_SWEEP_ENABLED = false;
+const IAERO_SWEEP_ENABLED = true;
 const IAERO_SWEEP_PAUSED_MSG = 'Sweeping to iAERO is paused while iAERO liquidity moves to Aero. Sweep to USDC instead.';
 const AERO_METAROUTER = "0x0fEf9e88A7b76BCDBF451780C6774FE32965Ee98" as Address;
 const AERO_METAQUOTER = "0x1dDfeC5058180C207F55BB77D95AcDd0d8227868" as Address; // Aero's own quoter (Metaquoter)
