@@ -2,7 +2,9 @@
 import { ethers } from "ethers";
 import { getContractAddress } from "@/components/contracts/addresses";
 
-const BASE_RPC_URL = `https://base-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_KEY}`;
+// Server-side only (API routes). Prefer the server key: the public browser key is domain-allowlisted, and
+// Alchemy refuses requests from the edge, which carry no browser Origin (HTTP 403).
+const BASE_RPC_URL = `https://base-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_KEY || process.env.NEXT_PUBLIC_ALCHEMY_KEY}`;
 
 // Aero pools (iAERO and LIQ liquidity moved from Aerodrome on 2026-10-22; the old pools are drained)
 const IAERO_AERO_POOL = getContractAddress("iAERO_AERO_Pool", 8453);
