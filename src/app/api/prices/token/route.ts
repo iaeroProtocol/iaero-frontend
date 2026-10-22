@@ -137,20 +137,22 @@ export async function GET(req: Request) {
     //    try T/USDC, then T/WETH -> then multiply by (WETH/USDC)
     // You can hardcode pair addresses you use on Base or read from factory if you prefer.
     // For simplicity, we’ll try factory.getPool(T, USDC, false/true) and likewise with WETH.
-    const factory = {
-      address: NET.PoolFactory as `0x${string}`,
-      abi: parseAbi(['function getPool(address,address,bool) view returns (address)'])
-    };
+    // Aero (live since 2026-10-22) has one factory per pool type with getPool(a, b); Aerodrome's single factory
+    // takes a stable flag. Aero is asked first, since liquidity moved there; Aerodrome still prices tokens that
+    // only trade on its pools.
+    const ZERO = '0x0000000000000000000000000000000000000000';
+    const aeroFactoryAbi = parseAbi(['function getPool(address,address) view returns (address)']);
+    const aerodromeFactoryAbi = parseAbi(['function getPool(address,address,bool) view returns (address)']);
 
     async function getPool(x: `0x${string}`, y: `0x${string}`, stable: boolean) {
+      const aeroFactory = (stable ? NET.AeroStablePoolFactory : NET.AeroVolatilePoolFactory) as `0x${string}`;
       try {
-        const addr = await client.readContract({
-          address: factory.address,
-          abi: factory.abi,
-          functionName: 'getPool',
-          args: [x, y, stable],
-        }) as `0x${string}`;
-        return addr && addr !== '0x0000000000000000000000000000000000000000' ? (addr as `0x${string}`) : null;
+        const addr = await client.readContract({ address: aeroFactory, abi: aeroFactoryAbi, functionName: 'getPool', args: [x, y] }) as `0x${string}`;
+        if (addr && addr !== ZERO) return addr;
+      } catch {}
+      try {
+        const addr = await client.readContract({ address: NET.PoolFactory as `0x${string}`, abi: aerodromeFactoryAbi, functionName: 'getPool', args: [x, y, stable] }) as `0x${string}`;
+        return addr && addr !== ZERO ? addr : null;
       } catch { return null; }
     }
 

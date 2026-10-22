@@ -290,17 +290,17 @@ export default function IaeroProtocolApp() {
              Buy iAERO
            </button>
            <a
-             href="https://aero.drome.eth.limo/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x81034fb34009115f215f5d5f564aac9ffa46a1dc&chain0=8453&chain1=8453"
+             href="https://app.aero.xyz/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x81034fb34009115f215f5d5f564aac9ffa46a1dc&chain0=8453&chain1=8453"
              target="_blank" rel="noopener noreferrer" className="text-xs text-slate-400 hover:text-white"
            >
-             or swap on Aerodrome
+             or swap on Aero
            </a>
          </div>
          
          {/* Buy LIQ - under iAERO Price card */}
          <div className="flex justify-center">
            <a
-             href="https://aero.drome.eth.limo/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x7ee8964160126081cebc443a42482e95e393e6a8&chain0=8453&chain1=8453"
+             href="https://app.aero.xyz/swap?from=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&to=0x7ee8964160126081cebc443a42482e95e393e6a8&chain0=8453&chain1=8453"
              target="_blank"
              rel="noopener noreferrer"
              className="inline-flex items-center justify-center gap-2 px-10 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-sm font-semibold rounded-lg shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 transition-all duration-300 hover:scale-105 w-full max-w-[220px]"

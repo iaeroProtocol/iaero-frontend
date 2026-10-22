@@ -122,7 +122,7 @@ export const useVault = () => {
     
     try {
       const vaultAddr = getAddr('PermalockVault');
-      const aeroAddr = getAddr('AERO');
+      const aeroAddr = getAddr('AERO_LEGACY'); // legacy vault takes Aerodrome AERO
       if (!vaultAddr || !aeroAddr) return false;
 
       const allowance = await publicClient.readContract({
@@ -150,7 +150,7 @@ export const useVault = () => {
     
     try {
       const vaultAddr = getAddr('PermalockVault');
-      const aeroAddr = getAddr('AERO');
+      const aeroAddr = getAddr('AERO_LEGACY'); // legacy vault takes Aerodrome AERO
       if (!vaultAddr || !aeroAddr) throw new Error("Contracts not initialized");
 
       const amountWei = parseEther(amount);

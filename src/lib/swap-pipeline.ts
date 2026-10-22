@@ -42,7 +42,8 @@ export const REGISTRY_ADDRESS = '0xd3e32B22Da6Bf601A5917ECd344a7Ec46BCA072c' as 
 export const USDC_ADDR    = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address;
 export const USDC_DECIMALS = 6;
 
-export const AERO_ADDR  = '0x940181a94A35A4569E4529A3CDfB74e38FD98631' as Address;
+/** Aero's AERO (Aerodrome's 0x9401…8631 was retired on 2026-10-22). */
+export const AERO_ADDR  = '0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee' as Address;
 export const IAERO_ADDR = '0x81034Fb34009115F215f5d5F564AAc9FfA46a1Dc' as Address;
 
 // ----------------------------------------------------------------------------

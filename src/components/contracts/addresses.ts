@@ -29,7 +29,20 @@ export type ContractName =
   | "USDbC" 
   | "cbETH"   
   | "cbBTC" 
-  | "RewardsSugar";
+  | "RewardsSugar"
+  // Aero (live since 2026-10-22) and the retired Aerodrome token the legacy vault still takes
+  | "AERO_LEGACY"
+  | "AeroVoter"
+  | "AeroVotingEscrow"
+  | "AeroFactoryRegistry"
+  | "AeroVolatilePoolFactory"
+  | "AeroStablePoolFactory"
+  | "AeroCLFactory"
+  | "AeroMetarouter"
+  | "iAERO_AERO_Pool"
+  | "iAERO_AERO_CLPool"
+  | "LIQ_USDC_Pool"
+  | "AERO_USDC_Pool";
 
 export type Address = `0x${string}`;
 
@@ -53,7 +66,21 @@ export const CONTRACTS: Record<SupportedChainId, NetworkAddresses> = {
     USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
   },
   8453: {
-    AERO: "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+    // Aero: AERO token, contracts and the pools iAERO/LIQ moved to on 2026-10-22
+    AERO: "0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee",
+    AeroVoter: "0x49d7d4f17Ec56Ef8fA04E464AF5D1A4942CC31e6",
+    AeroVotingEscrow: "0xBF7977E1521e9a3032bf7243Ee4712f311f13915",
+    AeroFactoryRegistry: "0x7b2A2c12dC5Ea2a31455952a05031C3E4BB28F3E",
+    AeroVolatilePoolFactory: "0x8E6a9FCd1d638CC760Ffba397605Fe3355dE76D2",
+    AeroStablePoolFactory: "0x78589E876edcEbdce72ee3436ab3c9AD3a7cEF2D",
+    AeroCLFactory: "0x9CB220581b91b0C83223012FE69688b92aD07a76",
+    AeroMetarouter: "0x0fEf9e88A7b76BCDBF451780C6774FE32965Ee98",
+    iAERO_AERO_Pool: "0x72Decb30DFE4F6Cf7Db3ba1D58411dDda5ed903b",
+    iAERO_AERO_CLPool: "0x361D728c97E591Ef47A68CAe2DC5C8ef475608EB",
+    LIQ_USDC_Pool: "0xE4553d8d7284192ab84346A9C9FFdb69dCE30C71",
+    AERO_USDC_Pool: "0xF634058dC94e6BF8e828E27621320C423bC8B18E",
+    // Aerodrome (retired 2026-10-22): the legacy PermalockVault still takes old AERO and veAERO NFTs
+    AERO_LEGACY: "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
     VOTER: "0x16613524E02ad97EDfEF371Bc883F2F5D6c480A5",
     VeAERO: "0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4",
     Router: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",

@@ -1078,7 +1078,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
       return `Your wallet is a smart-contract wallet on ${CHAIN_NAMES[payChain!]} but not on Base, so it could not receive iAERO there.`;
     }
     if (![code, onBase, onEth, onArb].some(isContractCode)) return null;
-    return 'Payments from smart-contract wallets (Safe, smart accounts) aren’t supported here: they can go out later, at a different price, in a way this page can’t follow. Use a regular wallet, or swap on Aerodrome.';
+    return 'Payments from smart-contract wallets (Safe, smart accounts) aren’t supported here: they can go out later, at a different price, in a way this page can’t follow. Use a regular wallet, or swap on Aero.';
   }
 
   /** Buy. `accepted` is a new price the user agreed to after a move; otherwise the baseline is what they saw. */
@@ -1702,7 +1702,7 @@ export default function GetIaeroSection({ active, showToast, onGoToStake }: Prop
                             {tooSmall
                               ? <>Rift’s gas charge is more than this order is worth. Try a larger amount, or pay from Base or Arbitrum.</>
                               : <>You pay ≈ {fmtUsd(cost.usdIn ?? 0)}{isHyperCore ? ' (with Hyperliquid’s 1 USDC fee)' : ''} and get ≈ {fmtUsd(cost.usdOut ?? 0)} of iAERO at its
-                                Aerodrome pool price. Includes every bridge, swap and network cost.</>}
+                                Aero pool price. Includes every bridge, swap and network cost.</>}
                           </div>
                         )}
                         {c.kind === 'unknown' && (

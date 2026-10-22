@@ -4,10 +4,10 @@ import { getContractAddress } from "@/components/contracts/addresses";
 
 const BASE_RPC_URL = `https://base-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_KEY}`;
 
-// Aerodrome pool addresses (double‑check these are the ones you expect)
-const IAERO_AERO_POOL = "0x08d49DA370ecfFBC4c6Fdd2aE82B2D6aE238Affd";
-const LIQ_USDC_POOL   = "0x8966379fCD16F7cB6c6EA61077B6c4fAfECa28f4";
-const USDC_AERO_POOL = "0x6cDcb1C4A4D1C3C6d054b27AC5B77e89eAFb971d";
+// Aero pools (iAERO and LIQ liquidity moved from Aerodrome on 2026-10-22; the old pools are drained)
+const IAERO_AERO_POOL = getContractAddress("iAERO_AERO_Pool", 8453);
+const LIQ_USDC_POOL   = getContractAddress("LIQ_USDC_Pool", 8453);
+const USDC_AERO_POOL  = getContractAddress("AERO_USDC_Pool", 8453);
 
 const BASE_USDC = (process.env.BASE_USDC ||
   "0x833589fCD6EDb6E08f4c7C32D4f71b54bdA02913").toLowerCase();
