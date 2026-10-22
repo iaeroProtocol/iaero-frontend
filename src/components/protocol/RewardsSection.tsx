@@ -53,8 +53,11 @@ const REGISTRY_ADDRESS = "0xd3e32B22Da6Bf601A5917ECd344a7Ec46BCA072c" as Address
 // Token and Aero configuration
 // Aero (2026-10-22): liquidity left Aerodrome, so the iAERO sweep now swaps rewards to USDC through 0x and then
 // USDC -> AERO -> iAERO through Aero's Metarouter (AERO/USDC and AERO/iAERO volatile pools). Flip to false to
-// pause it again from one place.
-const IAERO_SWEEP_ENABLED = true;
+// pause it again from one place: it gates every path to iAERO (Sweep to iAERO, Sweep ALL to iAERO & Stake,
+// Compound & Stake) and the USDC -> iAERO step itself.
+// Paused 2026-10-22: the AERO/iAERO v2 pool is too thin for the whole sweep (no price-impact limit yet).
+const IAERO_SWEEP_ENABLED = false;
+const IAERO_SWEEP_PAUSED_MSG = 'Sweeping to iAERO is paused while iAERO liquidity moves to Aero. Sweep to USDC instead.';
 const AERO_METAROUTER = "0x0fEf9e88A7b76BCDBF451780C6774FE32965Ee98" as Address;
 const AERO_USDC_POOL = "0xF634058dC94e6BF8e828E27621320C423bC8B18E" as Address;
 const AERO_IAERO_POOL = "0x72Decb30DFE4F6Cf7Db3ba1D58411dDda5ed903b" as Address;
@@ -2112,6 +2115,11 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     setFailedTokens([]);
     
     const mode = quotePreviewData._mode || 'USDC';
+    if (mode === 'iAERO' && !IAERO_SWEEP_ENABLED) {
+      setIsProcessing(false);
+      showToast(IAERO_SWEEP_PAUSED_MSG, 'warning');
+      return;
+    }
     // Both modes buy USDC through 0x; the iAERO mode converts that USDC through Aero afterwards.
     const targetTokenAddr = USDC_ADDR;
     const outputDecimals = quotePreviewData.outputDecimals;
@@ -2884,6 +2892,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
    * Returns success status and staked amount.
    */
   const performUsdcToIaeroStep = async (usdcBefore: bigint): Promise<{ success: boolean; stakedAmount?: string }> => {
+    if (!IAERO_SWEEP_ENABLED) return { success: false };
     console.log("\n🔄 Step 2: Waiting for USDC balance update...");
     setProgressStep("Waiting for blockchain to index...");
 
@@ -3103,6 +3112,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
 
   const handleClaimAndCompound = async () => {
     if (!account) return;
+    if (!IAERO_SWEEP_ENABLED) { showToast(IAERO_SWEEP_PAUSED_MSG, 'warning'); return; }
     if (SWAPPER_ADDRESS.includes("YOUR_DEPLOYED")) { showToast("Swapper not configured!", "error"); return; }
     
     setIsProcessing(true);
@@ -3204,6 +3214,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
 
   const handleSweepToIAERO = async () => {
     if (!account) return;
+    if (!IAERO_SWEEP_ENABLED) { showToast(IAERO_SWEEP_PAUSED_MSG, 'warning'); return; }
     if (SWAPPER_ADDRESS.includes("YOUR_DEPLOYED")) { showToast("Swapper not configured!", "error"); return; }
     
     setIsProcessing(true);
@@ -3262,7 +3273,7 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
 
   const handleConfirmSweep = async (mode: 'USDC' | 'iAERO') => {
     if (mode === 'iAERO' && !IAERO_SWEEP_ENABLED) {
-      showToast('Sweep to iAERO is paused while iAERO liquidity moves to Aero. Sweep to USDC instead.', 'warning');
+      showToast(IAERO_SWEEP_PAUSED_MSG, 'warning');
       return;
     }
     const selectedCandidates = candidates.filter(t => selectedTokens.has(t.address));
@@ -3661,8 +3672,8 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                   <RefreshCw className="w-4 h-4 mr-2" />Convert to USDC
                 </Button>
                 
-                <Button variant="secondary" onClick={handleClaimAndCompound} disabled={!hasRewards || isProcessing} className="h-auto min-h-9 whitespace-normal bg-slate-700 text-purple-200 hover:bg-slate-600 border border-slate-600">
-                  <TrendingUp className="w-4 h-4 mr-2" />Compound & Stake
+                <Button variant="secondary" onClick={handleClaimAndCompound} disabled={!hasRewards || isProcessing || !IAERO_SWEEP_ENABLED} title={IAERO_SWEEP_ENABLED ? undefined : 'Paused while iAERO liquidity moves to Aero'} className="h-auto min-h-9 whitespace-normal bg-slate-700 text-purple-200 hover:bg-slate-600 border border-slate-600">
+                  <TrendingUp className="w-4 h-4 mr-2" />{IAERO_SWEEP_ENABLED ? 'Compound & Stake' : 'Compound & Stake (paused)'}
                 </Button>
               </div>
             </>
@@ -3707,12 +3718,13 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                 
                 <Button 
                   onClick={handleSweepToIAERO}
-                  disabled={isProcessing}
+                  disabled={isProcessing || !IAERO_SWEEP_ENABLED}
+                  title={IAERO_SWEEP_ENABLED ? undefined : 'Paused while iAERO liquidity moves to Aero'}
                   className="h-auto py-4 whitespace-normal leading-tight bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white border-0"
                 >
                   <div className="flex flex-col items-center gap-1">
                     <TrendingUp className="w-5 h-5 mb-1" />
-                    <span className="text-xs">Sweep ALL to iAERO & Stake</span>
+                    <span className="text-xs">{IAERO_SWEEP_ENABLED ? 'Sweep ALL to iAERO & Stake' : 'Sweep ALL to iAERO (paused)'}</span>
                   </div>
                 </Button>
               </div>
