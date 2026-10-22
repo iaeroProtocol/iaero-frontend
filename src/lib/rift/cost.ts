@@ -188,9 +188,10 @@ export function formatPct(pct: number): string {
  *  of a percent, so "better than market" would be a claim the data cannot make. */
 export const costText = (pct: number) => (pct > 0 ? formatPct(pct) : 'about 0%');
 
-// --- iAERO's market price: its Aerodrome pools on Base (iAERO/AERO, iAERO is token0, both 18 decimals) ---
+// --- iAERO's market price: its pools on Base (both 18 decimals). These assume iAERO is token0; prices.ts
+// inverts them for pools listed AERO-first, as Aero's are. ---
 
-/** AERO per iAERO at a concentrated-liquidity (Slipstream) pool's current price. */
+/** AERO per iAERO at a concentrated-liquidity pool's current price, iAERO as token0. */
 export function clAeroPerIaero(sqrtPriceX96: bigint): number {
   const r = Number(sqrtPriceX96) / 2 ** 96;
   return r * r;

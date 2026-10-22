@@ -147,7 +147,7 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
     setState(prev => ({ ...prev, loading: { ...prev.loading, balances: true } }));
 
     try {
-      const AERO = getContractAddress('AERO', chainId);
+      const AERO = getContractAddress('AERO_LEGACY', chainId); // legacy vault deposits take Aerodrome AERO
       const IAERO = getContractAddress('iAERO', chainId);
       const LIQ = getContractAddress('LIQ', chainId);
       const STAKE = getContractAddress('StakingDistributor', chainId);
@@ -184,7 +184,7 @@ export function ProtocolProvider({ children }: { children: React.ReactNode }) {
     if (!isConnected || !address || !networkSupported || !publicClient) return;
 
     try {
-      const AERO = getContractAddress('AERO', chainId);
+      const AERO = getContractAddress('AERO_LEGACY', chainId); // legacy vault deposits take Aerodrome AERO
       const IAERO = getContractAddress('iAERO', chainId);
       const VAULT = getContractAddress('PermalockVault', chainId);
       const STAKE = getContractAddress('StakingDistributor', chainId);

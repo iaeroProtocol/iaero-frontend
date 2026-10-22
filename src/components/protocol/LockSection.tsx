@@ -159,7 +159,7 @@ export default function LockSection({ showToast, formatNumber }: LockSectionProp
       const vaultAddress = getContractAddress('PermalockVault', chainId);
       
       if (type === 'AERO') {
-        const aeroAddress = getContractAddress('AERO', chainId);
+        const aeroAddress = getContractAddress('AERO_LEGACY', chainId); // legacy vault takes Aerodrome AERO
         const vaultAeroBalance = await publicClient.readContract({
           address: aeroAddress,
           abi: ABIS.AERO,

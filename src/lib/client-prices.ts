@@ -2,11 +2,12 @@ import { ethers } from "ethers";
 
 /* ========================== Constants ========================== */
 
-const IAERO_AERO_POOL = "0x08d49DA370ecfFBC4c6Fdd2aE82B2D6aE238Affd"; // iAERO/AERO pool
-const LIQ_USDC_POOL   = "0x8966379fCD16F7cB6c6EA61077B6c4fAfECa28f4";
+// Aero pools (iAERO and LIQ liquidity moved from Aerodrome on 2026-10-22; the old pools are drained)
+const IAERO_AERO_POOL = "0x72Decb30DFE4F6Cf7Db3ba1D58411dDda5ed903b"; // AERO/iAERO volatile
+const LIQ_USDC_POOL   = "0xE4553d8d7284192ab84346A9C9FFdb69dCE30C71"; // LIQ/USDC volatile
 
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".toLowerCase();
-const AERO_ADDRESS = "0x940181a94A35A4569E4529A3CDfB74e38FD98631".toLowerCase();
+const AERO_ADDRESS = "0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee".toLowerCase(); // Aero AERO
 
 const POOL_ABI = [
   "function token0() view returns (address)",
@@ -55,7 +56,7 @@ async function getPoolReserves(
 /** AERO price in USDC from a known USDC/AERO pair (handles either token order). */
 async function getAEROPriceFromPool(): Promise<number | null> {
   try {
-    const USDC_AERO_POOL = "0x6cDcb1C4A4D1C3C6d054b27AC5B77e89eAFb971d";
+    const USDC_AERO_POOL = "0xF634058dC94e6BF8e828E27621320C423bC8B18E"; // Aero AERO/USDC volatile
     const pool = new ethers.Contract(USDC_AERO_POOL, POOL_ABI, provider);
 
     const [t0, t1] = await Promise.all([pool.token0(), pool.token1()]);
@@ -170,6 +171,7 @@ export async function fetchPricesClient() {
       
       if (r.ok) {
         const j = await r.json();
+        // CoinGecko id for AERO; if it stops tracking after the Aero migration, the Aero AERO/USDC pool below is used.
         aeroUsd = Number(j?.["aerodrome-finance"]?.usd) || 0;
         aeroChange = Number(j?.["aerodrome-finance"]?.usd_24h_change) || 0;
       }

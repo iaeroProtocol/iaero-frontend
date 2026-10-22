@@ -20,17 +20,22 @@ const TOKEN_ABI = [
   'function balanceOf(address) view returns (uint256)'
 ];
 
-// Contract addresses - update these with your actual addresses
+// Legacy PermalockVault (still the iAERO minter's accounting), the tokens, and the backing on Aero.
+// On 2026-10-22 the protocol's veAERO left the vault and was converted 1:1 into Aero stake #1584; until the new
+// sAERO vault holds it, backing is read from that stake (override with PROTOCOL_AERO_STAKE_ID).
 const CONTRACTS = {
-  vault: '0x877398Aea8B5cCB0D482705c2D88dF768c953957',
-  iAERO: '0x81034Fb34009115F215f5d5F564AAc9FfA46a1Dc', // UPDATE THIS
-  LIQ: '0x7ee8964160126081cebC443a42482E95e393e6A8',     // UPDATE THIS
-  AERO: '0x940181a94a35a4569e4529a3cdfb74e38fd98631',   // UPDATE THIS
-  veAERO: '0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4' // UPDATE THIS
+  vault: '0x180DAB53968e599Dd43CF431E27CB01AA5C37909',
+  iAERO: '0x81034Fb34009115F215f5d5F564AAc9FfA46a1Dc',
+  LIQ: '0x7ee8964160126081cebC443a42482E95e393e6A8',
+  AERO: '0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee',
+  aeroVotingEscrow: '0xBF7977E1521e9a3032bf7243Ee4712f311f13915',
 };
+const PROTOCOL_AERO_STAKE_ID = BigInt(process.env.PROTOCOL_AERO_STAKE_ID || '1584');
+const ESCROW_ABI = ['function staked(uint256) view returns (tuple(uint128 amount, uint48 end, bool isPermanent))'];
 
-// RPC URL - use environment variable
-const RPC_URL = process.env.RPC_URL || 'https://mainnet.base.org';
+// RPC: an explicit RPC_URL, else Alchemy with the site's key (the public endpoint refuses edge requests), else public.
+const ALCHEMY = process.env.ALCHEMY_KEY || process.env.NEXT_PUBLIC_ALCHEMY_KEY;
+const RPC_URL = process.env.RPC_URL || (ALCHEMY ? `https://base-mainnet.g.alchemy.com/v2/${ALCHEMY}` : 'https://mainnet.base.org');
 
 // Cache configuration
 let cache: any = null;
@@ -52,6 +57,7 @@ export async function GET() {
     const vault = new ethers.Contract(CONTRACTS.vault, VAULT_ABI, provider);
     const iAERO = new ethers.Contract(CONTRACTS.iAERO, TOKEN_ABI, provider);
     const liq = new ethers.Contract(CONTRACTS.LIQ, TOKEN_ABI, provider);
+    const escrow = new ethers.Contract(CONTRACTS.aeroVotingEscrow, ESCROW_ABI, provider);
 
     // Fetch vault status and prices in parallel
     const [
@@ -64,7 +70,8 @@ export async function GET() {
       liqSupply,
       aeroPrice,
       liqPrice,
-      iAeroPeg
+      iAeroPeg,
+      protocolStake
     ] = await Promise.all([
       vault.vaultStatus(),
       vault.totalLIQMinted().catch(() => 0n),
@@ -75,8 +82,10 @@ export async function GET() {
       liq.totalSupply(),
       getAEROinUSDC(),  // Get AERO price directly from USDC/AERO pool
       getLIQinUSDC(),
-      getPegIAEROinAERO()
+      getPegIAEROinAERO(),
+      escrow.staked(PROTOCOL_AERO_STAKE_ID).catch(() => null)
     ]);
+    const backingAero: bigint = protocolStake ? BigInt(protocolStake.amount ?? protocolStake[0]) : 0n;
 
     // Calculate derived values
     const HALVING_STEP = ethers.parseEther('5000000'); // 5M LIQ
@@ -96,12 +105,20 @@ export async function GET() {
       liqMarketCap: liqSupplyFloat * liqPrice
     };
     
-    // Primary TVL is the value of AERO locked in the vault
-    const totalTVL = tvlComponents.aeroLocked;
+    // Primary TVL is the value of the AERO actually backing iAERO (the Aero stake); the vault's deposit counter
+    // (totalAEROLocked) is kept below for reference.
+    const backingFloat = parseFloat(ethers.formatEther(backingAero));
+    const totalTVL = backingAero > 0n ? backingFloat * aeroPrice : tvlComponents.aeroLocked;
 
     // Format response
     const stats = {
       timestamp: now,
+      backing: {
+        aeroStakeId: PROTOCOL_AERO_STAKE_ID.toString(),
+        aeroStaked: ethers.formatEther(backingAero),
+        isPermanent: protocolStake ? Boolean(protocolStake.isPermanent ?? protocolStake[2]) : null,
+        votingEscrow: CONTRACTS.aeroVotingEscrow,
+      },
       vault: {
         totalAEROLocked: ethers.formatEther(totalAEROLocked),
         totalIAEROMinted: ethers.formatEther(totalIAEROMinted),
