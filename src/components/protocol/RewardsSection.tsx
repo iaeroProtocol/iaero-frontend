@@ -12,7 +12,7 @@ import { useProtocolPublicClient, useProtocolWriteContract } from '@/lib/protoco
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { parseAbi, encodeAbiParameters, parseUnits, formatUnits } from 'viem';
+import { parseAbi, encodeAbiParameters, parseUnits, formatUnits, concatHex, parseEventLogs } from 'viem';
 import type { PublicClient, Transport, Chain, Address } from 'viem';
 
 import {
@@ -52,21 +52,26 @@ const REGISTRY_ADDRESS = "0xd3e32B22Da6Bf601A5917ECd344a7Ec46BCA072c" as Address
 
 // Token and Aero configuration
 // Aero (2026-10-22): liquidity left Aerodrome, so the iAERO sweep now swaps rewards to USDC through 0x and then
-// USDC -> AERO -> iAERO through Aero's Metarouter (AERO/USDC and AERO/iAERO volatile pools). Flip to false to
-// pause it again from one place: it gates every path to iAERO (Sweep to iAERO, Sweep ALL to iAERO & Stake,
-// Compound & Stake) and the USDC -> iAERO step itself.
-// Paused 2026-10-22: the AERO/iAERO v2 pool is too thin for the whole sweep (no price-impact limit yet).
-const IAERO_SWEEP_ENABLED = false;
+// USDC -> AERO -> iAERO through Aero's Metarouter (AERO/USDC volatile pool, then the AERO/iAERO CL pool). The
+// iAERO step is refused above IAERO_STEP_MAX_IMPACT_BPS against the pools' mid price, leaving the USDC in the
+// wallet. Flip to false to pause it again from one place: it gates every path to iAERO (Sweep to iAERO, Sweep ALL
+// to iAERO & Stake, Compound & Stake) and the USDC -> iAERO step itself.
+const IAERO_SWEEP_ENABLED = true;
 const IAERO_SWEEP_PAUSED_MSG = 'Sweeping to iAERO is paused while iAERO liquidity moves to Aero. Sweep to USDC instead.';
 const AERO_METAROUTER = "0x0fEf9e88A7b76BCDBF451780C6774FE32965Ee98" as Address;
-const AERO_USDC_POOL = "0xF634058dC94e6BF8e828E27621320C423bC8B18E" as Address;
-const AERO_IAERO_POOL = "0x72Decb30DFE4F6Cf7Db3ba1D58411dDda5ed903b" as Address;
-/** Metarouter.execute and command V2_SWAP_EXACT_IN with its input, IMetarouter.SwapExactInParams. */
+const AERO_METAQUOTER = "0x1dDfeC5058180C207F55BB77D95AcDd0d8227868" as Address; // Aero's own quoter (Metaquoter)
+const AERO_USDC_POOL = "0xF634058dC94e6BF8e828E27621320C423bC8B18E" as Address; // v2 volatile
+// CL, tick spacing 100. The thin AERO/iAERO v2 pool (0x72De…903b) is no longer used: 12% lost at $5k on a fork.
+const AERO_IAERO_CL_POOL = "0x361D728c97E591Ef47A68CAe2DC5C8ef475608EB" as Address;
+/** The most the USDC -> iAERO step may lose against the pools' mid price, fees included (pool fees alone are ~1.3%). */
+const IAERO_STEP_MAX_IMPACT_BPS = 200n;
+/** Metarouter.execute and its swap commands (Commands.sol), whose input is IMetarouter.SwapExactInParams. */
 const METAROUTER_ABI = [{
   name: 'execute', type: 'function', stateMutability: 'payable',
   inputs: [{ name: 'commands', type: 'bytes' }, { name: 'inputs', type: 'bytes[]' }, { name: 'deadline', type: 'uint256' }],
   outputs: [],
 }] as const;
+const CL_SWAP_EXACT_IN = '0x00';
 const V2_SWAP_EXACT_IN = '0x08';
 const SWAP_EXACT_IN_PARAMS = [{
   type: 'tuple', components: [
@@ -75,7 +80,15 @@ const SWAP_EXACT_IN_PARAMS = [{
     { name: 'payerIsUser', type: 'bool' }, { name: 'minAmountOut', type: 'uint256' }, { name: 'recipient', type: 'address' },
   ],
 }] as const;
-const AERO_POOL_ABI = parseAbi(['function getAmountOut(uint256 amountIn, address tokenIn) view returns (uint256)']);
+/** SwapExactInParams.amountIn modes (IMetarouter.SpendMode): an exact amount, or millionths of the router's balance. */
+const SPEND_AMOUNT = 0;
+const SPEND_PIPS = 1;
+const ALL_PIPS = 1_000_000n;
+const AERO_V2_POOL_ABI = parseAbi(['function getReserves() view returns (uint256 reserve0, uint256 reserve1, uint256 blockTimestampLast)']);
+const AERO_CL_POOL_ABI = parseAbi(['function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, bool unlocked)']);
+// Not a view on chain (it quotes by reverting inside the pool callback), so it is called with eth_call via simulateContract.
+const METAQUOTER_ABI = parseAbi(['function quoteExactInput(address[] pools, address tokenIn, uint256 amountIn) returns (uint256 amountOut, uint160[] sqrtPriceX96AfterList, uint32[] initializedTicksCrossedList)']);
+const TRANSFER_EVENT_ABI = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 
 const AERO_ADDR = "0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee" as Address; // Aero AERO
 const IAERO_ADDR = "0x81034Fb34009115F215f5d5F564AAc9FfA46a1Dc" as Address;
@@ -346,6 +359,12 @@ interface PostTradeData {
   didStake?: boolean;
   stakedAmount?: string;
   userCancelled?: boolean;
+}
+
+/** What the USDC -> iAERO step's Aero swap delivered: iAERO (18 decimals) and its USD value at the pools' mid price. */
+interface IaeroSwapResult {
+  received?: bigint;
+  usd?: number;
 }
 
 interface JsonRewardItem {
@@ -2834,33 +2853,39 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         return;
       }
       
-      // If iAERO mode, do the AERO -> iAERO step
+      // If iAERO mode, do the USDC -> iAERO step
       let didStake = false;
       let stakedAmount: string | undefined;
+      const iaeroSwap: IaeroSwapResult = {};
       
       if (mode === 'iAERO') {
         try {
-          const stakeResult = await performUsdcToIaeroStep(balanceBefore);
+          const stakeResult = await performUsdcToIaeroStep(balanceBefore, iaeroSwap);
           didStake = stakeResult.success;
           stakedAmount = stakeResult.stakedAmount;
+          if (stakeResult.skipped) showToast(stakeResult.skipped, 'warning');
         } catch (stakeError: any) {
           console.error('USDC to iAERO step failed:', stakeError);
           // Don't fail the whole operation - swaps succeeded, staking failed
-          showToast('Swaps succeeded but the iAERO step failed. Your USDC/iAERO is in your wallet.', 'warning');
+          showToast(iaeroSwap.received !== undefined
+            ? 'Swapped to iAERO, but staking failed. Your iAERO is in your wallet.'
+            : 'Swaps succeeded but the iAERO step failed. Your USDC/iAERO is in your wallet.', 'warning');
         }
       }
       
-      // Show post-trade modal with calculated totals
+      // Show post-trade modal with calculated totals: the iAERO the Aero swap delivered once it has landed, else the
+      // USDC the 0x swaps produced
+      const iaeroReceived = iaeroSwap.received;
       setPostTradeData({
         mode,
-        outputToken: mode === 'iAERO' 
-          ? (didStake ? 'Staked iAERO' : 'USDC') 
-          : 'USDC',
-        outputDecimals,
+        outputToken: iaeroReceived !== undefined ? (didStake ? 'iAERO (staked)' : 'iAERO') : 'USDC',
+        outputDecimals: iaeroReceived !== undefined ? 18 : outputDecimals,
         totalInputUsd: totalInputUsdFromResults,
-        totalOutputUsd: totalOutputUsdFromResults,
-        totalReceived: totalOutputFromResults.toString(),
-        totalReceivedFormatted: totalOutputFromResults.toFixed(4),
+        totalOutputUsd: iaeroReceived !== undefined ? (iaeroSwap.usd ?? 0) : totalOutputUsdFromResults,
+        totalReceived: iaeroReceived !== undefined ? formatUnits(iaeroReceived, 18) : totalOutputFromResults.toString(),
+        totalReceivedFormatted: iaeroReceived !== undefined
+          ? Number(formatUnits(iaeroReceived, 18)).toFixed(4)
+          : totalOutputFromResults.toFixed(4),
         successCount: totalSuccess,
         failedCount: totalFailed,
         skippedCount: skippedHighImpact.length,
@@ -2887,12 +2912,18 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
   };
 
   /**
-   * USDC -> iAERO through Aero's Metarouter (AERO/USDC, then AERO/iAERO), then stake.
+   * USDC -> iAERO through Aero's Metarouter (AERO/USDC v2, then the AERO/iAERO CL pool), then stake.
    * Converts only the USDC this sweep produced: the wallet balance minus `usdcBefore`.
-   * Returns success status and staked amount.
+   * Refused, leaving the USDC in the wallet, when the swap would lose more than IAERO_STEP_MAX_IMPACT_BPS against the
+   * pools' mid price: `skipped` then holds the message for the user.
+   * Returns success status and staked amount. Once the swap lands, `swapped` holds the iAERO it delivered and that
+   * iAERO's value at the mid price, so the caller can report it even if staking then fails.
    */
-  const performUsdcToIaeroStep = async (usdcBefore: bigint): Promise<{ success: boolean; stakedAmount?: string }> => {
-    if (!IAERO_SWEEP_ENABLED) return { success: false };
+  const performUsdcToIaeroStep = async (
+    usdcBefore: bigint,
+    swapped: IaeroSwapResult,
+  ): Promise<{ success: boolean; stakedAmount?: string; skipped?: string }> => {
+    if (!IAERO_SWEEP_ENABLED || !publicClient) return { success: false };
     console.log("\n🔄 Step 2: Waiting for USDC balance update...");
     setProgressStep("Waiting for blockchain to index...");
 
@@ -2914,26 +2945,49 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     console.log("🔄 Step 3: Swapping USDC -> AERO -> iAERO via Aero Metarouter...");
     setProgressStep("Step 2/3: Aero swap (USDC->iAERO)...");
 
-    // Quote both hops on the pools themselves. Fail closed without a usable quote: iAERO trades near 0.8 AERO and
-    // AERO near $1, so under 0.2 iAERO per USDC means a pool cannot be used (e.g. drained) and must not be swapped into.
+    // Price the whole amount at the pools' mid price (AERO/USDC reserves, AERO/iAERO CL slot0) and quote the same two
+    // pools with Aero's Metaquoter. Pools sort their tokens by address (AERO is token0 in both, checked on chain);
+    // raw-unit ratios carry the decimals (USDC 6, AERO and iAERO 18), and sqrtPriceX96^2 / 2^192 is token1 per token0.
+    // Fail closed without a usable quote: iAERO trades near 0.8 AERO and AERO near $1, so under 0.2 iAERO per USDC
+    // means a pool cannot be used (e.g. drained) and must not be swapped into.
+    let iaeroAtMid = 0n;
     let iaeroQuoted = 0n;
     try {
-      const aeroQuoted = await publicClient?.readContract({
-        address: AERO_USDC_POOL, abi: AERO_POOL_ABI, functionName: 'getAmountOut', args: [usdcGained, USDC_ADDR],
-      }) as bigint;
-      iaeroQuoted = await publicClient?.readContract({
-        address: AERO_IAERO_POOL, abi: AERO_POOL_ABI, functionName: 'getAmountOut', args: [aeroQuoted, AERO_ADDR],
-      }) as bigint;
+      const [[reserve0, reserve1], [sqrtPriceX96]] = await Promise.all([
+        publicClient.readContract({ address: AERO_USDC_POOL, abi: AERO_V2_POOL_ABI, functionName: 'getReserves' }),
+        publicClient.readContract({ address: AERO_IAERO_CL_POOL, abi: AERO_CL_POOL_ABI, functionName: 'slot0' }),
+      ]);
+      const [aeroReserve, usdcReserve] = BigInt(AERO_ADDR) < BigInt(USDC_ADDR) ? [reserve0, reserve1] : [reserve1, reserve0];
+      const aeroAtMid = (usdcGained * aeroReserve) / usdcReserve;
+      const priceX192 = sqrtPriceX96 * sqrtPriceX96;
+      iaeroAtMid = BigInt(AERO_ADDR) < BigInt(IAERO_ADDR) ? (aeroAtMid * priceX192) >> 192n : (aeroAtMid << 192n) / priceX192;
+      const { result } = await publicClient.simulateContract({
+        address: AERO_METAQUOTER, abi: METAQUOTER_ABI, functionName: 'quoteExactInput',
+        args: [[AERO_USDC_POOL, AERO_IAERO_CL_POOL], USDC_ADDR, usdcGained], account: account as Address,
+      });
+      iaeroQuoted = result[0];
     } catch (quoteErr) {
       console.error('  ❌ USDC->iAERO quote failed; failing closed:', quoteErr);
     }
-    if (!iaeroQuoted || iaeroQuoted * 5n * 1_000_000n < usdcGained * 10n ** 18n) {
+    if (!iaeroQuoted || !iaeroAtMid || iaeroQuoted * 5n * 1_000_000n < usdcGained * 10n ** 18n) {
       throw new Error(
         'USDC->iAERO swap aborted: no reliable Aero price quote. Your USDC is safe in your wallet; ' +
         'swap it on Aero or sweep again later.'
       );
     }
-    const amountOutMin = (iaeroQuoted * 9500n) / 10000n;
+    // minOut is the mid price less the cap, so fees, impact and any price move before the swap lands lose at most the
+    // cap. Refuse up front when the quote already misses it: the USDC stays in the wallet and nothing is sent.
+    const amountOutMin = (iaeroAtMid * (10_000n - IAERO_STEP_MAX_IMPACT_BPS)) / 10_000n;
+    const impactPct = Number(((iaeroAtMid - iaeroQuoted) * 10_000n) / iaeroAtMid) / 100;
+    console.log(`  📊 iAERO at mid: ${formatBigNumber(iaeroAtMid, 18, 4)}, quoted: ${formatBigNumber(iaeroQuoted, 18, 4)} (${impactPct.toFixed(2)}% impact incl. fees)`);
+    if (iaeroQuoted < amountOutMin) {
+      return {
+        success: false,
+        skipped: `Kept this sweep's ${formatBigNumber(usdcGained, USDC_DECIMALS, 2)} USDC in your wallet: swapping it to ` +
+          `iAERO now would lose ${impactPct.toFixed(1)}% to Aero pool fees and price impact ` +
+          `(limit ${Number(IAERO_STEP_MAX_IMPACT_BPS) / 100}%). Swap a smaller amount on Aero, or sweep again later.`,
+      };
+    }
 
     const currentAllowance = await publicClient?.readContract({
       address: USDC_ADDR, abi: ERC20_FULL_ABI, functionName: 'allowance', args: [account as Address, AERO_METAROUTER],
@@ -2951,22 +3005,37 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
     }) as bigint || 0n;
     console.log(`  📊 iAERO balance before swap: ${formatBigNumber(iAeroBalanceBefore, 18, 4)}`);
 
+    // One execute, two commands, the way Aero's own app chains a v2 hop into a CL hop: the v2 swap leaves its AERO in
+    // the router (recipient = Metarouter), then the CL swap spends all of it (Pips, router pays) and sends the iAERO to
+    // the user. minOut on the final leg bounds the whole route; AERO the CL leg leaves is returned to the user at close.
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200);
-    const swapInput = encodeAbiParameters(SWAP_EXACT_IN_PARAMS, [{
-      pools: [AERO_USDC_POOL, AERO_IAERO_POOL], tokenIn: USDC_ADDR, amountIn: { mode: 0, value: usdcGained },
-      payerIsUser: true, minAmountOut: amountOutMin, recipient: account as Address,
+    const usdcToAeroInput = encodeAbiParameters(SWAP_EXACT_IN_PARAMS, [{
+      pools: [AERO_USDC_POOL], tokenIn: USDC_ADDR, amountIn: { mode: SPEND_AMOUNT, value: usdcGained },
+      payerIsUser: true, minAmountOut: 0n, recipient: AERO_METAROUTER,
+    }]);
+    const aeroToIaeroInput = encodeAbiParameters(SWAP_EXACT_IN_PARAMS, [{
+      pools: [AERO_IAERO_CL_POOL], tokenIn: AERO_ADDR, amountIn: { mode: SPEND_PIPS, value: ALL_PIPS },
+      payerIsUser: false, minAmountOut: amountOutMin, recipient: account as Address,
     }]);
     const hash = await writeContractAsync({
       address: AERO_METAROUTER,
       abi: METAROUTER_ABI,
       functionName: 'execute',
-      args: [V2_SWAP_EXACT_IN, [swapInput], deadline],
+      args: [concatHex([V2_SWAP_EXACT_IN, CL_SWAP_EXACT_IN]), [usdcToAeroInput, aeroToIaeroInput], deadline],
       gas: 900_000n,
     });
 
     const swapReceipt = await publicClient?.waitForTransactionReceipt({ hash });
     if (swapReceipt && swapReceipt.status !== 'success') throw new Error('USDC->iAERO swap reverted; your USDC is in your wallet.');
     console.log("  ✅ Aero swap confirmed");
+
+    // The iAERO this swap delivered, from its own Transfer logs (the wallet balance below can include other iAERO),
+    // valued at the mid price it was checked against.
+    swapped.received = parseEventLogs({ abi: TRANSFER_EVENT_ABI, eventName: 'Transfer', logs: swapReceipt?.logs ?? [] })
+      .filter(l => l.address.toLowerCase() === IAERO_ADDR.toLowerCase() && l.args.to.toLowerCase() === account?.toLowerCase())
+      .reduce((sum, l) => sum + l.args.value, 0n);
+    swapped.usd = Number(formatUnits((swapped.received * usdcGained) / iaeroAtMid, USDC_DECIMALS));
+    console.log(`  📊 iAERO received: ${formatBigNumber(swapped.received, 18, 4)} (~$${swapped.usd.toFixed(2)} at mid)`);
     
     // Step 4: Stake iAERO to Staking Distributor
     console.log("🔄 Step 4: Staking iAERO to Staking Distributor...");
@@ -3145,8 +3214,9 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         return;
       }
       
-      // 3. Build quote preview (swap to AERO, then Aerodrome to iAERO)
-      const preview = await buildQuotePreview(validTokens, AERO_ADDR, priceMap, 'iAERO');
+      // 3. Build quote preview: rewards -> USDC through 0x, exactly what execution swaps to (the USDC then goes
+      // through Aero to iAERO)
+      const preview = await buildQuotePreview(validTokens, USDC_ADDR, priceMap, 'iAERO');
       
       if (!preview || preview.quotes.length === 0) {
         showToast("Failed to get quotes for any tokens", "error");
@@ -3228,8 +3298,9 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
         return;
       }
       
-      // 2. Build quote preview (swap to AERO first, then Aerodrome to iAERO)
-      const preview = await buildQuotePreview(validTokens, AERO_ADDR, priceMap, 'iAERO');
+      // 2. Build quote preview: rewards -> USDC through 0x, exactly what execution swaps to (the USDC then goes
+      // through Aero to iAERO)
+      const preview = await buildQuotePreview(validTokens, USDC_ADDR, priceMap, 'iAERO');
       
       if (!preview || preview.quotes.length === 0) {
         showToast("Failed to get quotes for any tokens", "error");
@@ -3927,6 +3998,11 @@ export default function RewardsSection({ showToast }: RewardsSectionProps) {
                   <p className="text-sm text-slate-400">
                     Swapping to {quotePreviewData._mode === 'iAERO' ? 'USDC → iAERO (staked)' : 'USDC'}
                   </p>
+                  {quotePreviewData._mode === 'iAERO' && (
+                    <p className="text-xs text-slate-500">
+                      Amounts below are USDC. The USDC → iAERO swap on Aero is skipped if it would lose more than {Number(IAERO_STEP_MAX_IMPACT_BPS) / 100}% to fees and price impact; the USDC then stays in your wallet.
+                    </p>
+                  )}
                 </div>
                 <Button variant="ghost" size="sm" onClick={() => { setShowQuotePreview(false); setQuotePreviewData(null); }}>
                   <X className="w-5 h-5" />
