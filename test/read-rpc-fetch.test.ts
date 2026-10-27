@@ -3,6 +3,12 @@ import {createReadRpcFetch} from '../server/read-rpc-fetch';
 const call=(method='eth_getCode')=>({method:'POST',body:JSON.stringify({jsonrpc:'2.0',id:1,method,params:[]})});
 function fixture(replies:Response[]=[]){let time=0;const starts:{url:string;at:number}[]=[],fetcher=vi.fn(async(input:any,init:any)=>{starts.push({url:String(input),at:time});expect(init.redirect).toBe('manual');return replies.shift()??Response.json({jsonrpc:'2.0',id:1,result:'0x'});});const api=createReadRpcFetch({fetchImpl:fetcher as any,now:()=>time,sleep:async ms=>{time+=ms;},states:new Map()});return {api,fetcher,starts};}
 describe('read-only provider pacing and retries',()=>{
+ it('shares only numeric start reservations between independent request queues',async()=>{
+  let time=0,release!:(r:Response)=>void,started!:()=>void;const firstStarted=new Promise<void>(r=>started=r),held=new Promise<Response>(r=>release=r),starts:number[]=[],startTimes=new Map<string,number>();
+  const common={now:()=>time,sleep:async(ms:number)=>{time+=ms;},startTimes},url='https://base-mainnet.g.alchemy.com/v2/request-budget-test';
+  const first=createReadRpcFetch({...common,states:new Map(),fetchImpl:(async()=>{starts.push(time);started();return held;}) as typeof fetch}),second=createReadRpcFetch({...common,states:new Map(),fetchImpl:(async()=>{starts.push(time);return Response.json({result:'0x2'});}) as typeof fetch});
+  const pending=first(url,call());await firstStarted;expect((await second(url,call())).status).toBe(200);expect(starts).toEqual([0,200]);release(Response.json({result:'0x1'}));expect((await pending).status).toBe(200);
+ });
  it('shares the Infura key budget across Base and Ethereum clients',async()=>{const f=fixture();await Promise.all([f.api('https://base-mainnet.infura.io/v3/private-key',call()),f.api('https://mainnet.infura.io/v3/private-key',call()),f.api('https://base-mainnet.infura.io/v3/private-key',call())]);expect(f.starts.map(s=>s.at)).toEqual([0,500,1000]);});
  it('paces expensive log reads separately from ordinary methods',async()=>{const f=fixture();await f.api('https://base-mainnet.infura.io/v3/private-key',call('eth_getLogs'));await f.api('https://base-mainnet.infura.io/v3/private-key',call());expect(f.starts.map(s=>s.at)).toEqual([0,1600]);});
  it('honours Retry-After before recovering a 429',async()=>{const f=fixture([new Response('limited',{status:429,headers:{'retry-after':'2'}})]);expect((await f.api('https://base-mainnet.infura.io/v3/private-key',call())).status).toBe(200);expect(f.starts.map(s=>s.at)).toEqual([0,2000]);});

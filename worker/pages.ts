@@ -21,7 +21,7 @@ export function pagesCaller(request:Request){
  return rateKey(ip);
 }
 export function createPagesHandler(options:{readApi?:ReturnType<typeof createAppReadApi>;holdings?:typeof holdings;history?:typeof history.fetch;legacyFetch?:typeof fetch}={}){
- const limits=new Map<string,{until:number;count:number}>(),services=new WeakMap<object,ReturnType<typeof createAppReadApi>>();
+ const limits=new Map<string,{until:number;count:number}>();
  return async(request:Request,env:PagesEnv)=>{
   const url=new URL(request.url);if(!url.pathname.startsWith('/api/')){
    if(url.pathname.endsWith('.map')||url.pathname.includes('/.'))return new Response('Not found',{status:404});
@@ -53,7 +53,9 @@ export function createPagesHandler(options:{readApi?:ReturnType<typeof createApp
     if(!upstream.headers.get('content-type')?.includes('application/json'))return appJson({error:'The previous API is temporarily unavailable.'},503);
     reply=new Response(upstream.body,{status:upstream.status,headers:{'content-type':'application/json','cache-control':upstream.headers.get('cache-control')??'no-store'}});
    }else if(readApiPaths.has(url.pathname)){
-    let service=options.readApi??services.get(env);if(!service){service=createAppReadApi(env,{bootstrapCache:createBootstrapCache(env.YIELD_DB)});services.set(env,service);}reply=await service(request);
+    // Worker invocations must not share pending I/O, queues or fetch promises.
+    // The D1 cache shares completed public verification data across requests.
+    const service=options.readApi??createAppReadApi(env,{bootstrapCache:createBootstrapCache(env.YIELD_DB)});reply=await service(request);
    }else return appJson({error:'Not found.'},404);
    const headers=new Headers(reply.headers);headers.set('x-content-type-options','nosniff');headers.set('x-frame-options','DENY');headers.set('referrer-policy','strict-origin-when-cross-origin');
    return new Response(request.method==='HEAD'?null:reply.body,{status:reply.status,headers});
