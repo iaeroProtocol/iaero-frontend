@@ -21,7 +21,11 @@ export function publicError(error:unknown){
   return 'The contract read or wallet request could not complete. Check the network, balances and pending transaction notice before retrying.';
 }
 export async function fetchBootstrap():Promise<Bootstrap>{
-  const response=await fetch('/api/contracts',{cache:'no-store'}),data=await response.json();
+  const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),25000);
+  let response:Response,data:any;
+  try{response=await fetch('/api/contracts',{cache:'no-store',signal:abort.signal});data=await response.json();}
+  catch(error){if(abort.signal.aborted)throw Error('Base verification timed out. Refresh to retry.');throw error;}
+  finally{clearTimeout(timer);}
   if(!response.ok||data.registry?.chainId!==8453||!acceptedReadCoverage(data.snapshot?.independentProviders,data.readCoverage))throw Error('Verified Base contract data is unavailable. Refresh to retry.');
   for(const address of Object.values(data.registry.legacy))if(typeof address!=='string'||!isAddress(address))throw Error('Invalid Base contract registry.');
   return data;

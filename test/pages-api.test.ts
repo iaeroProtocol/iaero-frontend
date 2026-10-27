@@ -50,3 +50,8 @@ it('keeps an unrelated request responsive while another invocation has pending I
  try{first=handler(request('/api/contracts'),sameEnv);second=handler(request('/api/contracts'),sameEnv);const independent=await Promise.race([second.then(r=>r.json()),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('The second request inherited the first request I/O')),1000);})]);expect(independent).toEqual({instance:2});}
  finally{clearTimeout(timer);release();await Promise.all([first,second]);factory.mockRestore();}
 });
+
+it('keeps verification alive in its own request context until the cache lease can finish',async()=>{
+ let release!:(value:unknown)=>void;const held=new Promise(r=>release=r),jobs:Promise<unknown>[]=[],f=fixture({inspect:async()=>held,waitUntil:(task:Promise<unknown>)=>jobs.push(task)}),reply=f.api(request('/api/contracts'));
+ expect(jobs).toHaveLength(1);release(boot);expect((await reply).status).toBe(200);await expect(jobs[0]).resolves.toBeDefined();
+});

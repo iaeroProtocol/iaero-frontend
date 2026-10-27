@@ -18,15 +18,19 @@ export const readApiPaths=new Set(['/api/base','/api/contracts','/api/rewards/va
 const rpcStartTimes=new Map<string,number>();
 
 // Fetch + injected secret bindings only: no filesystem, SQLite or signing keys.
-export function createAppReadApi(env:AppReadEnv,options:{fetchImpl?:typeof fetch;inspect?:()=>Promise<any>;now?:()=>number;bootstrapCache?:ReturnType<typeof createBootstrapCache>}={}){
+export function createAppReadApi(env:AppReadEnv,options:{fetchImpl?:typeof fetch;inspect?:()=>Promise<any>;now?:()=>number;bootstrapCache?:ReturnType<typeof createBootstrapCache>;waitUntil?:(task:Promise<unknown>)=>void}={}){
  const fetcher=options.fetchImpl??fetch,now=options.now??Date.now,urls=configuredBaseReads(env.BASE_READ_RPC_URLS??'');
- const rpcFetch=createReadRpcFetch({fetchImpl:fetcher,states:new Map(),startTimes:rpcStartTimes}),sharedKey=options.bootstrapCache?bootstrapCacheKey({urls,registry,deployment,tokenFilter}):undefined;
+ const rpcFetch=createReadRpcFetch({fetchImpl:fetcher,states:new Map(),startTimes:rpcStartTimes,maxQueueMs:15000}),sharedKey=options.bootstrapCache?bootstrapCacheKey({urls,registry,deployment,tokenFilter}):undefined;
  let active=0;const queue:(()=>void)[]=[];
  async function bounded<T>(run:()=>Promise<T>){if(active>=6){if(queue.length>=100)throw Error('Read service busy');await new Promise<void>(r=>queue.push(r));}else active++;try{return await run();}finally{const next=queue.shift();if(next)next();else active--;}}
  let boot:{expiresAt:number;value:any}|undefined,pending:Promise<any>|undefined;
  async function bootstrap(){
   if(boot&&now()<boot.expiresAt)return boot.value;
-  pending??=(async()=>{const produce=async()=>{const clients=urls.map(url=>createPublicClient({chain:base,transport:http(url,{timeout:20000,retryCount:0,fetchFn:rpcFetch}),ccipRead:false}));const value=options.inspect?await options.inspect():await inspectBootstrap(clients as any,bounded);return {...value,tokenFilter};};const result=options.bootstrapCache?await options.bootstrapCache.run(await sharedKey!,produce):await produce(),verified=Date.parse(result.verifiedAt);boot={expiresAt:(Number.isFinite(verified)?Math.min(now(),verified):now())+bootstrapLifetime(result),value:result};return result;})().finally(()=>{pending=undefined;});return pending;
+  if(!pending){
+   pending=(async()=>{const produce=async()=>{const clients=urls.map(url=>createPublicClient({chain:base,transport:http(url,{timeout:20000,retryCount:0,fetchFn:rpcFetch}),ccipRead:false}));const value=options.inspect?await options.inspect():await inspectBootstrap(clients as any,bounded);return {...value,tokenFilter};};const result=options.bootstrapCache?await options.bootstrapCache.run(await sharedKey!,produce):await produce(),verified=Date.parse(result.verifiedAt);boot={expiresAt:(Number.isFinite(verified)?Math.min(now(),verified):now())+bootstrapLifetime(result),value:result};return result;})().finally(()=>{pending=undefined;});
+   // Finish the shared proof and release its lease if this visitor navigates away.
+   options.waitUntil?.(pending.catch(()=>{}));
+  }return pending;
  }
  async function quote(token:Address,amount:bigint,slippage=100){
   if(!env.ZERO_EX_API_KEY)throw new SweepQuoteError('QUOTE_AUTHENTICATION',503,'The quote service authentication needs attention.');

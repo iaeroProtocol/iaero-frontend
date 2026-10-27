@@ -4,7 +4,7 @@ import {createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import registry from '../config/base.registry.json';
 import {canonicalReadRequest} from '../server/base-rpc';
-import {executeLiveAction,legacyConfig,readAccount,publicError,publicBaseClient,type BaseClient} from '../src/live/client';
+import {executeLiveAction,legacyConfig,readAccount,fetchBootstrap,publicError,publicBaseClient,type BaseClient} from '../src/live/client';
 import {initialLiveState,liveReason,type Bootstrap,type LiveState} from '../src/live/types';
 import {pendingTransaction} from '../src/protocol/pendingTransaction';
 import {UNIT,type Action} from '../src/domain';
@@ -138,4 +138,9 @@ describe('reviewed client identity',()=>{
     const source=JSON.parse(await readFile(new URL('../REVIEWED_CLIENT_SOURCE.json',import.meta.url),'utf8'));
     for(const entry of source.clientFilesUnmodified){const bytes=await readFile(new URL('../'+entry.file,import.meta.url));expect(createHash('sha256').update(bytes).digest('hex')).toBe(entry.sha256);}
   });
+});
+
+it('releases an initial contract read that never responds instead of leaving the wallet connecting forever',async()=>{
+ vi.useFakeTimers();vi.stubGlobal('fetch',vi.fn((_url,options)=>new Promise((_,reject)=>options.signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError'))))));
+ try{const pending=fetchBootstrap(),failure=expect(pending).rejects.toThrow('verification timed out');await vi.advanceTimersByTimeAsync(25000);await failure;expect(vi.getTimerCount()).toBe(0);}finally{vi.useRealTimers();}
 });

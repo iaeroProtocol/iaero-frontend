@@ -22,7 +22,7 @@ export function pagesCaller(request:Request){
 }
 export function createPagesHandler(options:{readApi?:ReturnType<typeof createAppReadApi>;holdings?:typeof holdings;history?:typeof history.fetch;legacyFetch?:typeof fetch}={}){
  const limits=new Map<string,{until:number;count:number}>();
- return async(request:Request,env:PagesEnv)=>{
+ return async(request:Request,env:PagesEnv,ctx?:{waitUntil:(task:Promise<unknown>)=>void})=>{
   const url=new URL(request.url);if(!url.pathname.startsWith('/api/')){
    if(url.pathname.endsWith('.map')||url.pathname.includes('/.'))return new Response('Not found',{status:404});
    return env.ASSETS.fetch(request);
@@ -55,7 +55,7 @@ export function createPagesHandler(options:{readApi?:ReturnType<typeof createApp
    }else if(readApiPaths.has(url.pathname)){
     // Worker invocations must not share pending I/O, queues or fetch promises.
     // The D1 cache shares completed public verification data across requests.
-    const service=options.readApi??createAppReadApi(env,{bootstrapCache:createBootstrapCache(env.YIELD_DB)});reply=await service(request);
+    const service=options.readApi??createAppReadApi(env,{bootstrapCache:createBootstrapCache(env.YIELD_DB),waitUntil:ctx?task=>ctx.waitUntil(task):undefined});reply=await service(request);
    }else return appJson({error:'Not found.'},404);
    const headers=new Headers(reply.headers);headers.set('x-content-type-options','nosniff');headers.set('x-frame-options','DENY');headers.set('referrer-policy','strict-origin-when-cross-origin');
    return new Response(request.method==='HEAD'?null:reply.body,{status:reply.status,headers});
