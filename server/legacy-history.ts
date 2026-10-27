@@ -1,0 +1,8 @@
+import {DatabaseSync} from 'node:sqlite';
+import {mkdir,chmod} from 'node:fs/promises';
+import {resolve} from 'node:path';
+import {indexLegacy,type LegacyIndex} from './legacy-indexer.ts';
+const directory=resolve('.local-data'),path=resolve(directory,'legacy-history.sqlite');let active:Promise<LegacyIndex>|undefined;
+async function db(){await mkdir(directory,{recursive:true,mode:0o700});const d=new DatabaseSync(path);d.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS legacy_state(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL,data TEXT NOT NULL) STRICT');await chmod(path,0o600);return d;}
+export async function legacyHistory(){const d=await db();try{const row=d.prepare('SELECT data FROM legacy_state WHERE id=1').get();return row?JSON.parse(String(row.data)) as LegacyIndex:undefined;}finally{d.close();}}
+export async function syncLegacyHistory(urls:string[]){return active??= (async()=>{const d=await db();try{const before=d.prepare('SELECT revision,data FROM legacy_state WHERE id=1').get(),state=await indexLegacy(urls,before?JSON.parse(String(before.data)):undefined,Math.min(1200,Math.max(120,Number(process.env.LOCAL_LEGACY_SCAN_REQUESTS)||120)));d.exec('BEGIN IMMEDIATE');try{const current=d.prepare('SELECT revision FROM legacy_state WHERE id=1').get();if(Number(current?.revision??0)!==Number(before?.revision??0))throw Error('legacy_concurrent_update');d.prepare('INSERT INTO legacy_state VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,data=excluded.data').run(Number(before?.revision??0)+1,JSON.stringify(state));d.exec('COMMIT');}catch(e){d.exec('ROLLBACK');throw e;}return state;}finally{d.close();}})().finally(()=>{active=undefined;});}
