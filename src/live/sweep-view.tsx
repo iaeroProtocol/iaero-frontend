@@ -1,0 +1,150 @@
+import {useEffect,useRef,useState} from 'react';
+import {decodeEventLog,formatUnits,isAddress,parseAbi,type Address} from 'viem';
+import {Button,Dialog,Info,Pill} from '../components';
+import {Icon,TokenIcon} from '../icons';
+import {parseAmount} from '../domain';
+import {usePreview} from '../store';
+import {publicBaseClient,publicError} from './client';
+import {claimAction,groupRewards} from './rewards';
+import {RewardSummary} from './reward-list';
+import {ExactAmount} from './exact-amount';
+import {priceRewards,valueText,type RewardValuation} from './reward-value';
+import {buildSweepPreview,scanSweepWallet,orderSweepTokens,SWEEP_BATCH_LIMIT,type SweepMode,type SweepPreview,type SweepResult,type SweepToken,type SweepSkipped,type HiddenSweepToken} from './sweep';
+
+export type SweepIntent={mode:SweepMode;claimFirst:boolean};
+const CLAIM_EVENT=parseAbi(['event RewardClaimed(address indexed user,address indexed token,uint256 indexed epochId,uint256 amount)']);
+const short=(a:string)=>a.slice(0,6)+'…'+a.slice(-4);
+const units=(value:bigint,decimals:number|null)=>decimals===null?value.toString():formatUnits(value,decimals);
+
+export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>void}){
+  const s=usePreview(),l=s.live!,boot=l.boot!,[client]=useState(publicBaseClient);
+  const [mode,setMode]=useState<SweepMode>(intent.mode),[phase,setPhase]=useState<'claim'|'claiming'|'scanning'|'select'|'quoting'|'review'|'running'|'done'>(intent.claimFirst?'claim':'scanning');
+  const [tokens,setTokens]=useState<SweepToken[]>([]),[hidden,setHidden]=useState<HiddenSweepToken[]>([]),[selected,setSelected]=useState<Set<string>>(new Set()),[amounts,setAmounts]=useState<Record<string,string>>({}),[notices,setNotices]=useState<string[]>([]);
+  const [extra,setExtra]=useState(l.customToken),[slippage,setSlippage]=useState(100),[preview,setPreview]=useState<SweepPreview>(),[result,setResult]=useState<SweepResult>(),[error,setError]=useState(''),[message,setMessage]=useState('');
+  const lock=useRef(false),stop=useRef(false),alive=useRef(true),scanTicket=useRef(0),claimedUsdc=useRef(0n),claimNotices=useRef<string[]>([]);
+  const [stopping,setStopping]=useState(false),[walletValues,setWalletValues]=useState<RewardValuation>(),[pricing,setPricing]=useState(false);
+  const walletValueKey=JSON.stringify([l.address?.toLowerCase(),l.chainId,tokens.map(t=>[t.token.toLowerCase(),t.balance.toString(),t.decimals])]);
+  const values=walletValues?.key===walletValueKey?walletValues.values:{};
+  const orderedTokens=orderSweepTokens(tokens,values);
+  useEffect(()=>{
+    const controller=new AbortController();setWalletValues(undefined);setPricing(!!tokens.length);
+    if(tokens.length){
+      // Display-only wallet balances reuse the valuation reader; these synthetic
+      // rows are never passed to a claim or transaction builder.
+      const rows=tokens.map(t=>({token:t.token,symbol:t.symbol,decimals:t.decimals,amount:t.balance,epoch:0n}));
+      void priceRewards(walletValueKey,rows,boot.registry.legacy.USDC,value=>{
+        if(controller.signal.aborted)return;
+        if(!value.loading){setWalletValues(value);setPricing(false);}
+      },controller.signal).catch(()=>{if(!controller.signal.aborted)setPricing(false);});
+    }
+    return()=>controller.abort();
+  },[tokens,walletValueKey,boot.registry.legacy.USDC]);
+  const busy=phase==='claiming'||phase==='running',reading=phase==='scanning'||phase==='quoting';
+  const walletBlocked=l.chainId!==8453||!l.address||!!l.pending;
+  useEffect(()=>{alive.current=true;return()=>{alive.current=false;scanTicket.current++;stop.current=true;};},[]);
+  const scan=async()=>{
+    const ticket=++scanTicket.current;setError('');setPhase('scanning');
+    try{
+      if(!l.address)throw Error('Connect your wallet first.');
+      if(extra&&!isAddress(extra))throw Error('Enter a valid additional token address.');
+      const data=await scanSweepWallet(client,boot,l.address,extra?[extra as Address]:[]);
+      if(!alive.current||ticket!==scanTicket.current)return;
+      setTokens(data.tokens);setHidden(data.hidden);setNotices([...claimNotices.current,...data.errors]);
+      const next=new Set<string>(),values:Record<string,string>={};
+      for(const token of data.tokens){
+        const key=token.token.toLowerCase(),usdc=key===boot.registry.legacy.USDC.toLowerCase(),amount=usdc&&claimedUsdc.current>0n?(claimedUsdc.current<token.balance?claimedUsdc.current:token.balance):token.balance;
+        values[key]=units(amount,token.decimals);
+        if(!usdc||mode!=='USDC'&&claimedUsdc.current>0n)next.add(key);
+      }
+      setAmounts(values);setSelected(next);setMessage(`Read ${data.tokenCount} token addresses. Only positive wallet balances are shown.`);setPhase('select');
+    }catch(e){if(alive.current&&ticket===scanTicket.current){setError(publicError(e));setPhase('select');}}
+  };
+  useEffect(()=>{if(!intent.claimFirst)void scan();},[]);
+  const claim=async()=>{
+    if(lock.current)return;lock.current=true;setError('');setPhase('claiming');
+    try{
+      const rows=l.rewards.slice(),execution=await s.execute(claimAction(rows,true));
+      if(!alive.current)return;
+      // [VERIFIED: EpochStakingDistributor.RewardClaimed] Automatically include
+      // only USDC paid by these exact claim receipts, never pre-existing USDC.
+      try{let received=0n;
+        for(const hash of execution?.hashes??[]){const receipt=await client.getTransactionReceipt({hash});if(receipt.status!=='success'||receipt.transactionHash.toLowerCase()!==hash.toLowerCase())throw Error('Receipt mismatch');
+          for(const log of receipt.logs){if(log.address.toLowerCase()!==boot.registry.legacy.epochDistributor.toLowerCase())continue;try{const event=decodeEventLog({abi:CLAIM_EVENT,data:log.data,topics:log.topics});if(event.args.user.toLowerCase()===l.address!.toLowerCase()&&event.args.token.toLowerCase()===boot.registry.legacy.USDC.toLowerCase()&&rows.some(r=>r.token.toLowerCase()===event.args.token.toLowerCase()&&r.epoch===event.args.epochId))received+=event.args.amount;}catch{}}
+        }claimedUsdc.current=received;
+      }catch{claimNotices.current.push('Claims confirmed, but their USDC output could not be reconciled. USDC will remain unselected until you explicitly choose an amount.');}
+      await scan();
+    }catch(e){if(alive.current){setError(publicError(e));setPhase('claim');}}finally{lock.current=false;}
+  };
+  const quote=async()=>{
+    if(lock.current)return;lock.current=true;setError('');setPreview(undefined);setMessage('Checking selected tokens…');setPhase('quoting');
+    try{
+      if(!l.address)throw Error('Connect your wallet first.');
+      const inputs=orderedTokens.filter(t=>selected.has(t.token.toLowerCase())).map(t=>{
+        const text=amounts[t.token.toLowerCase()]??'',amount=t.decimals===null?(/^\d+$/.test(text)?BigInt(text):0n):parseAmount(text,t.decimals);
+        if(amount<=0n||amount>t.balance)throw Error('Choose an amount within your '+t.symbol+' wallet balance.');return {token:t.token,symbol:t.symbol,decimals:t.decimals,amount};
+      });
+      const data=await buildSweepPreview(client,boot,l.address,inputs,mode,slippage,fetch,(checked,total)=>{if(alive.current)setMessage('Checked '+checked+' of '+total+' tokens…');});if(!alive.current)return;setPreview(data);setPhase('review');
+    }catch(e){if(alive.current){setError(publicError(e));setPhase('select');}}finally{lock.current=false;}
+  };
+  const execute=async()=>{
+    if(lock.current||!preview)return;lock.current=true;stop.current=false;setStopping(false);setError('');setPhase('running');
+    try{const completed=await s.liveControls!.sweep(preview,{shouldStop:()=>stop.current,onProgress:text=>{if(alive.current)setMessage(text);}});if(alive.current){setResult(completed);setPhase('done');}}
+    catch(e){if(alive.current){
+      const failure=publicError(e);setPreview(undefined);
+      // Swaps are not idempotent. A completed partial-amount sale may leave
+      // enough balance to sell that amount again, so never offer the same
+      // executable preview after any failure or an ambiguous receipt.
+      await scan();
+      if(alive.current){setSelected(new Set());setError(failure+' Choose the remaining tokens and review fresh balances before starting another sweep.');setStopping(false);stop.current=false;}
+    }}
+    finally{lock.current=false;}
+  };
+  const changeMode=(value:SweepMode)=>{setMode(value);setPreview(undefined);if(value==='USDC')setSelected(old=>new Set([...old].filter(a=>a!==boot.registry.legacy.USDC.toLowerCase())));};
+  const count=tokens.filter(t=>selected.has(t.token.toLowerCase())).length;
+  const label=mode==='USDC'?'USDC':mode==='iAERO'?'liquid iAERO':'iAERO + previous staking';
+  const executable=!!preview?.inputs.length&&preview.minimumUsdc>0n;
+  let selectionValue=0n,unpricedSelection=0;
+  for(const t of tokens.filter(t=>selected.has(t.token.toLowerCase()))){
+    const key=t.token.toLowerCase(),text=amounts[key]??'',value=values[key]?.valueWad;
+    try{
+      const amount=t.decimals===null?(/^\d+$/.test(text)?BigInt(text):0n):parseAmount(text,t.decimals);
+      if(amount<=0n||amount>t.balance||value==null||!walletValues||Date.now()-walletValues.asOf>120000){unpricedSelection++;continue;}
+      selectionValue+=value*amount/t.balance;
+    }catch{unpricedSelection++;}
+  }
+  const step=phase==='done'?'done':phase==='review'||phase==='running'?'review':phase==='claim'||phase==='claiming'?'claim':'select';
+  return <Dialog title={phase==='done'?'Your rewards, put to work.':phase==='claim'||phase==='claiming'?'Claim, then make your next move.':'A little less dust. More possibility.'} subtitle={phase==='done'?(result?.hashes.length?'Confirmed steps on Base. Your actual outputs are below.':'No transactions were sent. Your tokens remain in your wallet.'):'Convert selected wallet tokens into USDC or iAERO, with every amount reviewed.'} onClose={onClose} busy={busy} className="sweep-dialog" stepKey={step}>
+    <div className="sweep-context"><Pill tone="blue">Base mainnet</Pill><span>{short(l.address??'')} · Your wallet receives the output</span></div>
+    {(phase==='claim'||phase==='claiming')?<><p className="dialog-body-copy">First claim {groupRewards(l.rewards).length} selected reward tokens. You will review wallet balances, amounts and live swap quotes after the claims confirm. Claiming does not move your principal.</p><RewardSummary rows={l.rewards}/><div className="transaction-summary"><div><span>Claim contract</span><a className="contract-link" href={'https://basescan.org/address/'+boot.registry.legacy.epochDistributor} target="_blank" rel="noreferrer">{short(boot.registry.legacy.epochDistributor)} ↗</a></div><div><span>Selected reward entries</span><strong>{l.rewards.length}</strong></div></div>{error&&<p className="form-error" role="alert">{error}</p>}<Button className="full-width" disabled={phase==='claiming'||!!s.disabledReason('legacyClaimMany')||!l.rewards.length} onClick={()=>void claim()}>{phase==='claiming'?<><span className="spinner"/>{l.progress??'Confirm the claims in your wallet…'}</>:'Claim selected rewards in wallet'}</Button><button className="text-link sweep-skip-claims" disabled={busy} onClick={()=>void scan()}>Use tokens already in my wallet <Icon name="arrow" size={14}/></button></>:
+    phase==='select'||phase==='scanning'||phase==='quoting'?<>
+      <div className="sweep-mode-picker" aria-label="Sweep destination">{([{key:'USDC',label:'USDC'},{key:'iAERO',label:'Liquid iAERO'},{key:'stake',label:'iAERO + stake'}] as const).map(item=><button aria-pressed={mode===item.key} key={item.key} disabled={reading||item.key!=='USDC'&&!boot.marketRouteReady} onClick={()=>changeMode(item.key)}>{item.label}</button>)}</div>
+      {mode==='stake'&&<Info tone="blue">Only the iAERO received from this sweep is staked, using previous staking. Existing liquid iAERO is excluded. The new USDC stream is not deployed.</Info>}
+      <div className="sweep-selection-heading"><div><strong>Choose your wallet tokens</strong><span>Estimated wallet value · highest first{pricing?' · valuing…':''}</span></div><button className="text-link" disabled={reading} onClick={()=>setSelected(count?new Set():new Set(tokens.filter(t=>mode!=='USDC'||t.token.toLowerCase()!==boot.registry.legacy.USDC.toLowerCase()).map(t=>t.token.toLowerCase())))}>{count?'Clear selection':'Select all'}</button></div>
+      <div className="sweep-token-list">{phase==='scanning'?<div className="sweep-loading"><span className="spinner"/><p>Reading your reward-token balances…</p></div>:tokens.length?orderedTokens.map(t=>{const key=t.token.toLowerCase(),alreadyUsdc=mode==='USDC'&&key===boot.registry.legacy.USDC.toLowerCase();return <div className={'sweep-token-row '+(selected.has(key)?'selected':'')} key={key}><label><input type="checkbox" aria-label={'Select '+t.symbol+' '+short(t.token)} disabled={reading||alreadyUsdc} checked={selected.has(key)} onChange={e=>setSelected(old=>{const next=new Set(old);if(e.target.checked)next.add(key);else next.delete(key);return next;})}/><TokenIcon token={t.symbol} size={30}/><span><strong>{t.symbol}</strong><small><a title={t.token} href={'https://basescan.org/address/'+t.token} target="_blank" rel="noreferrer">{short(t.token)} ↗</a>{alreadyUsdc?' · already USDC':''}</small></span></label><div className="sweep-row-details"><span className="sweep-row-balance">Balance {units(t.balance,t.decimals)}{t.decimals===null?' raw units':''}<small className="sweep-wallet-value" title="Estimated USDC value of the scanned wallet balance, before gas. Rescan refreshes these estimates.">{values[key]?.valueWad!=null?'≈ '+valueText(values[key].valueWad,true)+' USDC'+(values[key].source==='reference'?' · indicative':''):pricing?'Valuing…':'Unpriced'}</small></span><div className="sweep-row-amount"><input aria-label={'Amount of '+t.symbol+' '+short(t.token)} inputMode="decimal" disabled={!selected.has(key)||reading} value={amounts[key]??''} onChange={e=>setAmounts(old=>({...old,[key]:e.target.value}))}/><button disabled={!selected.has(key)||reading} onClick={()=>setAmounts(old=>({...old,[key]:units(t.balance,t.decimals)}))}>MAX</button></div></div></div>;}):<div className="legacy-no-rewards"><Icon name="wallet" size={25}/><p>No positive reward-token balances were found in successful reads.</p><small>Try another token address, or claim your rewards first.</small></div>}</div>
+      {hidden.length>0&&<details className="sweep-filtered-tokens"><summary>{hidden.length} known spam token{hidden.length===1?'':'s'} hidden <Icon name="chevron" size={11}/></summary><p>Excluded from selection and approvals by the protocol token filter.</p>{hidden.map(t=><div key={t.token}><span><strong>{t.symbol}</strong><small>{t.reason}</small></span><a href={'https://basescan.org/address/'+t.token} title={t.token} target="_blank" rel="noreferrer">{short(t.token)} ↗</a></div>)}</details>}
+      <form className="sweep-extra-token" onSubmit={e=>{e.preventDefault();void scan();}}><label>Additional token address<input value={extra} placeholder="0x…" aria-label="Additional sweep token" onChange={e=>setExtra(e.target.value.trim())} disabled={reading}/></label><Button variant="secondary" iconLeft="refresh" disabled={reading} type="submit">Rescan</Button></form>
+      <div className="sweep-slippage"><label htmlFor="sweep-slippage">Slippage per swap stage</label><select id="sweep-slippage" value={slippage} disabled={reading} onChange={e=>setSlippage(Number(e.target.value))}>{[50,100,300,500].map(bps=><option value={bps} key={bps}>{bps/100}%</option>)}</select></div>
+      {error&&<p className="form-error" role="alert">{error}</p>}<div className="sweep-actionbar"><div className="sweep-selection-total" aria-live="polite"><strong>{count} selected</strong><span>{pricing?'Valuing selection…':count?unpricedSelection===count?'USDC estimate unavailable':'≈ '+valueText(selectionValue,true)+' USDC'+(unpricedSelection?' · partial estimate':' · estimated'):'Choose tokens to continue'}</span></div><Button className="full-width" icon={reading?undefined:'arrow'} disabled={reading||!count||walletBlocked} onClick={()=>void quote()}>{reading?<><span className="spinner"/>{phase==='quoting'?message||'Simulating selected swaps…':'Reading balances…'}</>:'Review '+count+' token'+(count===1?'':'s')+' → '+label}</Button></div><p className="form-footnote"><Icon name="shield" size={13}/>Native ETH and iAERO principal/receipts are excluded. USDC already in your wallet is used only if selected.</p><p className="small muted sweep-read-caption">{message}</p>
+    </>:phase==='review'||phase==='running'?<>
+      <div className={'sweep-check-status '+(!executable?'none':'')} role="status"><Icon name={executable?'check':'shield'} size={17}/><span>{executable?preview!.inputs.length+' eligible token'+(preview!.inputs.length===1?'':'s')+' included':'No tokens passed the checks'}{preview!.skipped.length>0&&' · '+preview!.skipped.length+' skipped'}</span></div>
+      {executable&&<div className="sweep-output"><TokenIcon token={mode==='USDC'?'USDC':'iAERO'} size={46}/><span>{mode==='stake'?'iAERO to stake in previous staking':'Expected '+label}</span><strong>{mode==='USDC'?formatUnits(preview!.expectedUsdc,6):formatUnits(preview!.expectedIaero!,18)}</strong><small>Minimum: {mode==='USDC'?formatUnits(preview!.minimumUsdc,6)+' USDC':formatUnits(preview!.minimumIaero!,18)+' iAERO'}</small></div>}
+      {executable&&<><div className="sweep-review-inputs">{preview!.inputs.map(t=><div key={t.token}><TokenIcon token={t.symbol} size={25}/><span>{t.symbol}<small>{short(t.token)}</small></span><ExactAmount value={t.amount} decimals={t.decimals}/></div>)}</div><div className="transaction-summary"><div><span>Recipient</span><strong>Your connected wallet</strong></div><div><span>USDC minimum before conversion</span><strong>{formatUnits(preview!.minimumUsdc,6)} USDC</strong></div><div><span>Slippage per stage</span><strong>{preview!.slippageBps/100}%</strong></div><div><span>Approvals</span><strong>Exact amounts, when needed</strong></div>{preview!.quotes.length>0&&<div><span>Swap batches</span><strong>{Math.ceil(preview!.quotes.length/SWEEP_BATCH_LIMIT)} planned · up to {SWEEP_BATCH_LIMIT} tokens each</strong></div>}<div><span>Swapper</span><a className="contract-link" href={'https://basescan.org/address/'+boot.registry.sweep.swapper} target="_blank" rel="noreferrer">{short(boot.registry.sweep.swapper)} ↗</a></div>{mode!=='USDC'&&<div><span>iAERO market route</span><strong>USDC → AERO → iAERO · CL</strong></div>}{mode!=='USDC'&&<div><span>Conversion cost limit</span><strong>2% · pool fees + price impact</strong></div>}{mode==='stake'&&<div><span>Staking destination</span><a className="contract-link" href={'https://basescan.org/address/'+boot.registry.legacy.epochDistributor} target="_blank" rel="noreferrer">Previous staking · {short(boot.registry.legacy.epochDistributor)}</a></div>}</div>
+      </>}
+      <SkippedSweeps rows={preview!.skipped} forceOpen={!executable}/>
+      <p className="small muted live-exact-amount">{executable?'Each reward swap passed simulation, including any required approval. Eligible swaps are grouped in batches of up to 10, with one confirmation per swap batch. Token approvals are separate. Batches are rechecked and split when needed; tokens that stop passing are skipped.':'All requested tokens were checked. Nothing will be approved or swapped from this selection.'} Completed transactions remain complete. iAERO conversion retains your reviewed minimum and pauses if the eligible selection shrinks.</p>{error&&<p className="form-error" role="alert">{error}</p>}
+      <div className="sweep-actionbar">{executable&&<div className="sweep-confirm-context"><span>{preview!.inputs.length} included · {preview!.skipped.length} skipped</span><strong>Minimum received: {mode==='USDC'?formatUnits(preview!.minimumUsdc,6)+' USDC':formatUnits(preview!.minimumIaero!,18)+' iAERO'}</strong></div>}<Button className="full-width" disabled={!executable||busy||walletBlocked||stopping} onClick={()=>void execute()} icon={busy?undefined:'arrow'}>{busy?<><span className="spinner"/>{stopping?'Stopping after the current transaction…':message||'Confirm in your wallet…'}</>:executable?'Confirm sweep in wallet':'No eligible tokens to sweep'}</Button></div>
+      {busy?<button className="text-link sweep-skip-claims" disabled={stopping} onClick={()=>{stop.current=true;setStopping(true);}}>Stop after current transaction</button>:<button className="text-link sweep-skip-claims" onClick={()=>{setPreview(undefined);void scan();}}>Rescan wallet and refresh quotes <Icon name="arrow" size={14}/></button>}
+    </>:<><div className="transaction-success"><span><Icon name="check" size={34}/></span><h3>{result?.conversionDeferred?'USDC remains in your wallet':!result?.swapped&&!result?.iaero?'No tokens were swapped':result?.staked?'Sweep output staked':mode==='USDC'?'USDC received':'Liquid iAERO received'}</h3><p>{result?.conversionDeferred?formatUnits(result.usdc,6)+' USDC available':result?.staked?formatUnits(result.staked,18)+' iAERO in previous staking':mode==='USDC'?formatUnits(result!.usdc,6)+' USDC':formatUnits(result!.iaero,18)+' iAERO'}</p></div>{result?.conversionDeferred&&<Info tone="blue">{result.conversionDeferred}</Info>}<SkippedSweeps rows={result?.skipped??[]}/>{!!result?.swapped&&<p className="sweep-batch-result">{result.swapped} token{result.swapped===1?'':'s'} swapped in {result.batches} batch transaction{result.batches===1?'':'s'}.</p>}<Button className="full-width" onClick={onClose} icon="arrow">Back to your rewards</Button></>}
+    {!!l.confirmedHashes?.length&&<div className="sweep-receipts"><strong>Confirmed steps</strong>{l.confirmedHashes.map((hash,i)=><a key={hash} href={'https://basescan.org/tx/'+hash} target="_blank" rel="noreferrer">{i+1}. {short(hash)} <Icon name="up-right" size={12}/></a>)}</div>}
+    {notices.length>0&&<details className="live-read-errors"><summary>{notices.length} read notices</summary>{notices.map((n,i)=><p key={i}>{n}</p>)}</details>}
+  </Dialog>;
+}
+
+function SkippedSweeps({rows,forceOpen=false}:{rows:readonly SweepSkipped[];forceOpen?:boolean}){
+  if(!rows.length)return null;
+  const label=(reason:string)=>/rate.limit/i.test(reason)?'Quote service limit':/simulation|revert/i.test(reason)?'Simulation did not pass':/no .*quote|no executable|liquidity|route/i.test(reason)?'No route for this amount':'Other unavailable tokens';
+  const groups=new Map<string,SweepSkipped[]>();
+  for(const row of rows){const key=label(row.reason);groups.set(key,[...(groups.get(key)??[]),row]);}
+  const open=forceOpen||rows.length<=3;
+  return <section className="sweep-skipped-tokens" aria-label="Skipped sweep tokens"><details open={open}><summary>{rows.length} token{rows.length===1?'':'s'} left in your wallet <Icon name="chevron" size={16}/></summary><p>Excluded from this sweep. Change an amount and check again.</p>{[...groups].map(([name,items])=><details className="sweep-skipped-group" key={name} open={open}><summary>{name} · {items.length} token{items.length===1?'':'s'}</summary>{items.map(({input,reason})=><article key={input.token}><TokenIcon token={input.symbol} size={26}/><div><strong>{input.symbol} <a href={'https://basescan.org/address/'+input.token} title={input.token} target="_blank" rel="noreferrer">{short(input.token)} ↗</a></strong><small className="sweep-skipped-amount">Selected: {units(input.amount,input.decimals)} {input.symbol}{input.decimals===null?' raw units':''}</small><p>{reason}</p></div></article>)}</details>)}</details></section>;
+}

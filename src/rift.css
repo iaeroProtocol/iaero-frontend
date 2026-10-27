@@ -1,0 +1,16 @@
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@source "./restored";
+.rift-native{--color-white:var(--ink);--color-slate-950:var(--surface-soft);--color-slate-900:var(--surface);--color-slate-800:var(--surface-soft);--color-slate-700:var(--line);--color-slate-600:var(--muted);--color-slate-500:var(--muted);--color-slate-400:var(--muted);--color-slate-300:var(--ink);--color-slate-200:var(--ink);--color-indigo-100:var(--blue);--color-indigo-200:var(--blue);--color-indigo-300:var(--blue);--color-indigo-400:var(--blue);--color-amber-100:var(--amber);--color-amber-200:var(--amber);--color-amber-300:var(--amber);--color-emerald-200:var(--green);--color-emerald-300:var(--green);--text-xs:.8125rem;--text-sm:.9375rem;--text-base:1rem;--color-card:var(--surface);--color-card-foreground:var(--ink);--color-muted-foreground:var(--muted);--color-primary:var(--blue);--color-input:var(--line);--color-ring:var(--blue);--color-background:var(--surface);margin:1.5rem 0;min-width:0;color:var(--ink)}
+.rift-native [data-slot=card]{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+.rift-native h2,.rift-native h3{color:var(--ink-strong)}
+.rift-native button{min-height:44px;min-width:44px}.rift-native input:not([type=checkbox]),.rift-native select{min-height:48px;font-size:1rem;color:var(--ink)}
+.rift-native input{border:1px solid var(--line);background:var(--surface);border-radius:.6rem}
+.rift-native .rift-button{min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:.5rem;padding:.65rem 1.1rem;border-radius:.7rem;background:#326bea;color:#fff;font:inherit;font-weight:650;white-space:normal}
+.rift-native .rift-button-outline{background:var(--surface);border:1px solid var(--line);color:var(--ink)}
+.rift-native a{color:var(--blue);text-underline-offset:3px}.rift-native .rift-progress{height:.5rem;border-radius:1rem;background:var(--line);overflow:hidden}.rift-progress>span{display:block;height:100%;background:var(--blue)}
+.rift-backup-actions{display:flex;gap:.75rem;flex-wrap:wrap;margin:1rem 0}.rift-backup-actions input{width:0;min-width:0;opacity:0;position:absolute}.rift-backup-actions label{cursor:pointer;position:relative}.rift-backup-actions label:focus-within{outline:3px solid var(--blue);outline-offset:3px}
+.native-get-panel{margin-top:1.5rem}.rift-native [class*=truncate]{max-width:100%}.rift-native [class*=min-w]{min-width:0}
+@media(max-width:600px){.rift-native [data-slot=card-header],.rift-native [data-slot=card-content]{padding-left:1rem;padding-right:1rem}.rift-native .rift-button{width:100%}.rift-native button{white-space:normal}.rift-native [class*=text-xs]{line-height:1.5}}
+
+.rift-native label:has(input[type=checkbox]){min-height:44px;align-items:center}.rift-native input[type=checkbox]{min-height:0;width:1.125rem;height:1.125rem;align-self:center}

@@ -1,0 +1,31 @@
+{
+  "sourceCheckout": "/private/tmp/iaero-harness-integrity-fix-20261022",
+  "workspaceHead": "c58ed145c12639a08444a3501ad9699b579fc163",
+  "clientFilesUnmodified": [
+    {
+      "file": "src/protocol/autoVaultClient.ts",
+      "sha256": "8d1419db74b0e717ac233284b41f3c3bb891b64adb913f54f1c1757b1860f194"
+    },
+    {
+      "file": "src/protocol/collateralClient.ts",
+      "sha256": "20234f93a80f1b2ba0e8870d46f3223801f79c8f348ff06ca24b33e65b278c52"
+    },
+    {
+      "file": "src/protocol/pendingTransaction.ts",
+      "sha256": "84b02b11ed9158fa1bf471d472a4dec4c3b939b2e83f3f1f167053371d7ef633"
+    },
+    {
+      "file": "src/protocol/saeroAddresses.ts",
+      "sha256": "c79b89f74b2a4287a9eec7a0a67c1ff37c09ec7b2e7ab8276cc2a08c9501e236"
+    },
+    {
+      "file": "src/protocol/streamingClient.ts",
+      "sha256": "e5e087f6f9fdda4a72e84a492a592b66e0b7500e096866061a05f9aed506e7fe"
+    },
+    {
+      "file": "src/protocol/vaultClient.ts",
+      "sha256": "fec97ba9f9fbf18b1e97ac2256506b5922b9b702d347e55c9e435bb032151564"
+    }
+  ],
+  "scope": "Six byte-identical reviewed client copies. New local adapters reuse walletSender and pendingTransaction for legacy claims/withdrawals, exact-amount reward sweeps and explicitly selected previous staking. New user-facing stack remains undeployed; independent review of the new adapters is pending."
+}

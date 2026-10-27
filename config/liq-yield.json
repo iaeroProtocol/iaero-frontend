@@ -1,0 +1,11 @@
+{
+  "forecastUrl": "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/estimated_rewards_usd.json",
+  "forecastMaxAgeSeconds": 604800,
+  "revenueShareBps": 800,
+  "stakersShareBps": 8000,
+  "annualWeeks": 52,
+  "sources": [
+    "iaero-frontend/src/components/contracts/hooks/useStaking.ts:443",
+    "protocol/contracts/TreasuryDistributor.sol:27"
+  ]
+}

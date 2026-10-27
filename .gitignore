@@ -1,31 +1,12 @@
-# Dependencies
 node_modules/
-cache/
-.pnp
-.pnp.js
+dist/
+.env*
+!\.env.example
+artifacts/
 
-# Production
-.next/
-out/
-build/
+.local-data/
 
-# Environment
-.env
-.env.local
-.env.production.local
-
-# Debug
-npm-debug.log*
-yarn-debug.log*
-
-# IDE
-.vscode/
-.idea/
-.DS_Store
-
-# Misc
-*.log
-.vercel
-.env.local
-.env.local
-.env.local
+.wrangler/
+.dev.vars*
+.release/
+.vercel/

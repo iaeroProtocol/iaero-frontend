@@ -1,0 +1,12 @@
+import {describe,it,expect} from 'vitest';
+import {encodeAbiParameters,encodeEventTopics,parseAbi,toHex} from 'viem';
+import config from '../config/legacy-history.json';
+import {indexLegacy,type LegacyIndex} from '../server/legacy-indexer';
+const hash='0x'+'11'.repeat(32),head=54000000n,epoch=1792627200n,token=('0x'+'22'.repeat(20)) as `0x${string}`,events=parseAbi(['event RewardFunded(address indexed token,uint256 indexed epochId,uint256 amount)']);
+function previous():LegacyIndex{return {version:1,chainId:8453,head:head.toString(),readAtMs:Date.now(),complete:false,providers:2,errors:[],targets:Object.fromEntries(config.targets.map(t=>[t.key,{block:(t.key==='staking'?head-60000n:head).toString(),hash,pairs:[],epochs:[],span:10000}]))};}
+function clients(failAt?:bigint,disagree=false){return [0,1].map(provider=>({getChainId:async()=>8453,getBlock:async(r:any)=>({number:r.blockNumber??head,hash,timestamp:BigInt(Math.floor(Date.now()/1000))}),request:async(r:any)=>{const filter=r.params[0],from=BigInt(filter.fromBlock);if(failAt!==undefined&&from===failAt)throw {shortMessage:'Provider unavailable'};return [{address:config.targets[0].address,blockNumber:toHex(from),blockHash:hash,transactionHash:hash,logIndex:'0x0',topics:encodeEventTopics({abi:events,eventName:'RewardFunded',args:{token,epochId:epoch}}),data:encodeAbiParameters([{type:'uint256'}],[provider===1&&disagree?2n:1n])}];}})) as any;}
+describe('complete funded-history census',()=>{
+ it('accepts only matching provider logs and deduplicates repeated funding for a token/week',async()=>{const out=await indexLegacy(['https://a.test','https://b.test'],previous(),24,{clients:clients()});expect(out.complete).toBe(true);expect(out.targets.staking.pairs).toEqual([{token,epoch:epoch.toString()}]);});
+ it('does not advance over a failed range even when later parallel ranges succeed',async()=>{const start=head-60000n+1n,out=await indexLegacy(['https://a.test','https://b.test'],previous(),24,{clients:clients(start+20000n)});expect(out.targets.staking.block).toBe((start+19999n).toString());expect(out.complete).toBe(false);expect(out.errors).toHaveLength(1);});
+ it('rejects provider disagreement without modifying the caller’s previous checkpoint',async()=>{const before=previous(),saved=structuredClone(before);await expect(indexLegacy(['https://a.test','https://b.test'],before,24,{clients:clients(undefined,true)})).rejects.toThrow('disagreement');expect(before).toEqual(saved);});
+});

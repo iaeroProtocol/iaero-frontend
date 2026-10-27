@@ -1,0 +1,56 @@
+import {encodeAbiParameters,parseAbi,type Address} from 'viem';
+import type {BaseClient,ExecutionContext} from './client';
+import type {Bootstrap} from './types';
+import type {Action} from '../domain';
+import {readStreaming,STAKING_ERC20_ABI,STREAMING_ABI,type ReadClient,type StreamingSnapshot} from '../protocol/streamingClient';
+import {readVault,previewDeposit,quoteStoken,requireIntake,depositClosedReason,VAULT_ABI,INTAKE_ESCROW_ABI,type VaultSnapshot} from '../protocol/vaultClient';
+import {AUTO_ABI} from '../protocol/autoVaultClient';
+import {COLLATERAL_ABI} from '../protocol/collateralClient';
+import type {SaeroAddresses} from '../protocol/saeroAddresses';
+export type NewPosition={timestamp?:number;vault?:VaultSnapshot;stream?:Partial<StreamingSnapshot>&{timestamp:number;block:bigint};auto?:{shares?:bigint;earned?:bigint;paused?:boolean};collateral?:{receipts?:bigint;shares?:bigint;earned?:bigint;paused?:boolean;principal?:bigint;cash?:bigint};errors:string[]};
+const emissionsAbi=parseAbi(['function emissionsModule() view returns(address)','function previewMint(uint256) view returns(uint256,uint256)','function totalMinted() view returns(uint256)','function currentRate() view returns(uint256)','function LIQ() view returns(address)','function vault() view returns(address)','function totalSupply() view returns(uint256)','function MAX_SUPPLY() view returns(uint256)']);
+function config(boot:Bootstrap){if(!boot.newStackReady||!boot.newStack?.ready||!boot.newStack.addresses)throw Error(boot.newStackReason);return boot.newStack.addresses;}
+export async function readNewPosition(client:BaseClient,boot:Bootstrap,user:Address):Promise<NewPosition>{
+ const c=config(boot),block=await client.getBlock(),out:NewPosition={timestamp:Number(block.timestamp),errors:[]};
+ const pinned={...client,getBlock:async()=>block} as unknown as ReadClient;
+ const read=(address:Address,abi:readonly unknown[],functionName:string,args:unknown[]=[]):Promise<any>=>client.readContract({address,abi,functionName,args,blockNumber:block.number} as any);
+ const fields=async(domain:string,jobs:Record<string,()=>Promise<any>>)=>{const values:Record<string,any>={};await Promise.all(Object.entries(jobs).map(async([key,run])=>{try{values[key]=await run();}catch{out.errors.push(domain+' '+key+' unavailable.');}}));return values;};
+ await Promise.all([
+  readVault(pinned,c).then(v=>{out.vault=v;}).catch(()=>{out.errors.push('Vault intake status unavailable.');}),
+  fields('New staking',{balance:()=>read(c.streamingDistributor,STREAMING_ABI,'balanceOf',[user]),wallet:()=>read(c.iAERO,STAKING_ERC20_ABI,'balanceOf',[user]),totalStaked:()=>read(c.streamingDistributor,STREAMING_ABI,'totalStaked'),paused:()=>read(c.streamingDistributor,STREAMING_ABI,'paused'),earned:()=>read(c.streamingDistributor,STREAMING_ABI,'earned',[user]),lastNotifiedAt:()=>read(c.streamingDistributor,STREAMING_ABI,'lastNotifiedAt').then(Number),periodFinish:()=>read(c.streamingDistributor,STREAMING_ABI,'periodFinish').then(Number),rewardRate:()=>read(c.streamingDistributor,STREAMING_ABI,'rewardRate'),precision:()=>read(c.streamingDistributor,STREAMING_ABI,'PRECISION')}).then(v=>{out.stream={...v,block:block.number,timestamp:Number(block.timestamp)};}),
+  ...(c.streamAutoVault?[fields('Replacement AutoVault',{shares:()=>read(c.streamAutoVault!,AUTO_ABI,'sharesOf',[user]),earned:()=>read(c.streamAutoVault!,AUTO_ABI,'previewUSDC',[user]),paused:()=>read(c.streamAutoVault!,AUTO_ABI,'paused')}).then(v=>{out.auto=v;})]:[]),
+  ...(c.stakedCollateral?[fields('Collateral',{receipts:()=>read(c.streamingDistributor,STAKING_ERC20_ABI,'balanceOf',[user]),shares:()=>read(c.stakedCollateral!,COLLATERAL_ABI,'balanceOf',[user]),earned:()=>read(c.stakedCollateral!,COLLATERAL_ABI,'claimableUSDC',[user]),paused:()=>read(c.stakedCollateral!,COLLATERAL_ABI,'paused')}).then(async v=>{out.collateral=v;if(v.shares!==undefined){try{const [principal,cash]=v.shares===0n?[0n,0n]:await read(c.stakedCollateral!,COLLATERAL_ABI,'previewRedeem',[v.shares]);out.collateral!.principal=principal;out.collateral!.cash=cash;}catch{out.errors.push('Collateral principal quote unavailable.');}}})]:[])
+ ]);return out;
+}
+export async function readEmissionQuote(client:BaseClient,boot:Bootstrap,input:bigint){
+ const c=config(boot),expected=boot.newStack!.emissionsModule!,block=await client.getBlock(),read=(address:Address,functionName:string,args:unknown[]=[]):Promise<any>=>client.readContract({address,abi:emissionsAbi,functionName,args,blockNumber:block.number} as any);
+ const [module,vault,liq]=await Promise.all([read(c.svault,'emissionsModule'),read(expected,'vault'),read(expected,'LIQ')]);if(String(module).toLowerCase()!==expected.toLowerCase()||String(vault).toLowerCase()!==c.svault.toLowerCase()||String(liq).toLowerCase()!==boot.registry.legacy.LIQ.toLowerCase())throw Error('The LIQ emissions module link changed.');
+ const [mint,rate,totalMinted,supply,cap]=await Promise.all([read(expected,'previewMint',[input]),read(expected,'currentRate'),read(expected,'totalMinted'),read(boot.registry.legacy.LIQ,'totalSupply'),read(boot.registry.legacy.LIQ,'MAX_SUPPLY')]);
+ return {toUser:BigInt(mint[0]),toTreasury:BigInt(mint[1]),rate:BigInt(rate),totalMinted:BigInt(totalMinted),remaining:BigInt(cap)>BigInt(supply)?BigInt(cap)-BigInt(supply):0n,block:block.number,timestamp:Number(block.timestamp)};
+}
+type Sender=(to:Address,abi:readonly unknown[],fn:string,args?:readonly unknown[])=>Promise<`0x${string}`>;
+export function newActionTarget(action:Action,c:SaeroAddresses):Address{return action.kind==='mint'?c.svault:action.kind==='nft'?c.svault:['autoStake','autoUnstake','autoClaim'].includes(action.kind)?c.streamAutoVault!:action.kind.startsWith('collateral')?c.stakedCollateral!:c.streamingDistributor;}
+export async function executeNew(context:ExecutionContext,action:Action,send:Sender){
+ const {client,state}=context,boot=state.boot!,c=config(boot),user=state.address!,hashes:`0x${string}`[]=[];
+ const read=(address:Address,abi:readonly unknown[],fn:string,args:unknown[]=[]):Promise<any>=>client.readContract({address,abi,functionName:fn,args} as any);
+ const approve=async(token:Address,spender:Address,amount:bigint)=>{const allowance=await read(token,STAKING_ERC20_ABI,'allowance',[user,spender]);if(allowance<amount)hashes.push(await send(token,STAKING_ERC20_ABI,'approve',[spender,amount]));};
+ if(action.kind==='mint'){
+  const s=await readVault(client as unknown as ReadClient,c);requireIntake(s);const closed=depositClosedReason(s);if(closed)throw Error(closed);const q=previewDeposit(s,action.amount);await readEmissionQuote(client,boot,q.iAeroOut);await approve(s.aero,c.svault,action.amount);const fresh=await readVault(client as unknown as ReadClient,c);requireIntake(fresh);const freshClosed=depositClosedReason(fresh);if(freshClosed)throw Error(freshClosed);previewDeposit(fresh,action.amount);hashes.push(await send(c.svault,VAULT_ABI,'deposit',[action.amount]));
+ }else if(action.kind==='nft'){
+  const id=BigInt(action.nftId??0),q=await quoteStoken(client as unknown as ReadClient,c,user,id);await readEmissionQuote(client,boot,q.iAeroOut);if(!action.minNetOut||action.minNetOut<=0n||action.minNetOut>q.netBacking)throw Error('The protected NFT quote changed. Refresh it.');hashes.push(await send(q.snapshot.escrow,INTAKE_ESCROW_ABI,'safeTransferFrom',[user,c.svault,id,encodeAbiParameters([{type:'uint256'}],[action.minNetOut])]));
+ }else if(['stake','unstake','claim'].includes(action.kind)){
+  if(action.kind==='stake'){const [paused,balance]=await Promise.all([read(c.streamingDistributor,STREAMING_ABI,'paused'),read(c.iAERO,STAKING_ERC20_ABI,'balanceOf',[user])]);if(paused||action.amount<=0n||action.amount>balance)throw Error('Stake balance or pause status changed.');await approve(c.iAERO,c.streamingDistributor,action.amount);hashes.push(await send(c.streamingDistributor,STREAMING_ABI,'stake',[action.amount]));}
+  else if(action.kind==='unstake'){const balance=await read(c.streamingDistributor,STREAMING_ABI,'balanceOf',[user]);if(action.amount<=0n||action.amount>balance)throw Error('Choose an amount within your new receipt balance.');hashes.push(await send(c.streamingDistributor,STREAMING_ABI,'withdraw',[action.amount]));}
+  else{if(await read(c.streamingDistributor,STREAMING_ABI,'earned',[user])<=0n)throw Error('No verified USDC reward is available.');hashes.push(await send(c.streamingDistributor,STREAMING_ABI,'getReward'));}
+ }else if(['autoStake','autoUnstake','autoClaim'].includes(action.kind)){
+  const address=c.streamAutoVault;if(!address)throw Error('Replacement AutoVault is not verified.');
+  if(action.kind==='autoStake'){const [paused,balance]=await Promise.all([read(address,AUTO_ABI,'paused'),read(c.iAERO,STAKING_ERC20_ABI,'balanceOf',[user])]);if(paused||action.amount<=0n||action.amount>balance)throw Error('AutoVault deposit balance or status changed.');await approve(c.iAERO,address,action.amount);hashes.push(await send(address,AUTO_ABI,'deposit',[action.amount]));}
+  else if(action.kind==='autoUnstake'){const balance=await read(address,AUTO_ABI,'sharesOf',[user]);if(action.amount<=0n||action.amount>balance)throw Error('AutoVault share balance changed.');hashes.push(await send(address,AUTO_ABI,'withdraw',[action.amount]));}
+  else{if(await read(address,AUTO_ABI,'previewUSDC',[user])<=0n)throw Error('No AutoVault USDC reward is available.');hashes.push(await send(address,AUTO_ABI,'claimUSDC'));}
+ }else if(action.kind.startsWith('collateral')){
+  const a=c.stakedCollateral;if(!a)throw Error('Collateral wrapper not verified.');for(const [fn,to] of [['stream',c.streamingDistributor],['receipt',c.streamingDistributor],['USDC',c.USDC]])if(String(await read(a,COLLATERAL_ABI,fn)).toLowerCase()!==to.toLowerCase())throw Error('Collateral wrapper links changed.');
+  if(action.kind==='collateralWrap'){if(action.amount<=0n||!action.minShares||action.maxUSDC===undefined)throw Error('Refresh the protected wrapper quote.');const required=await read(a,COLLATERAL_ABI,'previewWrapUSDC',[action.amount]),shares=await read(a,COLLATERAL_ABI,'previewWrap',[action.amount]);if(required>action.maxUSDC||shares<action.minShares)throw Error('The proportional wrapper quote changed.');await approve(c.streamingDistributor,a,action.amount);if(action.maxUSDC>0n)await approve(c.USDC,a,action.maxUSDC);hashes.push(await send(a,COLLATERAL_ABI,'wrap',[action.amount,action.maxUSDC,action.minShares,user]));}
+  else if(action.kind==='collateralRedeem'){if(action.amount<=0n||action.minPrincipal===undefined||action.minUSDC===undefined||action.minPrincipal<0n||action.minUSDC<0n)throw Error('Refresh the protected redemption quote.');const [balance,preview]=await Promise.all([read(a,COLLATERAL_ABI,'balanceOf',[user]),read(a,COLLATERAL_ABI,'previewRedeem',[action.amount])]);if(action.amount>balance||preview[0]<action.minPrincipal||preview[1]<action.minUSDC)throw Error('The protected redemption quote or share balance changed.');hashes.push(await send(a,COLLATERAL_ABI,'redeem',[action.amount,action.minPrincipal,action.minUSDC,user]));}
+  else{if(await read(a,COLLATERAL_ABI,'claimableUSDC',[user])<=0n)throw Error('No wrapper credit is available.');hashes.push(await send(a,COLLATERAL_ABI,'claimUSDC',[user]));}
+ }else throw Error('Unsupported new-contract action.');return hashes;
+}

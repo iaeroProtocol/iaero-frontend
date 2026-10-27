@@ -1,0 +1,18 @@
+import {useEffect,useMemo,useState,type ReactNode} from 'react';
+import {createConfig,createConnector,WagmiProvider,useConnect,useAccount,http,fallback} from 'wagmi';
+import {base,mainnet,arbitrum} from 'wagmi/chains';
+import {QueryClient,QueryClientProvider} from '@tanstack/react-query';
+import {getAddress,type EIP1193Provider} from 'viem';
+import {usePreview} from '../store';
+import {rpcUrls} from '../restored/lib/public-rpcs';
+type Events=EIP1193Provider;
+export function existingWalletConnector(provider:Events){return createConnector(config=>{
+ const changed=(accounts:string[])=>accounts.length?config.emitter.emit('change',{accounts:accounts.map(getAddress)}):config.emitter.emit('disconnect'),chain=(id:string)=>config.emitter.emit('change',{chainId:Number(BigInt(id))}),disconnected=()=>config.emitter.emit('disconnect');
+ const accounts=async()=>((await provider.request({method:'eth_accounts'})) as string[]).map(getAddress),chainId=async()=>Number(BigInt(await provider.request({method:'eth_chainId'})));
+ return {id:'iaero-current-wallet',name:'Current iAERO wallet',type:'injected',async connect(){const selected=await accounts();if(!selected.length)throw Error('The selected wallet is disconnected.');provider.on?.('accountsChanged',changed);provider.on?.('chainChanged',chain);provider.on?.('disconnect',disconnected);return {accounts:selected,chainId:await chainId()};},async disconnect(){provider.removeListener?.('accountsChanged',changed);provider.removeListener?.('chainChanged',chain);provider.removeListener?.('disconnect',disconnected);},getAccounts:accounts,getChainId:chainId,async getProvider(){return provider;},async isAuthorized(){return (await accounts()).length>0;},onAccountsChanged:changed,onChainChanged:chain,onDisconnect:disconnected,async switchChain({chainId:id}:{chainId:number}){await provider.request({method:'wallet_switchEthereumChain',params:[{chainId:'0x'+id.toString(16)}]});const selected=config.chains.find(c=>c.id===id);if(!selected)throw Error('Unsupported purchase chain.');return selected;}} as any;
+ });}
+function Sync({children}:{children:ReactNode}){const s=usePreview(),{connectAsync}=useConnect(),account=useAccount(),[error,setError]=useState(false),[retry,setRetry]=useState(0);useEffect(()=>{let active=true;setError(false);const p=s.liveControls?.activeProvider();if(p)void connectAsync({connector:existingWalletConnector(p)}).catch(()=>{if(active)setError(true);});return()=>{active=false;};},[s.liveControls?.activeProvider(),connectAsync,retry]);const expected=s.live?.address;if(expected&&account.address?.toLowerCase()!==expected.toLowerCase())return error?<div role="alert"><p>The selected wallet could not connect to Rift. Your saved orders are retained.</p><button className="button button-secondary" onClick={()=>setRetry(n=>n+1)}>Reconnect selected wallet</button></div>:<p role="status">Connecting your selected wallet to Rift…</p>;return children;}
+export function RiftWalletProvider({children}:{children:ReactNode}){
+ const p=usePreview().liveControls?.activeProvider(),bundle=useMemo(()=>({query:new QueryClient({defaultOptions:{queries:{refetchOnWindowFocus:false,retry:1}}}),config:createConfig({chains:[base,mainnet,arbitrum],connectors:[],multiInjectedProviderDiscovery:false,storage:null,transports:{8453:http(new URL('/api/base',window.location.origin).href),1:fallback(rpcUrls(1).map(u=>http(u,{retryCount:0}))),42161:fallback(rpcUrls(42161).map(u=>http(u,{retryCount:0})))}})}),[p]);
+ return <WagmiProvider config={bundle.config} reconnectOnMount={false}><QueryClientProvider client={bundle.query}><Sync>{children}</Sync></QueryClientProvider></WagmiProvider>;
+}

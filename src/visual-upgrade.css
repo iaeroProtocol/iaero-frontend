@@ -1,0 +1,297 @@
+/* Visual audit follow-up. Reading size, natural card heights and clear actions.
+   Contract guards, exact transaction amounts and unknown states remain explicit. */
+:root{--reading-size:1rem;--support-size:.875rem;--metadata-size:.8125rem}
+:root[data-theme=dark]{--bg:#0a1220;--surface:#111e31;--surface-soft:#18273d;--line:#2c3d55;--muted:#b4c2d7;--muted-dark:#c0cde0}
+.small,.info-box,.sample-caption{font-size:var(--support-size)}
+.page-title p,.product-card p,.hero-copy>p,.dialog-body-copy{font-size:var(--reading-size)}
+.text-link,.button,.route-tabs>button,.strategy-selector>button{font-size:.9375rem}
+.protocol-stats p,.protocol-stats>div>span,.form-details,.amount-topline,.amount-bottomline,
+.position-note,.position-row small,.portfolio-metrics p,.portfolio-metrics .card>span,
+.wallet-assets>.text-link,.portfolio-usdc-breakdown p,.portfolio-protocol-rates>div,
+.liq-yield-content dl>div,.liq-yield-content p,.iaero-funded-rate p,.portfolio-protocol-rates p,
+.yield-metric>span,.yield-metric>small,.yield-rates small,.yield-rates span,
+.claim-all-toolbar>div>span,.legacy-live-balance span,.legacy-filter label,.claim-coverage-note,
+.reward-value-card p,.reward-value-footnote,.sweep-read-caption{font-size:var(--support-size);line-height:1.65}
+.protocol-stats strong,.portfolio-metrics h2,.position-balance,.wallet-asset>span,
+.reward-value,.liq-yield-content strong,.iaero-funded-rate>strong,.portfolio-protocol-rates strong,
+.transaction-summary strong,.exact-amount,.sweep-token-row input{font-variant-numeric:tabular-nums}
+.card{box-shadow:0 2px 9px #14274603}
+[data-theme=dark] .card{box-shadow:0 2px 8px #00000012}
+.section-heading{margin-top:1.75rem}
+.page-title{margin:1.25rem 0 1.5rem;align-items:flex-start}
+.page-title h1{font-size:2.25rem;line-height:1.25}
+.page-title .eyebrow{margin-bottom:.5rem}
+.page-title p:not(.eyebrow){margin-top:.5rem}
+
+/* Healthy reads stay compact. Failure and deployment notices stay visible. */
+.connection-strip{position:relative;display:flex;flex-wrap:wrap;gap:.5rem .75rem;padding:4px 14px;min-height:52px;align-items:center}
+.connection-strip>strong{font-size:var(--support-size)}
+.connection-strip .live-status-indicator{flex:none}
+.connection-message{flex:1;font-size:var(--support-size);min-width:180px}
+.connection-refresh{margin-left:auto;flex:none}
+.connection-details{margin-left:auto;position:relative;z-index:7}
+.connection-details>summary{display:flex;align-items:center;gap:.4rem;list-style:none;font-size:var(--support-size);color:var(--muted);cursor:pointer;padding:5px 8px}
+.connection-details>summary::-webkit-details-marker{display:none}
+.connection-details>div{position:absolute;right:0;top:calc(100% + 8px);width:min(360px,calc(100vw - 48px));padding:18px;background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+.connection-details p{font-size:var(--support-size);margin-bottom:10px}
+.connection-strip .connection-refresh{margin-left:0}
+.deployment-caption{display:flex;align-items:baseline;gap:8px;font-size:var(--metadata-size);color:var(--amber);margin:8px 4px 0;line-height:1.6}
+.deployment-dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+
+/* Desktop composition follows content rather than the tallest adjacent panel. */
+.overview-main-grid{grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);align-items:start;gap:24px}
+.overview-side-stack{display:grid;gap:20px;min-width:0}
+.overview-side-stack>.reward-card{min-height:0;padding-bottom:24px}
+.overview-side-stack .liq-yield-card{margin:0;padding:24px}
+.overview-side-stack .liq-yield-content{grid-template-columns:1fr;gap:18px;margin:18px 0}
+.overview-side-stack .liq-yield-content>.button{width:100%;justify-self:stretch}
+.overview-side-stack .liq-yield-content dl{gap:10px}
+.overview-side-stack .liq-yield-card h3{font-size:1.125rem}
+.portfolio-grid,.portfolio-yields,.earn-grid{align-items:start}
+.portfolio-yields{scroll-margin-top:1.5rem}
+.portfolio-yields>.card{height:auto}
+.wallet-assets{padding-bottom:20px}
+.rate-basis{display:inline-flex;align-items:center;gap:6px;font-size:var(--support-size);font-weight:650;color:var(--muted-dark)}
+.rate-basis:before{content:'';width:6px;height:6px;background:var(--blue);border-radius:50%;flex:none}
+.forecast-freshness{color:var(--muted);font-size:var(--support-size);margin-top:6px}
+.portfolio-protocol-rates h4{font-size:var(--support-size)}
+.portfolio-protocol-rates{padding:16px 0;margin:0 0 12px}
+.liq-yield-date{font-size:var(--metadata-size)}
+.liq-yield-card .yield-details>summary,.yield-details>summary{font-size:var(--support-size)}
+
+/* Wallet positions have a clear name/balance line, then status and action. */
+.portfolio-shortcuts{display:flex;gap:12px;justify-content:flex-end;margin:-8px 0 20px}
+.portfolio-shortcuts>.text-link{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);padding:8px 14px;border-radius:10px;min-height:44px}
+.portfolio-metrics .card{padding:22px}
+.portfolio-metrics .card>h2{font-weight:700;margin:8px 0;font-size:2rem}
+.portfolio-metrics p{margin-top:0}
+.portfolio-metrics .text-link{margin-top:4px}
+.position-row{grid-template-columns:minmax(0,1.65fr) minmax(0,.8fr) auto;gap:4px 16px;padding:16px 0}
+.position-row>.position-main{grid-column:1;grid-row:1;display:flex;align-items:center;gap:12px;min-width:0}
+.position-main>span{min-width:0}
+.position-main strong{font-size:1rem;line-height:1.5}
+.position-main .token-icon{flex:none}
+.position-generation{display:inline-block;margin:3px 0 0;font-size:.75rem;font-weight:650;line-height:1.5;padding:1px 7px;border-radius:5px;border:1px solid var(--line);color:var(--muted)}
+.position-generation.current{color:var(--blue);background:var(--blue-soft);border-color:transparent}
+.position-row>.position-balance{grid-column:2;grid-row:1/3;align-self:center;min-width:0}
+.position-balance strong{font-size:1rem;overflow-wrap:anywhere}
+.position-balance small{display:block;color:var(--muted);font-size:var(--metadata-size)}
+.position-row>.position-note{grid-column:1;grid-row:2;padding-left:46px;display:block;color:var(--muted);line-height:1.6;overflow-wrap:anywhere}
+.position-row>.position-manage{grid-column:3;grid-row:1/3;font-size:var(--support-size);align-self:center;justify-self:end;display:inline-flex;align-items:center;gap:6px}
+.activity-card-empty .activity-empty{padding:16px 0;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-start;gap:10px 14px;min-height:0}
+.activity-card-empty .activity-empty>span{margin:0;width:36px;height:36px}
+.activity-card-empty .activity-empty p{margin:0;font-size:var(--support-size)}
+.activity-card-empty .activity-empty small{font-size:var(--metadata-size);text-align:left}
+
+/* Claims lead; principal and discovery remain independent and reachable. */
+.claim-coverage-note{margin:0 0 16px;color:var(--muted)}
+.live-legacy-dialog .reward-value-card{margin-top:0}
+.live-legacy-dialog .claim-all-toolbar{position:relative;align-items:center;padding:16px 0;margin:0;gap:16px}
+.claim-all-toolbar>div strong{font-size:1rem}
+.legacy-history-heading{margin-top:24px}
+.legacy-principal-panel{border:1px solid var(--line);border-radius:14px;padding:6px 16px;margin:24px 0}
+.legacy-principal-panel>summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;font-size:1rem;font-weight:650}
+.legacy-principal-panel>summary::-webkit-details-marker{display:none}
+.legacy-principal-panel>div{padding-top:14px}
+.exact-amount{min-width:0;text-align:right}
+.exact-amount>strong{display:block;overflow-wrap:anywhere;font-size:inherit}
+.exact-amount details{font-size:var(--metadata-size);color:var(--muted)}
+.exact-amount summary{cursor:pointer;color:var(--blue);list-style:none;padding:10px 0;min-width:44px}
+.exact-amount summary::-webkit-details-marker{display:none}
+.exact-full{display:block;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.claim-token-summary>div{gap:16px;align-items:flex-start}
+.claim-token-summary>div>span{min-height:28px;flex:none}
+
+/* Long sweep lists keep the useful controls within reach. */
+.sweep-dialog{scroll-padding-bottom:150px}
+.sweep-dialog .dialog-heading h2{max-width:24ch}
+.sweep-token-row{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:10px 16px;padding:14px 0;align-items:center}
+.sweep-token-row>label{min-width:0;gap:10px;align-self:start}
+.sweep-token-row>label>span{min-width:0}
+.sweep-token-row strong{font-size:1rem;overflow-wrap:anywhere}
+.sweep-token-row small{font-size:var(--metadata-size)}
+.sweep-token-row>.sweep-row-details{display:contents}
+.sweep-row-balance{grid-column:2;grid-row:1;text-align:right;font-size:var(--support-size);min-width:0;overflow-wrap:anywhere}
+.sweep-token-row .sweep-row-amount{grid-column:1/-1;width:100%;min-width:0;margin:0;padding:2px 8px 2px 12px;min-height:48px}
+.sweep-token-row:not(.selected) .sweep-row-amount{display:none}
+.sweep-row-amount input{width:100%;min-width:0;text-align:right}
+.sweep-actionbar{position:sticky;bottom:-30px;z-index:6;background:var(--surface);border-top:1px solid var(--line);margin:20px -30px -4px;padding:14px 30px calc(14px + env(safe-area-inset-bottom));box-shadow:0 -10px 20px #14274607}
+.sweep-selection-total,.sweep-confirm-context{display:flex;justify-content:space-between;gap:12px;font-size:var(--support-size);line-height:1.6;margin-bottom:10px;flex-wrap:wrap}
+.sweep-selection-total span,.sweep-confirm-context span{color:var(--muted)}
+.sweep-confirm-context strong{font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.sweep-actionbar .button{width:100%}
+.sweep-skipped-tokens>details>summary{font-size:1rem;color:var(--ink);font-weight:650;cursor:pointer;display:flex;gap:10px;align-items:center;justify-content:space-between;list-style:none}
+.sweep-skipped-tokens>details>summary::-webkit-details-marker{display:none}
+.sweep-skipped-group{padding:4px 0;border-top:1px solid var(--line)}
+.sweep-skipped-group>summary{font-size:var(--support-size);cursor:pointer;line-height:1.6}
+.sweep-skipped-group article{display:flex;align-items:flex-start;gap:12px;padding:14px 0;min-width:0}
+.sweep-skipped-group article>div{min-width:0}
+.sweep-skipped-group strong,.sweep-skipped-group p{font-size:var(--support-size);overflow-wrap:anywhere}
+.sweep-skipped-group small{font-size:var(--metadata-size);overflow-wrap:anywhere}
+.sweep-skipped-group a{white-space:nowrap}
+
+/* Familiar form rhythm across routes, including the restored Rift flow. */
+.rift-native .rounded-2xl,.new-mint-panel,.staking-card{border-color:var(--line)}
+.rift-native p,.rift-native li{line-height:1.7}
+.rift-native input,.rift-native select{font-size:1rem;min-height:48px}
+.rift-native h3,.rift-native h4{font-size:1.125rem;line-height:1.5}
+.native-get-panel{margin-top:20px}
+.new-mint-panel{padding:26px}
+.new-mint-panel>p{font-size:1rem;line-height:1.7}
+.new-mint-panel .mint-output-breakdown{font-size:var(--support-size)}
+.earn-aside .reward-card{min-height:0;padding-bottom:22px}
+.stream-funding>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;font-weight:650;cursor:pointer;list-style:none;font-size:1rem}
+.stream-funding>summary::-webkit-details-marker{display:none}
+.stream-funding:not([open]){padding-top:10px;padding-bottom:10px}
+.transition-guide{padding:8px 24px}
+.transition-guide>summary{display:flex;justify-content:space-between;gap:18px;align-items:center;cursor:pointer;list-style:none;padding:12px 0;font-weight:650;font-size:1rem}
+.transition-guide>summary::-webkit-details-marker{display:none}
+.transition-guide>summary>span:last-child{display:flex;align-items:center;gap:8px;font-size:var(--support-size);color:var(--blue);font-weight:550}
+.transition-guide>div{padding:16px 0}
+.transition-guide header h2{font-size:1.25rem}
+.transition-guide header>p,.transition-guide li p{font-size:var(--support-size)}
+.collateral-balances span{font-size:var(--support-size)}
+
+@media(max-width:1000px){
+ .overview-main-grid{grid-template-columns:minmax(0,1fr)}
+ .overview-side-stack{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
+ .overview-side-stack .liq-yield-card{padding:20px}
+ .overview-side-stack .liq-yield-content>.button{font-size:var(--support-size)}
+ .position-row{grid-template-columns:minmax(0,1.6fr) minmax(0,.8fr) auto;gap:6px 12px}
+}
+@media(max-width:760px){
+ .overview-side-stack{grid-template-columns:minmax(0,1fr)}
+ .portfolio-grid{grid-template-columns:minmax(0,1fr)}
+ .portfolio-yields{grid-template-columns:minmax(0,1fr)}
+}
+@media(max-width:640px){
+ .header-inner{height:64px}
+ .main-container{padding-top:16px}
+ .live-status-wrap{margin-bottom:20px}
+ .connection-strip{gap:4px 8px;padding:2px 10px;min-height:48px}
+ .connection-strip>strong{font-size:.875rem}
+ .connection-details{margin-left:auto;position:static}
+ .connection-details>summary{font-size:var(--metadata-size);padding:4px 0;gap:3px}
+ .connection-details>div{left:0;right:auto;width:100%;top:calc(100% + 8px)}
+ .connection-strip .connection-refresh{margin-left:0;width:44px;justify-content:center;padding:0}
+ .connection-refresh>span{display:none}
+ .deployment-caption{font-size:.8125rem;margin-top:8px;line-height:1.65}
+ .page-title{margin:16px 0 20px;gap:12px;align-items:flex-start}
+ .page-title h1{font-size:1.875rem;line-height:1.25}
+ .page-title p:not(.eyebrow){font-size:1rem;line-height:1.6;margin-top:6px}
+ .page-title .eyebrow{font-size:.75rem;margin-bottom:6px}
+ .page-title>.pill{font-size:var(--metadata-size);padding:5px 8px}
+ .hero-copy{padding:26px 24px}
+ .hero h1{font-size:clamp(2.5rem,11vw,3rem);line-height:1.12;max-width:9ch}
+ .hero h1 span{color:#b5d1ff}
+ .hero-copy>p{font-size:1rem;line-height:1.7;max-width:27ch}
+ .hero .orbital-scene{width:310px;height:250px;right:-130px;top:42px;opacity:.28;pointer-events:none}
+ .hero-eyebrow{font-size:.75rem}
+ .hero-buttons{margin-top:22px;gap:10px}
+ .hero-footnote{margin-top:20px}
+ .overview-main-grid{gap:18px}
+ .overview-side-stack{gap:18px}
+ .overview-side-stack .liq-yield-card{padding:20px}
+ .protocol-stats p{font-size:var(--support-size)}
+ .protocol-stats>div>span{font-size:var(--support-size)}
+ .section-heading h2{font-size:1.375rem}
+ .sample-caption{font-size:var(--metadata-size)}
+ .portfolio-metrics{gap:12px;margin-bottom:16px;grid-template-columns:repeat(2,minmax(0,1fr))}
+ .portfolio-metrics .card{padding:16px}
+ .portfolio-metrics .card:first-child{grid-column:1/-1}
+ .portfolio-metrics .card>span{font-size:.875rem;line-height:1.5}
+ .portfolio-metrics .card>h2{font-size:1.875rem;line-height:1.3;margin:6px 0}
+ .portfolio-metrics .card:first-child>h2{font-size:2.25rem}
+ .portfolio-metrics .card p{font-size:.875rem;line-height:1.6}
+ .portfolio-metrics .card .text-link{font-size:.875rem;gap:5px}
+ .portfolio-metrics .card>.text-link .icon{width:14px;flex:none}
+ .portfolio-shortcuts{justify-content:stretch;margin:0 0 20px;gap:10px}
+ .portfolio-shortcuts>.text-link{flex:1;justify-content:center;padding:8px;font-size:.875rem;gap:6px;text-align:center}
+ .portfolio-shortcuts .token-icon{display:none}
+ .portfolio-grid{gap:18px}
+ .positions-card,.wallet-assets{padding:20px 18px 0}
+ .wallet-assets{padding-bottom:18px}
+ .position-table-head{display:none}
+ .position-row{grid-template-columns:minmax(0,1fr) minmax(80px,.55fr);gap:4px 12px;padding:14px 0}
+ .position-row>.position-main{grid-column:1;grid-row:1;gap:10px;align-items:center}
+ .position-main strong{font-size:1rem;line-height:1.5}
+ .position-main .token-icon{width:30px!important;height:30px!important}
+ .position-generation{font-size:.75rem;margin-top:2px}
+ .position-row>.position-balance{grid-column:2;grid-row:1;text-align:right;align-self:center}
+ .position-balance strong{font-size:1rem}
+ .position-balance small{font-size:.8125rem}
+ .position-row>.position-note{grid-column:1;grid-row:2;padding-left:40px;font-size:.875rem;line-height:1.6;align-self:center}
+ .position-row>.position-manage{grid-column:2;grid-row:2;font-size:.875rem;align-self:center}
+ .positions-footer{font-size:.8125rem;line-height:1.65;padding:14px 18px}
+ .portfolio-yields{margin-top:20px;gap:18px}
+ .portfolio-yields>.card{padding:20px}
+ .liq-yield-content dl>div{font-size:.875rem}
+ .liq-yield-content>.button{font-size:.875rem;padding-left:10px;padding-right:10px}
+ .portfolio-protocol-rates>div{font-size:.875rem;gap:10px}
+ .portfolio-protocol-rates p,.iaero-funded-rate p,.liq-yield-content p{font-size:.875rem}
+ .activity-card .card-title-row{flex-wrap:wrap;gap:4px}
+ .activity-card-empty .activity-empty{gap:8px 12px}
+ .sweep-token-row{gap:8px 10px;padding:12px 0}
+ .sweep-token-row>label{gap:8px;align-items:center}
+ .sweep-token-row>label>.token-icon{display:none}
+ .sweep-token-row>label>span{min-width:0}
+ .sweep-token-row .sweep-row-balance{font-size:.875rem;line-height:1.6}
+ .sweep-token-row .sweep-wallet-value{font-size:.8125rem}
+ .sweep-token-row .sweep-row-amount{margin:0;width:100%}
+ .sweep-actionbar{bottom:-20px;margin:16px -20px -4px;padding:12px 20px calc(12px + env(safe-area-inset-bottom))}
+ .sweep-actionbar .button{font-size:.9375rem}
+ .sweep-selection-total,.sweep-confirm-context{font-size:.875rem;gap:4px 10px}
+ .sweep-dialog .dialog-heading h2{font-size:1.375rem;line-height:1.35}
+ .sweep-dialog .dialog-heading p{font-size:.9375rem;line-height:1.6}
+ .sweep-skipped-group p{font-size:.875rem;line-height:1.65}
+ .live-legacy-dialog .claim-all-toolbar{gap:12px;flex-wrap:nowrap}
+ .live-legacy-dialog .claim-all-toolbar .button{flex:none}
+ .claim-all-toolbar>div>span{font-size:.875rem}
+ .claim-token-summary>div{gap:12px}
+ .claim-coverage-note{font-size:.875rem;margin-bottom:12px}
+ .new-mint-panel{padding:20px}
+ .transition-guide{padding:6px 18px}
+ .transition-guide>summary{align-items:flex-start;flex-direction:column;gap:0}
+ .transition-guide>div{padding-top:12px}
+ .transition-guide ol{grid-template-columns:1fr}
+ .info-box{font-size:.9375rem}
+ .product-card p{font-size:1rem}
+}
+@media(max-width:370px){
+ .connection-strip{gap:4px 6px;padding-left:8px;padding-right:8px}
+ .connection-strip>strong{font-size:.8125rem}
+ .connection-details>summary{font-size:.75rem}
+ .position-row{grid-template-columns:minmax(0,1fr) minmax(74px,.5fr);gap:4px 8px}
+ .position-main>.token-icon{display:none}
+ .position-row>.position-note{padding-left:0}
+ .portfolio-shortcuts>.text-link{font-size:.8125rem}
+ .sweep-mode-picker>button{font-size:.8125rem;padding:8px}
+}
+@media(prefers-reduced-motion:reduce){.portfolio-yields{scroll-behavior:auto}}
+
+/* Match the established dialog padding at each breakpoint. */
+.sweep-dialog{--dialog-content-padding:30px}
+.sweep-dialog .sweep-actionbar{margin-left:calc(-1 * var(--dialog-content-padding));margin-right:calc(-1 * var(--dialog-content-padding));padding-left:var(--dialog-content-padding);padding-right:var(--dialog-content-padding);bottom:calc(-1 * var(--dialog-content-padding))}
+@media(max-width:640px){.sweep-dialog{--dialog-content-padding:20px}}
+@media(max-width:370px){.sweep-dialog{--dialog-content-padding:18px}}
+
+/* Protocol-wide income explanations use the same reading scale as positions. */
+.yield-metrics p,.yield-apy>div,.yield-method-note{font-size:var(--support-size)}
+.yield-chain-status,.protocol-yield-card>footer{font-size:var(--metadata-size)}
+.yield-details>div>p,.yield-details>div>ul{font-size:var(--reading-size)}
+.yield-asset small,.yield-claim small{font-size:var(--metadata-size)}
+.stream-funding dl>div{font-size:var(--support-size)}
+.transaction-amount>.exact-amount{flex:1;min-width:0;text-align:left}
+.transaction-amount .exact-amount>strong{font-size:clamp(1.5rem,6vw,2.5rem);line-height:1.4}
+
+@media(max-width:640px){.page-title .eyebrow{display:none}}
+.sweep-review-inputs>div>.exact-amount{margin-left:auto;flex:0 0 auto;min-width:6ch;max-width:55%;text-align:right}
+.sweep-review-inputs .exact-amount>strong{max-width:none;font-size:var(--support-size)}
+@media(max-width:370px){.portfolio-metrics{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:370px){
+ .connection-strip.is-healthy{display:grid;grid-template-columns:6px minmax(0,1fr) auto 44px;column-gap:6px}
+ .connection-strip>strong{line-height:1.5;min-width:0;white-space:normal}
+ .connection-details{min-width:0}
+}
+
+.yield-window-qualification{font-size:var(--support-size);line-height:1.7;color:var(--amber);padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-soft);margin:12px 0}

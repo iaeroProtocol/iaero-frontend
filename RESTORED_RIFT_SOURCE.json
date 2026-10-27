@@ -1,0 +1,161 @@
+{
+  "sourceHead": "2e0c9cd51e56086076de98331636b2822b600002",
+  "files": [
+    {
+      "path": "lib/rift/order-state.ts",
+      "sourceSha256": "590d12bf5f60f2a7becbe41ff0a0e3b6b25d5d54d3e0d864fb2819127b6420f1"
+    },
+    {
+      "path": "lib/rift/evidence.ts",
+      "sourceSha256": "325f7d10c509f1237531d32ccb47747d2b652b0144b907bbc579f68e21556b3f"
+    },
+    {
+      "path": "lib/rift/prices.ts",
+      "sourceSha256": "1d82d04b79f3e39277f59e26d75a893a15e1b47f16c24f0d2932c072c0960a1a"
+    },
+    {
+      "path": "lib/rift/cost.ts",
+      "sourceSha256": "1d6543612cfc740bdb5b90a3950ed19ae273f8b0f5b9e4c8f45ede371e1aced8"
+    },
+    {
+      "path": "lib/rift/holdings.ts",
+      "sourceSha256": "041854933cbdd0ad8839361dbc8a3efb6c8838462d284dd92c8d9b08534a3a69"
+    },
+    {
+      "path": "lib/rift/watch.ts",
+      "sourceSha256": "18a09734b4bd237ff4a94d14ec334cabea5d310fe072ab0c805ac0bdee3ba355"
+    },
+    {
+      "path": "lib/rift/errors.ts",
+      "sourceSha256": "6f505b6b73d650071fdfd3024400b6c2ddba9aff3a9e03cf053dd38ccd3fc6e2"
+    },
+    {
+      "path": "lib/rift/payment-io.ts",
+      "sourceSha256": "c6afaadfbf6b90b01238bef2dcb4db1d3d56c5cba82321a7f6849753baa44f06"
+    },
+    {
+      "path": "lib/rift/storage.ts",
+      "sourceSha256": "eeeca7c810f0f2b41feaf77388e38adb74456e137734a49dfafa50531b82cb2e"
+    },
+    {
+      "path": "lib/rift/timing.ts",
+      "sourceSha256": "a385c42149e22c9d7cd5ee2720dcaf58bef6c0189f6fbd4e861c1a58d4324f7a"
+    },
+    {
+      "path": "lib/rift/validate.ts",
+      "sourceSha256": "df22758463091807e292692e1951a00cc510685abbb41bd4b32c419212e56615"
+    },
+    {
+      "path": "lib/rift/names.ts",
+      "sourceSha256": "788cd1eb4098430bcc4a4eebd6dd9398897659d9af9e617c845b0413d4a0008c"
+    },
+    {
+      "path": "lib/rift/types.ts",
+      "sourceSha256": "dd4d422b2aa3106251979615a7508aa8cf03221e77401ded74785f402618ca01"
+    },
+    {
+      "path": "lib/rift/keys.ts",
+      "sourceSha256": "d6e9453d968d2d0b9bff1329f6b54240fedcb1f70c0ea3a17e05c8cd4c4fa9fd"
+    },
+    {
+      "path": "lib/rift/client.ts",
+      "sourceSha256": "5ac6949c0af53060bf780602c546175f2e75b530ef7f439afe93b8c73318bc53"
+    },
+    {
+      "path": "lib/rift/bitcoin.ts",
+      "sourceSha256": "3c7d5f231e2db2733472a63afca5e2d91b9a03900de3cfdb291beec4c290990b"
+    },
+    {
+      "path": "lib/rift/notice.ts",
+      "sourceSha256": "94535680e0e75ca69d8292f8127c63515d373406b694eeac0ba610c4f5ae7a58"
+    },
+    {
+      "path": "lib/rift/hypercore.ts",
+      "sourceSha256": "6537beac7599db79d2f1cf66cfef9061f40b31a09473c073c6083da45b08c64b"
+    },
+    {
+      "path": "lib/rift/alchemy-fallback.ts",
+      "sourceSha256": "df5ca9c9c1bc73b09a801619fde572a70dd148d4893518eec6b5eb939e0d833a"
+    },
+    {
+      "path": "lib/rift/config.ts",
+      "sourceSha256": "e2da5664779a2722e10b974c3750862e9bc2cef9cf59005f73ffe03fb5ae6ab7"
+    },
+    {
+      "path": "lib/rift/rate-limit.ts",
+      "sourceSha256": "bfeac24dca2d201b1e11a8b679a4718cefd6587e0a33d76d19b13cf14d947541"
+    },
+    {
+      "path": "lib/rift/amount.ts",
+      "sourceSha256": "0d086ac1c965edd3c474c7d4cc55d5948fb7800c29272a7edfc018040af53b5d"
+    },
+    {
+      "path": "lib/rift/support.ts",
+      "sourceSha256": "e9393d4740b8230b00c24161b15b97ec6cb465b1ca5ca6c943201a048c8b36c6"
+    },
+    {
+      "path": "lib/rift/rift-tokens.ts",
+      "sourceSha256": "5bde59d07a9d38309c8bd8d5a229d48875f0110e25371619585165eb010eb3f8"
+    },
+    {
+      "path": "lib/rift/server.ts",
+      "sourceSha256": "2ab807c41bd0e40b980a6c9ca835415acb434d48963546d778028cdc64c23264"
+    },
+    {
+      "path": "lib/rift/blockscout-pages.ts",
+      "sourceSha256": "a3fed0604136b68eadf730dd960cc11ad9dd6457a00c92b9346f64052683c16f"
+    },
+    {
+      "path": "lib/rift/quote-check.ts",
+      "sourceSha256": "562a7810819e0684fb3bf496a1b43b1241424e7e28d86de5deb8786b9d0d91aa"
+    },
+    {
+      "path": "components/rift/status.ts",
+      "sourceSha256": "6adbef399308c497362be027317ee3f7d7c2700d4ebc664063b3aeabc085cba2"
+    },
+    {
+      "path": "components/rift/RecentOrders.tsx",
+      "sourceSha256": "3b6a14281bf790955204e93539035ecd9f5a90caca8d2e12c92a6c4eb69b81d0"
+    },
+    {
+      "path": "components/rift/RiftErrorBoundary.tsx",
+      "sourceSha256": "571691ed4baeecadfbbb83a9cc87860d779eb6a6475e2ae618b0dfbb54d03d9d"
+    },
+    {
+      "path": "components/rift/OrderWatcher.tsx",
+      "sourceSha256": "04593184138b6fb929159843e0314637a685af05e87c7d96edf5cb2734f91ee7"
+    },
+    {
+      "path": "components/rift/BitcoinPayment.tsx",
+      "sourceSha256": "16977969346f1ce55a7a7d8b8d5bf74bb38c5257ee8105773393888254f5716a"
+    },
+    {
+      "path": "components/rift/OrderTracker.tsx",
+      "sourceSha256": "f84f7e98ed264b2f31b5c368702beac27a5d9a5760740f77d4ebd33e8b0f674b"
+    },
+    {
+      "path": "components/rift/RouteSteps.tsx",
+      "sourceSha256": "46752f22b24af5c424655e70a500bf21a29fb0564c2bf64d8227ce4047b147eb"
+    },
+    {
+      "path": "lib/public-rpcs.ts",
+      "sourceSha256": "d54d464da7af294cd2939c32a62c090f9d68c8d608c918221df54fce1ddbc3f0"
+    },
+    {
+      "path": "lib/utils.ts",
+      "sourceSha256": "6f05a54bbe22b236ba059efbdc4c318285fda739d463ba2dedb46fe3cb079619"
+    },
+    {
+      "path": "components/protocol/GetIaeroSection.tsx",
+      "sourceSha256": "777cd7e2e89aba0e631ebb20df106c808ad061b19c287f67c3ba329eb3287f0d"
+    }
+  ],
+  "notes": "Original payment/order engine copied; local React/Vite wallet, display and holdings adapters reviewed separately. No orders created or payments sent.",
+  "localAuditRemediation": {
+    "at": "2026-10-26T17:01:55.223912+00:00",
+    "file": "src/restored/lib/rift/storage.ts",
+    "sha256": "d1b77d4cb8d4ab56acdc608ac1f9c2d4558e2cda162edac633addaf5b7734779",
+    "change": "Adds recovery export of merged durable/in-memory facts and retained foreign records; original source hashes above remain provenance references.",
+    "verification": "203 engine checks, including two new recovery regressions. Original repository unchanged."
+  }
+}

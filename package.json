@@ -1,85 +1,61 @@
 {
-  "name": "iaero-frontend",
+  "name": "iaero-saero-local-preview",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "pages:build": "npx @cloudflare/next-on-pages",
-    "deploy": "npm run pages:build && wrangler pages deploy .vercel/output/static",
-    "start": "next start",
-    "lint": "next lint",
-    "test:rift": "node --test tests/rift/*.test.mjs",
-    "test:vault": "node --test tests/vault/*.test.mjs"
+    "dev": "vite --host 127.0.0.1 --port 4317 --strictPort",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4317 --strictPort",
+    "serve:staged-production": "node server/serve.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:browser": "node scripts/browser-check.mjs",
+    "test:browser:live": "node scripts/live-browser-check.mjs",
+    "test:read-only": "node scripts/read-only-check.mjs",
+    "test:browser:sweep": "node scripts/sweep-browser-check.mjs",
+    "test:sweep:read-only": "node scripts/sweep-read-only-check.mjs",
+    "test:batch:read-only": "node scripts/batch-read-only-check.mjs",
+    "test:markets:read-only": "node scripts/market-read-only-check.mjs",
+    "test:usability": "node scripts/usability-check.mjs",
+    "test:browser:yield": "node scripts/yield-browser-check.mjs",
+    "build:pages": "node scripts/build-pages.mjs",
+    "pages:build": "node scripts/build-pages.mjs --cloudflare",
+    "test:rift": "node --test test/restored-rift/*.test.mjs"
   },
   "dependencies": {
-    "@radix-ui/react-accordion": "^1.2.12",
-    "@radix-ui/react-avatar": "^1.1.10",
-    "@radix-ui/react-checkbox": "^1.3.3",
-    "@radix-ui/react-dialog": "^1.1.15",
-    "@radix-ui/react-dropdown-menu": "^2.1.16",
-    "@radix-ui/react-hover-card": "^1.1.15",
-    "@radix-ui/react-label": "^2.1.7",
-    "@radix-ui/react-navigation-menu": "^1.2.14",
-    "@radix-ui/react-popover": "^1.1.15",
-    "@radix-ui/react-progress": "^1.1.7",
-    "@radix-ui/react-radio-group": "^1.3.8",
-    "@radix-ui/react-scroll-area": "^1.2.10",
-    "@radix-ui/react-select": "^2.2.6",
-    "@radix-ui/react-separator": "^1.1.7",
-    "@radix-ui/react-slider": "^1.3.6",
-    "@radix-ui/react-slot": "^1.2.3",
-    "@radix-ui/react-switch": "^1.2.6",
-    "@radix-ui/react-tabs": "^1.1.13",
-    "@radix-ui/react-tooltip": "^1.2.8",
-    "@rainbow-me/rainbowkit": "^2.2.8",
-    "@tanstack/react-query": "^5.85.5",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "ethers": "^6.15.0",
-    "framer-motion": "^12.23.12",
-    "lucide-react": "^0.542.0",
-    "next": "^15.5.24",
-    "qrcode.react": "^4.2.0",
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1",
-    "tailwind-merge": "^3.3.1",
-    "tailwindcss-animate": "^1.0.7",
-    "viem": "^2.36.0",
-    "wagmi": "^2.16.8"
+    "@tanstack/react-query": "5.90.10",
+    "@walletconnect/ethereum-provider": "2.26.0",
+    "clsx": "2.1.1",
+    "lucide-react": "0.542.0",
+    "qrcode.react": "4.2.0",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "tailwind-merge": "3.3.1",
+    "viem": "2.57.11",
+    "wagmi": "3.7.9"
   },
   "devDependencies": {
-    "@cloudflare/next-on-pages": "^1.13.16",
-    "@eslint/eslintrc": "^3",
-    "@tailwindcss/postcss": "^4.1.12",
-    "@types/node": "^24",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "autoprefixer": "^10.4.21",
-    "eslint": "^9",
-    "eslint-config-next": "15.5.24",
-    "postcss": "^8.5.6",
-    "tailwindcss": "^4.1.12",
-    "tw-animate-css": "^1.3.7",
-    "typescript": "^5"
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "24.3.0",
+    "@types/react": "19.1.10",
+    "@types/react-dom": "19.1.9",
+    "miniflare": "4.20260730.0",
+    "playwright-core": "1.64.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "vite": "8.3.4",
+    "vitest": "4.1.12",
+    "wrangler": "4.152.0"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   },
   "overrides": {
-    "minimatch@3.1.5": {
-      "brace-expansion": "1.1.21"
-    },
-    "next@^15.5.24": {
-      "postcss": "8.5.29"
-    },
-    "@walletconnect/ethereum-provider": "2.25.0",
-    "@coinbase/cdp-sdk": "1.48.3",
-    "axios": "1.20.0",
-    "uuid": "11.1.1",
+    "undici": "8.12.3",
+    "sharp": "0.35.5",
     "ws": "8.22.0",
-    "jayson": {
-      "ws": "7.5.13"
-    },
-    "@walletconnect/jsonrpc-ws-connection": {
-      "ws": "7.5.13"
-    }
+    "decode-uri-component": "0.5.1",
+    "zod": "4.6.7"
   }
 }

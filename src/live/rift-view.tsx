@@ -1,0 +1,19 @@
+import {useRef,useState} from 'react';
+import {usePreview} from '../store';
+import {Button,Info,SegmentedTabs} from '../components';
+import type {OpenPanel} from '../screens';
+import {NewMintPanel} from './new-stack-view';
+import {RiftWalletProvider} from './rift-wallet';
+import GetIaeroSection from '../restored/components/protocol/GetIaeroSection';
+import RiftErrorBoundary from '../restored/components/rift/RiftErrorBoundary';
+import {loadOrders,upsertOrder,exportOrderRecords} from '../restored/lib/rift/storage';
+import {sanitizeOrder} from '../restored/lib/rift/order-state';
+import {ORDERS_KEY} from '../restored/lib/rift/keys';
+import '../rift.css';
+export function RiftOrderBackup(){const [notice,setNotice]=useState(''),[busy,setBusy]=useState(false),input=useRef<HTMLInputElement>(null);return <details className="yield-details"><summary>Saved order backup & recovery</summary><div><p>Orders stay in this browser. Local testing and the production site use separate browser storage. Export from the old site’s origin to move your records here. Keep payment details private.</p><div className="rift-backup-actions"><Button variant="secondary" onClick={()=>{try{const raw=JSON.stringify(exportOrderRecords()),url=URL.createObjectURL(new Blob([raw],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download='iaero-rift-orders.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),60000);setNotice('Recovery records exported, including any unsaved payment updates.');}catch(error){setNotice(error instanceof Error?error.message:'Order export unavailable. Keep this page open and retry.');}}}>Export saved orders</Button><Button variant="secondary" disabled={busy} onClick={()=>input.current?.click()}>Import recovery records</Button><input ref={input} hidden type="file" accept="application/json,.json" disabled={busy} onChange={async e=>{const file=e.currentTarget.files?.[0];if(!file)return;setBusy(true);setNotice('');try{if(file.size>2000000)throw Error('Order backup is too large.');const parsed=JSON.parse(await file.text());if(!Array.isArray(parsed)||parsed.length>125)throw Error('Use an exported order array.');const orders=parsed.map(sanitizeOrder);if(orders.some(o=>!o))throw Error('The backup includes an unsupported order; your current records were preserved.');let added=0;for(const o of orders){if(loadOrders().some(x=>x.id===o!.id))continue;const result=await upsertOrder({...o!,importedRecoveryOnly:true,payUnknown:true});if(result==='failed')throw Error('Browser storage is unavailable; import stopped.');added++;}setNotice(added+' recovery records imported. Payment is disabled for imported records; use Check payment to reconcile existing transfers.');}catch(error){setNotice(error instanceof Error?error.message:'Could not import orders.');}finally{setBusy(false);e.target.value='';}}}/></div>{notice&&<p role="status">{notice}</p>}</div></details>;}
+export default function NativeGet({openPanel}:{openPanel:OpenPanel}){
+ const s=usePreview(),[route,setRoute]=useState<'rift'|'mint'|'nft'>('rift');
+ return <div className="page-enter"><div className="page-title"><div><p className="eyebrow">YOUR ROUTE TO LIQUIDITY</p><h1>More ways to get iAERO.</h1><p>Bring assets from another chain. Arrive with liquid iAERO on Base.</p></div></div><SegmentedTabs className="route-tabs" id="live-get-route" label="Get iAERO route" value={route} options={[{value:'rift',label:'Buy with Rift'},{value:'mint',label:'Deposit AERO'},{value:'nft',label:'Deposit NFT'}]} onChange={setRoute}/><section className="native-get-panel" role="tabpanel" id="live-get-route-panel" aria-labelledby={'live-get-route-'+route}>
+  {route==='rift'?<><div className="rift-native"><RiftErrorBoundary><RiftWalletProvider><GetIaeroSection active showToast={m=>s.notify(m)} onGoToStake={()=>s.go('earn')}/></RiftWalletProvider></RiftErrorBoundary></div><RiftOrderBackup/></>:<NewMintPanel route={route}/>}
+ </section></div>;
+}

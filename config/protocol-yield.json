@@ -1,0 +1,280 @@
+{
+  "positionId": "1584",
+  "leafVoter": "0x382409fad8503FbCdbB27A4211551fa03e884078",
+  "positionCreatedAt": "2026-10-22T01:19:29Z",
+  "positionCreationTransaction": "0x41ef14d95bed2b4f3014831370064554ffbac33bb1f138458790fa6e868625ef",
+  "positionCreationBlock": "52921311",
+  "sources": [
+    "aero-rewards-harvester/keeper/config/mainnet.json",
+    "sAERO/MigrationDocs/evidence/2026-10-22/rescue-91856/README.md",
+    "V3/src/interfaces/rewards/IVotingRewardsManager.sol",
+    "V3/src/voter/LeafVoter.sol"
+  ],
+  "maxCheckpoints": 1000,
+  "maxProgramsPerManager": 20,
+  "maxLogChunksPerRun": 16,
+  "chains": [
+    {
+      "key": "base",
+      "name": "Base",
+      "chainId": 8453,
+      "historyFromBlock": "52921311",
+      "seedGauges": [
+        "0x14018f5AFaeCA44BB49d5036267d836723B57c91",
+        "0x347f2eEDD83Dc6b14116f0260403d67A21f47C30",
+        "0x4262b2d1415345b98E656a56c2f12cDBb1118539",
+        "0x46a9dCa72D78366571bE583aa69C1DC16E6889fB",
+        "0x4A3B6A77B545584d870D4A6de446AAc4610c60D5",
+        "0x5b14d6D194E49330647eB4717010aDe1B1B3f8B5",
+        "0xb1b27a2fa4E67a6d0Ee1aA9De97c8b1DDF54FDD4",
+        "0xd424BA8ca9d4E278753DE76651a0095451e65cD1",
+        "0xFc8922E268CCcbe8160e5C1AD546Af9705Cf0A61"
+      ],
+      "logChunkBlocks": 10000,
+      "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "explorer": "https://basescan.org",
+      "approvedRecipients": [
+        "0x1039CB48254a3150fC604d4B9ea08F66f4739D37",
+        "0xe6E7d3c6379ad80de02f26ccc72605d0f70d5201",
+        "0xC6bcDf0d212341B4d6fA6Dd94cEed6431E08985B",
+        "0x77f90d2dDB15Ffe28fa322aDA351d11da3B8bFe5"
+      ]
+    },
+    {
+      "key": "ethereum",
+      "name": "Ethereum",
+      "chainId": 1,
+      "historyFromBlock": "26245085",
+      "seedGauges": [
+        "0x430D74920F5BF2a6A2A27aF16Ab66Dfe77bffA2a"
+      ],
+      "logChunkBlocks": 10000,
+      "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "explorer": "https://etherscan.io",
+      "approvedRecipients": [
+        "0x1039CB48254a3150fC604d4B9ea08F66f4739D37",
+        "0xe6E7d3c6379ad80de02f26ccc72605d0f70d5201",
+        "0xC6bcDf0d212341B4d6fA6Dd94cEed6431E08985B"
+      ]
+    },
+    {
+      "key": "robinhood",
+      "name": "Robinhood Chain",
+      "chainId": 4663,
+      "historyFromBlock": "94758138",
+      "seedGauges": [
+        "0xe033F4Bd3D7Ccf537A2F954eCDC8eB1218e3B7a6"
+      ],
+      "logChunkBlocks": 50000,
+      "usdc": null,
+      "explorer": "https://explorer.robinhood.com",
+      "approvedRecipients": [
+        "0x1039CB48254a3150fC604d4B9ea08F66f4739D37",
+        "0xe6E7d3c6379ad80de02f26ccc72605d0f70d5201",
+        "0xC6bcDf0d212341B4d6fA6Dd94cEed6431E08985B"
+      ]
+    }
+  ],
+  "displayPriceAliases": [
+    {
+      "chainId": 1,
+      "token": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "decimals": 18,
+      "baseToken": "0x4200000000000000000000000000000000000006",
+      "source": "Reviewed harvester token configuration; canonical WETH, display estimate only"
+    },
+    {
+      "chainId": 4663,
+      "token": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+      "decimals": 18,
+      "baseToken": "0x4200000000000000000000000000000000000006",
+      "source": "Reviewed harvester token configuration; canonical WETH, display estimate only"
+    },
+    {
+      "chainId": 8453,
+      "token": "0x0000000000000000000000000000000000000000",
+      "decimals": 18,
+      "baseToken": "0x4200000000000000000000000000000000000006",
+      "source": "Native ETH on the configured ETH-gas chains; display pricing only, no claim identity rewrite"
+    },
+    {
+      "chainId": 1,
+      "token": "0x0000000000000000000000000000000000000000",
+      "decimals": 18,
+      "baseToken": "0x4200000000000000000000000000000000000006",
+      "source": "Native ETH on the configured ETH-gas chains; display pricing only, no claim identity rewrite"
+    },
+    {
+      "chainId": 4663,
+      "token": "0x0000000000000000000000000000000000000000",
+      "decimals": 18,
+      "baseToken": "0x4200000000000000000000000000000000000006",
+      "source": "Native ETH on the configured ETH-gas chains; display pricing only, no claim identity rewrite"
+    }
+  ],
+  "pricing": {
+    "endpoint": "https://coins.llama.fi",
+    "maxAgeSeconds": 1800,
+    "maxFutureSeconds": 60,
+    "minConfidence": 0.9,
+    "usdcSource": {
+      "id": "base:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "symbol": "USDC"
+    },
+    "assets": [
+      {
+        "chainId": 1,
+        "token": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+        "decimals": 6,
+        "symbol": "USDT",
+        "sources": [
+          {
+            "id": "ethereum:0xdAC17F958D2ee523a2206206994597C13D831ec7",
+            "symbol": "USDT"
+          }
+        ]
+      },
+      {
+        "chainId": 1,
+        "token": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "decimals": 18,
+        "symbol": "WETH",
+        "sources": [
+          {
+            "id": "ethereum:0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            "symbol": "WETH"
+          }
+        ]
+      },
+      {
+        "chainId": 1,
+        "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "decimals": 6,
+        "symbol": "USDC",
+        "sources": [
+          {
+            "id": "ethereum:0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "symbol": "USDC"
+          },
+          {
+            "id": "coingecko:usd-coin",
+            "symbol": "USDC"
+          }
+        ]
+      },
+      {
+        "chainId": 1,
+        "token": "0x4c9EDD5852cd905f086C759E8383e09bff1E68B3",
+        "decimals": 18,
+        "symbol": "USDe",
+        "sources": [
+          {
+            "id": "ethereum:0x4c9EDD5852cd905f086C759E8383e09bff1E68B3",
+            "symbol": "USDe"
+          },
+          {
+            "id": "coingecko:ethena-usde",
+            "symbol": "USDe"
+          }
+        ]
+      },
+      {
+        "chainId": 1,
+        "token": "0xe343167631d89B6Ffc58B88d6b7fB0228795491D",
+        "decimals": 6,
+        "symbol": "USDG",
+        "sources": [
+          {
+            "id": "ethereum:0xe343167631d89B6Ffc58B88d6b7fB0228795491D",
+            "symbol": "USDG"
+          },
+          {
+            "id": "coingecko:global-dollar",
+            "symbol": "USDG"
+          }
+        ]
+      },
+      {
+        "chainId": 4663,
+        "token": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+        "decimals": 6,
+        "symbol": "USDG",
+        "sources": [
+          {
+            "id": "robinhood:0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+            "symbol": "USDG"
+          },
+          {
+            "id": "ethereum:0xe343167631d89B6Ffc58B88d6b7fB0228795491D",
+            "symbol": "USDG"
+          },
+          {
+            "id": "coingecko:global-dollar",
+            "symbol": "USDG"
+          }
+        ]
+      },
+      {
+        "chainId": 4663,
+        "token": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+        "decimals": 18,
+        "symbol": "WETH",
+        "sources": [
+          {
+            "id": "robinhood:0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+            "symbol": "WETH"
+          },
+          {
+            "id": "ethereum:0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            "symbol": "WETH"
+          }
+        ]
+      },
+      {
+        "chainId": 8453,
+        "token": "0x0000000000000000000000000000000000000000",
+        "symbol": "ETH",
+        "decimals": 18,
+        "sources": [
+          {
+            "id": "coingecko:ethereum",
+            "symbol": "ETH"
+          }
+        ]
+      },
+      {
+        "chainId": 1,
+        "token": "0x0000000000000000000000000000000000000000",
+        "symbol": "ETH",
+        "decimals": 18,
+        "sources": [
+          {
+            "id": "coingecko:ethereum",
+            "symbol": "ETH"
+          }
+        ]
+      },
+      {
+        "chainId": 4663,
+        "token": "0x0000000000000000000000000000000000000000",
+        "symbol": "ETH",
+        "decimals": 18,
+        "sources": [
+          {
+            "id": "coingecko:ethereum",
+            "symbol": "ETH"
+          }
+        ]
+      }
+    ]
+  },
+  "economicAssetAliases": {
+    "8453:0x0000000000000000000000000000000000000000": "8453:0x4200000000000000000000000000000000000006",
+    "1:0x0000000000000000000000000000000000000000": "1:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    "4663:0x0000000000000000000000000000000000000000": "4663:0x0bd7d308f8e1639fab988df18a8011f41eacad73"
+  },
+  "currentMarketReference": {
+    "endpoint": "https://api.dexscreener.com",
+    "minLiquidityUsdc": 10000
+  }
+}

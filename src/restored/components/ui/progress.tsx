@@ -1,0 +1,1 @@
+export function Progress({value=0,className}:{value?:number;className?:string}){return <div className={'rift-progress '+(className??'')} role="progressbar" aria-valuenow={value} aria-valuemin={0} aria-valuemax={100}><span style={{width:Math.max(0,Math.min(value,100))+'%'}}/></div>;}

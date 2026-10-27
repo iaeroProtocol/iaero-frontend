@@ -1,0 +1,172 @@
+{
+  "startedAt": "2026-10-26T09:33:36.797324+00:00",
+  "objective": "Implement all accepted frontend feature-parity and new-protocol recommendations locally before push/publication. Production protocol yield history must be globally shared, with complete explicit multi-chain coverage.",
+  "constraints": [
+    "Local stage and testing first; no git push, production publication, deployment, mainnet transaction or actual payment without the existing review/owner process.",
+    "Preserve existing production repositories and the six reviewed protocol clients.",
+    "Retain Rift payment/order safeguards and existing production order keys.",
+    "No keys or RPC credentials in browser assets, logs or history.",
+    "No numerical rates or zero income inferred from unavailable history/prices.",
+    "New-contract execution gated until deployed addresses and runtime/links are verified."
+  ],
+  "items": [
+    {
+      "id": "global_yield",
+      "title": "Shared production yield API/store, scheduled recorder and portable core",
+      "status": "implemented_local; compiled_worker_and_real_local_d1_verified; production_publication_pending"
+    },
+    {
+      "id": "chain_values",
+      "title": "All-chain pricing, per-chain totals and transparent missing valuations",
+      "status": "implemented_local; all_24_observed_tokens_priced; chain_totals_and_native_eth_supported"
+    },
+    {
+      "id": "rift",
+      "title": "Native Rift cross-chain purchase/order/recovery flow and order import/export",
+      "status": "implemented_local; 201_engine_checks_and_native_browser_flow_passed; actual_payment_acceptance_pending"
+    },
+    {
+      "id": "wallets",
+      "title": "WalletConnect and consistent mobile/injected wallet state",
+      "status": "implemented_local; public_project_id_configured; actual_qr_modal_passed; real_phone_pairing_pending"
+    },
+    {
+      "id": "liq",
+      "title": "Native LIQ staking/partial exit/claims and lock countdown",
+      "status": "implemented_local; exact_partial_exit_browser_passed; two_provider_contract_readback_passed"
+    },
+    {
+      "id": "legacy",
+      "title": "Full funded history discovery and partial legacy withdrawals",
+      "status": "implemented_local; full_two_provider_census_2028_pairs_21_auto_epochs_and_partial_exit_browser_passed"
+    },
+    {
+      "id": "new_stack",
+      "title": "Deployment-gated AERO/NFT/LIQ mint previews, funded USDC staking and replacement AutoVault",
+      "status": "implemented_gated; source_unit_browser_checks_passed; accepted_deployed_manifest_pending"
+    },
+    {
+      "id": "transition",
+      "title": "Resumable old-to-new staking transition with preserved rewards",
+      "status": "implemented_local; balance_derived_resumable_steps_and_browser_rendering_passed; new_contract_execution_pending_deployment"
+    },
+    {
+      "id": "revenue",
+      "title": "Per-chain earned/claimed/conversion/bridge/distribution and net funded yields",
+      "status": "partial; all_chain_earned_claimed_and_historical_valuations_implemented; conversion_delivery_funding_receipt_ingestion_pending"
+    },
+    {
+      "id": "collateral",
+      "title": "Deployment-gated receipt/collateral wrapping, unwrapping and rewards",
+      "status": "implemented_gated; source_unit_and_gated_browser_checks_passed; accepted_deployed_wrapper_pending"
+    },
+    {
+      "id": "overview",
+      "title": "iAERO price/supply, backing/allocations disclosure, income history and support links",
+      "status": "implemented_local; price_supply_custody_allocations_history_support_links_and_browser_checks_passed"
+    },
+    {
+      "id": "validation",
+      "title": "Full relevant unit/browser/mobile/read-only checks and locally running staged result",
+      "status": "author_delta_checks_passed; 338_unit_67_browser_118_responsive; independent_owner_phone_fork_acceptance_pending"
+    },
+    {
+      "id": "visual_audit_followup",
+      "title": "Apply all eleven visual-audit recommendations locally",
+      "status": "implemented_local_author_verified; independent_review_pending",
+      "evidence": "artifacts/visual-upgrade/RESOLUTIONS.json"
+    },
+    {
+      "id": "observed_period_apy",
+      "title": "Earned pending growth plus interval claims and provisional all-chain N-day annualisation",
+      "status": "implemented_local_author_verified; independent_release_acceptance_pending",
+      "evidence": "artifacts/n-day-yield/REPORT.json"
+    },
+    {
+      "id": "shared_price_recovery",
+      "title": "Correct missing reward valuations and persist shared price recovery for global production",
+      "status": "implemented_local_author_verified; production_publication_import_and_independent_acceptance_pending",
+      "evidence": "artifacts/shared-yield-pricing/REPORT.json"
+    },
+    {
+      "id": "branded_dashboard_and_audit_repairs",
+      "title": "Combine accepted dashboard with original branding and repair four site-audit findings",
+      "status": "implemented_local_author_verified; independent_owner_release_acceptance_pending",
+      "report": "artifacts/branded-dashboard/REPORT.json"
+    }
+  ],
+  "productionPublishing": "Not authorised by the local staging request; prepare concrete result for review.",
+  "latestFacts": {
+    "unitTests": 368,
+    "restoredRiftTests": 203,
+    "browserFunctionalChecks": 226,
+    "usabilityScenarios": 122,
+    "livePricing": "17 Base + 5 Ethereum + 2 Robinhood; zero unpriced in the recorded probe",
+    "globalBackend": "Scheduled shared Worker/D1 with durable price provenance/recovery; production publication/import pending",
+    "sourceFiles": "Six reviewed SDK files unchanged; production source repositories tracked clean",
+    "dependencyAudit": "0 reported vulnerabilities",
+    "publicWalletConnectProjectId": "Configured from user response; actual QR modal opened without pairing",
+    "legacyCensus": "Two providers, 2028 funded pairs and 21 AutoVault harvest epochs through recorded block 53110630",
+    "apy": "Earned pending-token growth plus interval claims; observed N-day then rolling 7d; owner-accepted provisional all-chain view; strict verified weekly fields unchanged",
+    "freshSharedRuntime": "Rebuilt Worker committed earnedPriceObservedAt; 312 old facts preserved in a frozen 353-snapshot archive",
+    "liqPortfolioYield": "Separate staked LIQ position, unlock/Manage controls and Overview estimated APR; 12 delta browser + 20 wallet/legacy + 118 responsive checks pass. Published forecast dated 21 October, seven-day limit enforced.",
+    "browserFunctionalScope": "Current pricing, N-day, history, Portfolio and wallet/legacy checks; prior visual/Rift evidence retained",
+    "overview": "Branded dashboard with actual personal summaries, scoped rewards, yields and complete evidence/history disclosure"
+  },
+  "updatedAt": "2026-10-27T10:32:03.830326+00:00",
+  "remainingDependencies": [
+    "Production D1/Worker publication after local review, tested backups and monitoring",
+    "Independent frontend/service review and exact-artifact behavioral acceptance",
+    "Fresh independent Robinhood provider and remote route acceptance",
+    "Deployment manifest for user-facing new contracts and optional wrapper",
+    "Physical phone/Safari WalletConnect pairing and actual-owner acceptance",
+    "Conversion, bridge-delivery and funding receipt ingestion for complete revenue journey",
+    "Flow-adjusted APY for windows where protocol backing changes"
+  ],
+  "auditRemediation": {
+    "report": "artifacts/audit-remediation/REPORT.md",
+    "status": "all_11_fixed_author_verified; independent_acceptance_pending",
+    "knownOpenConfirmedCodeFindings": 0
+  },
+  "latestLiqFollowUp": {
+    "report": "artifacts/liq-portfolio-yield-final/REPORT.md",
+    "status": "implemented_local_author_verified; independent_release_acceptance_pending"
+  },
+  "latestPortfolioYields": {
+    "report": "artifacts/portfolio-yields-final/REPORT.md",
+    "status": "implemented_local_author_verified; independent_release_acceptance_pending",
+    "sameCalculationsAsOverviewAndEarn": true,
+    "browserChecks": 37,
+    "responsiveScenarios": 118
+  },
+  "visualUpgrade": {
+    "findingsAddressed": 11,
+    "unitTestsPassed": 279,
+    "functionalBrowserChecksPassed": 129,
+    "responsiveScenariosPassed": 118,
+    "actualPublicReadCheck": "UNAVAILABLE: primary RPC 429; secondary reads succeed; two-provider gate preserved"
+  },
+  "latestObservedPeriodApy": {
+    "report": "artifacts/n-day-yield/REPORT.json",
+    "ownerChoice": "Show a provisional all-chain estimate",
+    "independentReviewPerformed": false,
+    "productionAcceptance": "HOLD"
+  },
+  "latestSharedPricing": {
+    "report": "artifacts/shared-yield-pricing/REPORT.json",
+    "globalHandoff": "artifacts/shared-yield-pricing/GLOBAL_HANDOFF.json",
+    "productionPublished": false,
+    "independentReviewPerformed": false
+  },
+  "latestBrandedDashboard": {
+    "report": "artifacts/branded-dashboard/REPORT.html",
+    "repairs": "artifacts/branded-dashboard/RESOLUTIONS.json",
+    "sourceManifest": "evidence/2026-10-27/branded-dashboard/MANIFEST.json",
+    "independentReviewPerformed": false
+  },
+  "releaseAuthorization": {
+    "date": "2026-10-27",
+    "request": "Improve Portfolio and ship this version with every deployed route connected.",
+    "scope": "Frontend publication and read-only shared-data infrastructure; no new contract deployment or signing."
+  }
+}

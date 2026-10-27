@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "chainId": 8453,
+  "enabled": false,
+  "acceptedReview": null,
+  "addresses": {},
+  "runtimeHashes": {},
+  "status": "User-facing stack not deployed; populate only from the accepted deployment manifest."
+}

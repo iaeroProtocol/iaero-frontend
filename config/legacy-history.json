@@ -1,0 +1,26 @@
+{
+  "chainId": 8453,
+  "observedAt": "2026-10-26T10:15:26.041Z",
+  "targets": [
+    {
+      "key": "staking",
+      "address": "0x781A80fA817b5a146C440F03EF8643f4aca6588A",
+      "firstBlock": "35164965",
+      "firstBlockHash": "0xbe61dd5b23c067f7592af7e343095dc1cd96284e96c354f07e4f1e6c875c02f0",
+      "createdAt": 1757119277,
+      "codeHash": "0xf0ffc6d333b526d93522ffa09d413054c9e24aefd4b5ba5c9b24a0d47171a7b7",
+      "providers": 2
+    },
+    {
+      "key": "autoVault",
+      "address": "0xFE5c929677D97723dc822C86c93c7e2D1B59c774",
+      "firstBlock": "46299110",
+      "firstBlockHash": "0xa95b80fa7212bab900c44a4a8de7dfddaa08f36549ec558384cb845c89332433",
+      "createdAt": 1779387567,
+      "codeHash": "0x992441639ea40809742cee774b6655be9d8f3ed6d8703d7ced9d930d95f3bef5",
+      "providers": 2
+    }
+  ],
+  "indexHint": "https://raw.githubusercontent.com/iaeroProtocol/ChainProcessingBot/main/data/epochs.json",
+  "scope": "Independent archive-code boundary at both configured providers; fixed contract addresses, no sends."
+}

@@ -1,0 +1,5 @@
+import {it,expect} from 'vitest';
+import {historyHealth} from '../worker/health';
+const now=1793000000000,report={readAtMs:now,summary:{historyComplete:true,independentCoverageComplete:true},errors:[]},legacy={complete:true,readAtMs:now};
+it('requires current claim and legacy indexing, not just a fresh cached report',()=>{expect(historyHealth(report,legacy,true,now).healthy).toBe(true);expect(historyHealth({...report,summary:{historyComplete:false}},legacy,true,now).status).toBe('partial');expect(historyHealth(report,{...legacy,complete:false},true,now).healthy).toBe(false);expect(historyHealth(report,{...legacy,readAtMs:now-900001},true,now).healthy).toBe(false);expect(historyHealth({...report,readAtMs:now-900001},legacy,true,now).status).toBe('stale');});
+it('exposes independent provider limitations separately from operational recorder health',()=>{const out=historyHealth({...report,summary:{historyComplete:true,independentCoverageComplete:false}},legacy,true,now);expect(out.healthy).toBe(true);expect(out.status).toBe('limited');expect(out.independentCoverageComplete).toBe(false);});

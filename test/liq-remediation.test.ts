@@ -1,0 +1,29 @@
+import {describe,it,expect,vi} from 'vitest';
+import {getAddress,type Address} from 'viem';
+import raw from '../config/base.registry.json';
+import {readLiq,executeLiq} from '../src/live/liq';
+import type {Bootstrap} from '../src/live/types';
+const E=10n**18n,user=getAddress('0x'+'11'.repeat(20)),token=(n:number)=>getAddress('0x'+n.toString(16).padStart(40,'0')),boot={registry:raw,liqStakingReady:true} as unknown as Bootstrap;
+function fixture(count=196){
+ const tokens=Array.from({length:count},(_,i)=>token(i+100)),values=tokens.map(()=>1n*E);let inFlight=0,maximum=0;const selected=new Set(tokens),credits=new Map<string,bigint>();
+ const read=vi.fn(async({functionName:fn,args=[],address}:any)=>{
+  if(fn==='getPendingRewards')return [tokens,values];if(fn==='paused')return false;if(fn==='balanceOf')return 20n*E;if(fn==='unlockTime')return 0n;if(fn==='totalLIQStaked')return 100n*E;if(fn==='maxStakePerUser'||fn==='maxTotalStaked')return 10000n*E;if(fn==='allowance')return 0n;
+  if(fn==='PRECISION')return E;if(fn==='accRewardPerShare')return 2n*E;if(fn==='rewardDebt')return E;
+  if(fn==='creditOf')return credits.get(args[1])??0n;
+  if(fn==='decimals'||fn==='symbol'){inFlight++;maximum=Math.max(maximum,inFlight);await new Promise(r=>setTimeout(r,0));inFlight--;if(address===tokens[1]&&fn==='symbol')throw Error('metadata unavailable');return fn==='decimals'?18:'REWARD';}
+  throw Error(fn);
+ });return {tokens,values,credits,read,maximum:()=>maximum,client:{getBlock:async()=>({number:1n,timestamp:1000n}),readContract:read} as any};
+}
+describe('LIQ live-sized rewards and retired-token recovery',()=>{
+ it('reads all 196 tokens with bounded metadata work and retains unsupported metadata',async()=>{const f=fixture(),result=await readLiq(f.client,boot,user);expect(result.enumeratedTokens).toBe(196);expect(result.rewards).toHaveLength(196);expect(f.maximum()).toBeLessThanOrEqual(8);expect(result.rewards[1].symbol).toContain('0x');expect(result.errors).toEqual([]);});
+ it('keeps healthy token rows when another credit preview fails',async()=>{const f=fixture(3),original=f.read.getMockImplementation()!;f.read.mockImplementation(async r=>{if(r.functionName==='creditOf'&&r.args[1]===f.tokens[1])throw Error('one credit read failed');return original(r);});const result=await readLiq(f.client,boot,user);expect(result.rewards).toHaveLength(3);expect(result.rewards[1].credit).toBeUndefined();expect(result.errors).toHaveLength(1);});
+ it('claims 196 selected tokens in separate groups of 50 then reads each credit',async()=>{const f=fixture(),send=vi.fn(async()=>('0x'+'ab'.repeat(32)) as `0x${string}`);await executeLiq({client:f.client,state:{boot,address:user}} as any,{kind:'liqClaimMany',rewardLegs:f.tokens.map(t=>({token:t,amount:E,decimals:18,symbol:'R',epoch:0n}))} as any,send);expect(send.mock.calls.map((c:any)=>c[3][0].length)).toEqual([50,50,50,46]);});
+ it('quotes and claims a retired token without requiring current enumeration',async()=>{const f=fixture(0),retired=token(999),send=vi.fn(async()=>('0x'+'ab'.repeat(32)) as `0x${string}`),result=await readLiq(f.client,boot,user,{additionalTokens:[retired]});expect(result.rewards[0]).toMatchObject({token:retired,amount:20n*E,retired:true});await executeLiq({client:f.client,state:{boot,address:user}} as any,{kind:'liqClaim',tokenAddress:retired} as any,send);expect(send.mock.calls[0]).toEqual([raw.liqStaking.distributor,expect.anything(),'claimMany',[[retired]]]);});
+ it('allows claim-all to include manually checked retired tokens',async()=>{const f=fixture(1),retired=token(999),send=vi.fn(async()=>('0x'+'ab'.repeat(32)) as `0x${string}`);await executeLiq({client:f.client,state:{boot,address:user}} as any,{kind:'liqClaimMany',rewardLegs:[...f.tokens,retired].map(t=>({token:t,amount:E,decimals:18,symbol:'R',epoch:0n}))} as any,send);expect((send.mock.calls[0] as any)[3][0]).toContain(retired);});
+ it('does not request a reward registry or token metadata for an ordinary principal withdrawal',async()=>{const f=fixture(),send=vi.fn(async()=>('0x'+'ab'.repeat(32)) as `0x${string}`);await executeLiq({client:f.client,state:{boot,address:user}} as any,{kind:'liqWithdraw',amount:E} as any,send);expect(f.read.mock.calls.some(([r])=>r.functionName==='getPendingRewards')).toBe(false);expect(send.mock.calls[0]).toEqual([raw.liqStaking.distributor,expect.anything(),'unstake',[E]]);});
+ it('refuses to change stake before a listed retired reward has been claimed',async()=>{const f=fixture(0),send=vi.fn(async()=>('0x'+'ab'.repeat(32)) as `0x${string}`);await expect(executeLiq({client:f.client,state:{boot,address:user}} as any,{kind:'liqWithdraw',amount:E,rewardLegs:[{token:token(999)}]} as any,send)).rejects.toThrow('retired-token');expect(send).not.toHaveBeenCalled();});
+ it('refuses a stake change if a manually listed retired token becomes unreadable',async()=>{const f=fixture(0),original=f.read.getMockImplementation()!,send=vi.fn(async()=>('0x'+'ab'.repeat(32)) as `0x${string}`);f.read.mockImplementation(async r=>{if(r.functionName==='accRewardPerShare')throw Error('outage');return original(r);});await expect(executeLiq({client:f.client,state:{boot,address:user}} as any,{kind:'liqWithdraw',amount:E,rewardLegs:[{token:token(999)}]} as any,send)).rejects.toThrow('retired-token reward could not be checked');expect(send).not.toHaveBeenCalled();});
+
+ it('loads a Portfolio stake summary without registry, reward, wallet or stake-cap reads',async()=>{const f=fixture(196),result=await readLiq(f.client,boot,user,{rewards:false,stakeSummaryOnly:true});expect(result.balance).toBe(20n*E);expect(result.unlockTime).toBe(0);expect(f.read.mock.calls.map(([r])=>r.functionName).sort()).toEqual(['balanceOf','paused','unlockTime']);});
+
+});

@@ -1,0 +1,30 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "iaero-protocol-history",
+  "main": "../worker/index.ts",
+  "compatibility_date": "2026-07-30",
+  "workers_dev": false,
+  "preview_urls": false,
+  "limits": {
+    "cpu_ms": 30000
+  },
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  },
+  "vars": {
+    "COLLECTOR_ENABLED": "false"
+  },
+  "d1_databases": [
+    {
+      "binding": "YIELD_DB",
+      "database_name": "iaero-protocol-history-20261027",
+      "database_id": "967ed50e-6ddc-40b5-99c2-fb66aa38435f",
+      "migrations_dir": "../worker/migrations"
+    }
+  ],
+  "compatibility_flags": [
+    "global_fetch_strictly_public"
+  ]
+}

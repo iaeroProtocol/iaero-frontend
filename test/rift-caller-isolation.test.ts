@@ -1,0 +1,13 @@
+import {it,expect,vi,afterEach} from 'vitest';
+vi.mock('viem',async()=>{const actual=await vi.importActual<any>('viem');return {...actual,createPublicClient:()=>({multicall:async({contracts}:any)=>contracts.map(()=>({status:'success',result:0n})),getBalance:async()=>0n})};});
+import {baseApiMiddleware} from '../server/base-rpc';
+import {clientAddressResolver} from '../server/access-policy';
+afterEach(()=>vi.unstubAllGlobals());
+function mockReads(){vi.stubGlobal('fetch',vi.fn(async(input:any)=>{const url=String(input);return Response.json(url.includes('hyperliquid')?{balances:[]}:url.includes('llama')?{coins:{}}:{items:[],next_page_params:null});}));}
+async function holdings(middleware:ReturnType<typeof baseApiMiddleware>,peer:string,owner:number,headers:Record<string,string>={}){
+ const req={url:'/api/rift/holdings?address=0x'+owner.toString(16).padStart(40,'0'),method:'GET',headers:{host:'app.example',origin:'https://app.example',...headers},socket:{remoteAddress:peer}};let body='';const res={statusCode:200,setHeader:()=>{},end:(value:string)=>body=value};
+ await middleware(req as any,res as any,()=>{throw Error('Unexpected missing route');});return {status:res.statusCode,body:JSON.parse(body)};
+}
+it('serves more than thirty independent direct clients without a shared Rift bucket',async()=>{mockReads();const middleware=baseApiMiddleware({publicOrigin:'https://app.example',collect:false});for(let i=1;i<=31;i++)expect((await holdings(middleware,'198.51.100.'+i,100+i)).status).toBe(200);});
+it('limits a busy direct caller despite spoofed headers and keeps another caller available',async()=>{mockReads();const middleware=baseApiMiddleware({publicOrigin:'https://app.example',collect:false});for(let i=1;i<=30;i++)expect((await holdings(middleware,'203.0.113.40',200+i,{'x-forwarded-for':'198.51.100.'+i,'cf-connecting-ip':'198.51.100.'+i})).status).toBe(200);expect((await holdings(middleware,'203.0.113.40',250,{'x-forwarded-for':'198.51.100.200','cf-connecting-ip':'198.51.100.200'})).status).toBe(429);expect((await holdings(middleware,'203.0.113.41',251)).status).toBe(200);});
+it('isolates clients behind explicitly trusted ingress while ignoring spoofed left-hand hops',async()=>{mockReads();const middleware=baseApiMiddleware({publicOrigin:'https://app.example',collect:false,clientAddress:clientAddressResolver('["127.0.0.1"]')});for(let i=1;i<=30;i++)expect((await holdings(middleware,'127.0.0.1',300+i,{'x-forwarded-for':'192.0.2.'+i+',203.0.113.50'})).status).toBe(200);expect((await holdings(middleware,'127.0.0.1',350,{'x-forwarded-for':'192.0.2.250,203.0.113.50'})).status).toBe(429);expect((await holdings(middleware,'127.0.0.1',351,{'x-forwarded-for':'192.0.2.250,203.0.113.51'})).status).toBe(200);});

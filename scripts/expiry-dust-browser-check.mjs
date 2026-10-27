@@ -1,0 +1,22 @@
+import assert from 'node:assert/strict';
+import {mkdir,writeFile} from 'node:fs/promises';
+import {liveFixture} from './live-fixture.mjs';
+import {blankLedger,addSnapshot,summariseYield} from '../src/protocol-data/yield-model.ts';
+const origin=process.env.PREVIEW_URL??'http://127.0.0.1:4317';assert.equal(new URL(origin).hostname,'127.0.0.1');
+const out='artifacts/expiry-dust-browser';await mkdir(out,{recursive:true});const checks=[];
+for(const width of [1440,390,320]){
+ const f=await liveFixture({viewport:{width,height:width<500?844:1000},reducedMotion:'reduce'}),{page,state}=f,base=Date.now(),end=Math.floor(base/1000)-1200,start=end-5*86400,token='0x'+'22'.repeat(20),ids=[8453,1,4663],providers={8453:2,1:2,4663:1},s=blankLedger('expiry');
+ const a={chainId:8453,token,amount:'100',decimals:0,symbol:'TOKEN',valueUsdcWad:'100000000000000000000',price:{source:'market-reference',observedAt:Math.floor(base/1000)-1790,reference:'base:'+token,carriedForward:true}};
+ for(const id of ids)s.cursors[id]={block:'1',hash:'0x'+'11'.repeat(32),timestamp:end,fromBlock:'0',providers:providers[id],complete:true,gauges:[]};
+ for(const [id,timestamp,assets] of [['start',start,[]],['end',end,[a]]])addSnapshot(s,{id,timestamp,recordedAt:base,backingAero:'1000',tvlUsdcWad:'10000000000000000000000',assets,pendingComplete:false,observedComplete:true,observationProviders:providers,chains:ids,errors:[]});
+ state.protocolAnnualised=summariseYield(s,end,ids,{},{startedAt:start}).annualised;state.protocolAssets=[a];state.protocolPendingValue=a.valueUsdcWad;state.protocolChains=ids.map((chainId,i)=>({name:['Base','Ethereum','Robinhood Chain'][i],chainId,providers:providers[chainId],status:chainId===4663?'single-provider':'verified',historyComplete:true}));state.liqPrincipal=1n;
+ let reads=0;page.on('request',r=>{if(new URL(r.url()).pathname==='/api/protocol-yield')reads++;});
+ try{
+  await page.clock.install({time:new Date(base)});await page.goto(origin);await f.connect();const card=page.getByRole('article',{name:'iAERO yield',exact:true}),earned=card.locator('.portfolio-protocol-rates>div>strong').first(),received=card.locator('.portfolio-protocol-rates>div>strong').nth(1);await page.getByText('Earned APY · 5d estimate',{exact:true}).waitFor();assert.notEqual(await earned.innerText(),'—');const before=reads;await page.clock.fastForward(12000);await page.getByText('Price observations expired. Refresh for a current earned-yield estimate.',{exact:true}).waitFor();assert.equal(await earned.innerText(),'—');assert.equal(reads,before);checks.push({width,name:'earned APY expires on its own deadline without another report response'});
+  assert.equal(await received.innerText(),'0.00%');await f.openLegacy();assert.equal(await page.getByRole('button',{name:'Claim all',exact:true}).isEnabled(),true);await f.close();checks.push({width,name:'price expiry retains received APY and unrelated legacy claim access'});
+  a.price.observedAt=Math.floor((base+12000)/1000);state.protocolAnnualised.earnedPriceObservedAt=a.price.observedAt;await card.getByRole('button',{name:'Refresh iAERO yield',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.portfolio-protocol-rates>div>strong')?.textContent!=='—');assert.notEqual(await earned.innerText(),'—');checks.push({width,name:'a new successful price observation restores the earned rate'});
+  const row=page.locator('[data-position=liqStake]'),number=row.locator('.balance-amount');assert.equal(await number.locator('[aria-hidden=true]').innerText(),'< 0.01');assert.equal(await number.getAttribute('title'),'0.000000000000000001 LIQ');checks.push({width,name:'positive dust has a nonzero summary and accessible exact balance'});await row.scrollIntoViewIfNeeded();await page.screenshot({path:out+'/'+width+'-dust.png'});
+  state.liqPrincipal=0n;await card.getByRole('button',{name:'Refresh iAERO yield',exact:true}).click();await row.locator('.balance-amount [aria-hidden=true]').getByText('0.00',{exact:true}).waitFor();assert.deepEqual(f.errors,[]);assert.equal(f.writes.length,0);checks.push({width,name:'a true zero remains distinct from dust; no wallet writes or page errors'});
+ }catch(e){await page.screenshot({path:out+'/FAILURE-'+width+'.png',fullPage:true});throw e;}finally{await f.browser.close();}
+}
+await writeFile(out+'/RESULT.json',JSON.stringify({status:'PASS',checks,scope:'Compiled UI, virtual clock and mocked reads/wallet; no signatures or real transactions.'},null,2)+'\n');console.log(JSON.stringify({status:'PASS',checks:checks.length,realTransactions:0}));

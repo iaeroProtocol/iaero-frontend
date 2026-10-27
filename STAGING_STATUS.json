@@ -1,0 +1,44 @@
+{
+  "recordedAtUtc": "2026-10-27T12:37:05.279Z",
+  "status": "FINAL_FRONTEND_AUTHOR_VERIFIED; HOSTED_PREVIEW; PRODUCTION_PLAN_GATE",
+  "validation": {
+    "unitTestsPassed": 414,
+    "restoredRiftTestsPassed": 203,
+    "functionalBrowserChecksPassed": 258,
+    "usabilityScenariosPassed": 122,
+    "clForkScenariosPassed": 5,
+    "compiledPagesChecksPassed": 10,
+    "dependencyVulnerabilities": 0,
+    "reviewedClientsUnchanged": 6,
+    "restoredRiftFilesUnchanged": 47
+  },
+  "release": {
+    "recordedAt": "2026-10-27T12:37:05.279Z",
+    "status": "FINAL_FRONTEND_AUTHOR_VERIFIED; HOSTED_PREVIEW; PRODUCTION_PLAN_GATE",
+    "userAuthorizedFrontendPublication": true,
+    "previewUrl": "https://saero-portfolio-20261027.iaero-frontend.pages.dev",
+    "currentProductionRetained": "https://45fcd96f.iaero-frontend.pages.dev",
+    "database": "iaero-protocol-history-20261027",
+    "historyFactsVerified": 361,
+    "historyVerification": "artifacts/portfolio-release/history/REMOTE_IMPORT_VERIFICATION.json",
+    "blockers": [
+      "Workers Paid required by CPU and subrequest budgets; error 100328 on Free",
+      "Hosted recorder must commit a fresh report and pass health before the production switch"
+    ],
+    "newUserContracts": "Owner confirmed vault, keeper and harvester only. Deposit/stream execution remains deployment-gated.",
+    "transactionsSent": 0,
+    "localRecorderResumed": true,
+    "soleCloudRecorderActive": false,
+    "latestLocalObservationCount": 389,
+    "latestLocalObservationAsOf": "2026-10-27T12:31:45.763Z",
+    "disabledWorkerPrepared": true,
+    "encryptedReadOnlySourcesStaged": true,
+    "remainingCutover": [
+      "Workers Paid activation",
+      "Freeze local recorder while idle; append and verify all facts after the 361-row seed",
+      "Enable hosted recorder; require a fresh scheduled report and healthy routes",
+      "Switch production to the verified release artifact"
+    ],
+    "noChainTransactions": true
+  }
+}
