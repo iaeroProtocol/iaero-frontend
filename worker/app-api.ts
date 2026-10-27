@@ -26,7 +26,7 @@ export function createAppReadApi(env:AppReadEnv,options:{fetchImpl?:typeof fetch
   if(!env.ZERO_EX_API_KEY)throw new SweepQuoteError('QUOTE_AUTHENTICATION',503,'The quote service authentication needs attention.');
   const upstream=new URL('https://api.0x.org/swap/allowance-holder/quote');
   upstream.search=new URLSearchParams({chainId:'8453',sellToken:token,sellAmount:amount.toString(),buyToken:registry.legacy.USDC,taker:registry.sweep.swapper,recipient:registry.sweep.swapper,slippageBps:String(slippage)}).toString();
-  return bounded(async()=>{const r=await fetcher(upstream,{headers:{'0x-api-key':env.ZERO_EX_API_KEY!,'0x-version':'v2'},signal:AbortSignal.timeout(25000),redirect:'error'}),data=await r.json().catch(()=>null);checkQuoteServiceResponse(r.status,data);return data;});
+  return bounded(async()=>{const r=await fetcher(upstream,{headers:{'0x-api-key':env.ZERO_EX_API_KEY!,'0x-version':'v2'},signal:AbortSignal.timeout(25000),redirect:'manual'});if(r.status>=300&&r.status<400){await r.body?.cancel();throw Error('Quote redirect refused');}const data=await r.json().catch(()=>null);checkQuoteServiceResponse(r.status,data);return data;});
  }
  const values=new Map<string,{at:number;pending:Promise<TokenValue>}>();
  let liq:{at:number;pending:Promise<unknown>}|undefined;
@@ -43,7 +43,7 @@ export function createAppReadApi(env:AppReadEnv,options:{fetchImpl?:typeof fetch
     const reader=request.body?.getReader();if(!reader)return appJson({error:'Missing read request.'},400);const decoder=new TextDecoder();let size=0,body='';
     try{for(;;){const chunk=await reader.read();if(chunk.done)break;size+=chunk.value.byteLength;if(size>100000){await reader.cancel();return appJson({error:'Request too large.'},413);}body+=decoder.decode(chunk.value,{stream:true});}body+=decoder.decode();}finally{reader.releaseLock();}
     let canonical:string;try{canonical=canonicalReadRequest(JSON.parse(body));}catch{return appJson({error:'Only supported Base read and simulation requests are permitted.'},400);}
-    await bootstrap();const reply=await bounded(async()=>{const r=await fetcher(urls[0],{method:'POST',headers:{'content-type':'application/json'},body:canonical,signal:AbortSignal.timeout(25000),redirect:'error'});if(!r.ok)throw Error('Base unavailable');return scrubReadResponse(await r.json());});return appJson(reply);
+    await bootstrap();const reply=await bounded(async()=>{const r=await fetcher(urls[0],{method:'POST',headers:{'content-type':'application/json'},body:canonical,signal:AbortSignal.timeout(25000),redirect:'manual'});if(!r.ok)throw Error('Base unavailable');return scrubReadResponse(await r.json());});return appJson(reply);
    }
    if(path==='/api/rewards/value'){
     let input;try{input=valueInput(url.searchParams);}catch{return appJson({error:'Invalid reward valuation request.'},400);}

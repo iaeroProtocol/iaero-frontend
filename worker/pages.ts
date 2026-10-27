@@ -45,7 +45,10 @@ export function createPagesHandler(options:{readApi?:ReturnType<typeof createApp
      const reader=request.body?.getReader();if(!reader)return appJson({error:'Missing body.'},400);let bytes=0;body='';const decoder=new TextDecoder();
      try{for(;;){const chunk=await reader.read();if(chunk.done)break;bytes+=chunk.value.byteLength;if(bytes>100000){await reader.cancel();return appJson({error:'Request too large.'},413);}body+=decoder.decode(chunk.value,{stream:true});}body+=decoder.decode();}finally{reader.releaseLock();}
     }
-    const upstream=await (options.legacyFetch??fetch)(new URL(url.pathname+url.search,env.LEGACY_API_ORIGIN),{method:request.method==='HEAD'?'GET':request.method,headers:{accept:'application/json',...(body!==undefined?{'content-type':'application/json'}:{})},...(body!==undefined?{body}:{}),signal:AbortSignal.timeout(25000),redirect:'error'});
+    // Workers supports manual redirects, but rejects Node's redirect:"error".
+    // Never follow a redirect away from the retained, fixed deployment.
+    const upstream=await (options.legacyFetch??fetch)(new URL(url.pathname+url.search,env.LEGACY_API_ORIGIN),{method:request.method==='HEAD'?'GET':request.method,headers:{accept:'application/json',...(body!==undefined?{'content-type':'application/json'}:{})},...(body!==undefined?{body}:{}),signal:AbortSignal.timeout(25000),redirect:'manual'});
+    if(upstream.status>=300&&upstream.status<400){await upstream.body?.cancel();return appJson({error:'The previous API is temporarily unavailable.'},503);}
     if(!upstream.headers.get('content-type')?.includes('application/json'))return appJson({error:'The previous API is temporarily unavailable.'},503);
     reply=new Response(upstream.body,{status:upstream.status,headers:{'content-type':'application/json','cache-control':upstream.headers.get('cache-control')??'no-store'}});
    }else if(readApiPaths.has(url.pathname)){

@@ -18,7 +18,7 @@ The Pages environment needs these bindings:
 - `ZERO_EX_API_KEY`: the existing server-side 0x credential.
 - `YIELD_DB`: the shared Cloudflare D1 ledger.
 - `APP_ALLOWED_ORIGINS`: explicit public HTTPS origins allowed to call the app APIs.
-- `LEGACY_API_ORIGIN`: the retained immutable Pages deployment serving pre-existing stats, token-price and spam-report integrations.
+- `LEGACY_API_ORIGIN`: the retained immutable Pages deployment serving pre-existing stats, token-price, generic 0x quote and spam-report integrations.
 - `COLLECTOR_ENABLED`: health reporting must match the separate recorder's activation.
 
 Use compatibility date `2026-07-30` with `global_fetch_strictly_public` for the retained API routes and recorder price requests. Private settings belong in Cloudflare bindings, never VITE variables. The reviewed clients in `src/protocol` retain their original bytes; `REVIEWED_CLIENT_SOURCE.json` records their identities. The root `keeper/` and original `docs/` are preserved.
