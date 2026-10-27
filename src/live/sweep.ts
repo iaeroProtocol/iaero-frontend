@@ -6,6 +6,7 @@ import {createGuardedSender,publicError,tokenMetadata,type BaseClient,type Execu
 import type {Bootstrap} from './types';
 import {spamReason} from './token-filter';
 import type {RewardTokenValue} from './reward-value';
+import {mapReadBatches} from './read-concurrency';
 
 // [VERIFIED: integration/legacy/RewardSwapper.sol, PullStep and ExecOpts]
 export const SWEEP_ABI=parseAbi([
@@ -61,11 +62,11 @@ export async function scanSweepWallet(client:BaseClient,boot:Bootstrap,user:Addr
   const block=await client.getBlock();
   const results=await client.multicall({multicallAddress:boot.registry.sweep.multicall3,allowFailure:true,batchSize:4096,blockNumber:block.number,contracts:addresses.map(address=>({address,abi:STAKING_ERC20_ABI,functionName:'balanceOf',args:[user]} as const))});
   const tokens:SweepToken[]=[],errors:string[]=[];
-  await Promise.all(results.map(async(result,i)=>{
+  await mapReadBatches(results,async(result,i)=>{
     if(result.status!=='success'){errors.push('Balance unavailable for '+addresses[i]);return;}
     const balance=BigInt(result.result);if(balance<=0n)return;
     const meta=await tokenMetadata(client,addresses[i]);tokens.push({token:addresses[i],balance,...meta});
-  }));
+  });
   const visible:SweepToken[]=[],hidden:HiddenSweepToken[]=[];
   for(const token of tokens.sort((a,b)=>a.symbol.localeCompare(b.symbol)||a.token.localeCompare(b.token))){
     const reason=spamReason(boot.tokenFilter,token.token,token.symbol);

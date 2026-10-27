@@ -40,6 +40,7 @@ export function ProtocolYieldCard({dashboard=false}:{dashboard?:boolean}={}){
       {rate?.qualification&&<p className="yield-window-qualification">{rate.qualification}</p>}
       {dashboard&&<div className="dashboard-funded-rate"><span>Funded staking APR</span><strong>{percent(funded?.apr)}</strong><small>{app.live?.boot?.newStackReady?funded?.reason:'Awaiting verified deployment'}</small></div>}
       {dashboard&&<p className="yield-method-note">{unknown?'This read is unavailable or expired; saved receipts are preserved.':rate?.earnedReason??'Gross protocol income · before distribution to stakers.'}</p>}
+      {error&&!unknown&&<p className="yield-method-note" role="status">Refresh delayed. Showing the last recorded observation while retrying.</p>}
       {yieldPriceNote(data.assets)&&<p className="yield-method-note yield-price-note">{yieldPriceNote(data.assets)}</p>}
       {dashboard?<details className="dashboard-yield-details"><summary>Income & yield details <Icon name="chevron" size={15}/></summary><div>{detailsContent}</div></details>:detailsContent}
       <footer><span><Icon name="shield" size={14}/>{data.syncing?'Updating finalized observations…':data.readAtMs?'Observed '+new Date(data.readAtMs).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+' UTC':'Initial synchronization'}</span><span>Pending ≠ received</span></footer>

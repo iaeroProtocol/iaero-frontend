@@ -25,7 +25,7 @@ export async function inspectBootstrap(clients:Client[],run:Run=job=>job()):Prom
  }));
  const read=async(address:string,signature:string,args:readonly unknown[]=[])=>{
   const functionName=signature.match(/^function (\w+)\(/)?.[1];if(!functionName)throw Error('Invalid contract read.');
-  const values=await Promise.all(clients.map(c=>run(()=>c.readContract({address:address as Address,abi:parseAbi([signature]),functionName,args,blockNumber:block}))));
+  const values=await Promise.all(clients.map(c=>run(()=>c.readContract({address:address as Address,abi:parseAbi([signature]),functionName,args,blockNumber:block,batch:contracts.multicall3?.deployed===true}))));
   if(values.some(v=>canonical(v)!==canonical(values[0])))throw Error('Finalized getter differs between providers.');return values[0];
  };
  const deployed=(...names:string[])=>names.every(n=>contracts[n]?.deployed);

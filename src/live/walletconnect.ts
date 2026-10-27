@@ -9,4 +9,4 @@ export async function mobileWalletProvider(pair=true){
  pending??=import('@walletconnect/ethereum-provider').then(async({EthereumProvider})=>EthereumProvider.init({projectId:id,chains:[8453],optionalChains:[1,42161],showQrModal:true,metadata:{name:'iAERO',description:'Liquid AERO and USDC rewards',url:window.location.origin,icons:[new URL('/favicon.svg',window.location.origin).href]},rpcMap:{8453:'https://base-rpc.publicnode.com',1:'https://ethereum-rpc.publicnode.com',42161:'https://arb1.arbitrum.io/rpc'}}) as unknown as Promise<MobileProvider>).catch(()=>{pending=undefined;throw Error('Mobile wallet connection could not initialize. Please retry.');});
  const provider=await pending;if(!provider.session){if(!pair)return;await provider.connect();}return provider;
 }
-export async function disconnectMobileWallet(){const p=await pending;await p?.disconnect();pending=undefined;}
+export async function disconnectMobileWallet(){const previous=pending;pending=undefined;const p=await previous;await p?.disconnect();}

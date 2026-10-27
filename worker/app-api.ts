@@ -27,7 +27,7 @@ export function createAppReadApi(env:AppReadEnv,options:{fetchImpl?:typeof fetch
  async function bootstrap(){
   if(boot&&now()<boot.expiresAt)return boot.value;
   if(!pending){
-   pending=(async()=>{const produce=async()=>{const clients=urls.map(url=>createPublicClient({chain:base,transport:http(url,{timeout:20000,retryCount:0,fetchFn:rpcFetch}),ccipRead:false}));const value=options.inspect?await options.inspect():await inspectBootstrap(clients as any,bounded);return {...value,tokenFilter};};const result=options.bootstrapCache?await options.bootstrapCache.run(await sharedKey!,produce):await produce(),verified=Date.parse(result.verifiedAt);boot={expiresAt:(Number.isFinite(verified)?Math.min(now(),verified):now())+bootstrapLifetime(result),value:result};return result;})().finally(()=>{pending=undefined;});
+   pending=(async()=>{const produce=async()=>{const clients=urls.map(url=>createPublicClient({chain:{...base,contracts:{...base.contracts,multicall3:{address:registry.sweep.multicall3 as Address}}},batch:{multicall:{batchSize:16384,wait:0}},transport:http(url,{timeout:20000,retryCount:0,fetchFn:rpcFetch}),ccipRead:false}));const value=options.inspect?await options.inspect():await inspectBootstrap(clients as any,bounded);return {...value,tokenFilter};};const result=options.bootstrapCache?await options.bootstrapCache.run(await sharedKey!,produce):await produce(),verified=Date.parse(result.verifiedAt);boot={expiresAt:(Number.isFinite(verified)?Math.min(now(),verified):now())+bootstrapLifetime(result),value:result};return result;})().finally(()=>{pending=undefined;});
    // Finish the shared proof and release its lease if this visitor navigates away.
    options.waitUntil?.(pending.catch(()=>{}));
   }return pending;

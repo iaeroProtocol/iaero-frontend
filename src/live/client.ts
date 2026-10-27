@@ -10,6 +10,8 @@ import {executeLiq} from './liq';
 import {emptyWallet,liveReason,type Bootstrap,type LegacyReward,type LiveState,type WalletField} from './types';
 import {CLAIM_MANY_ABI,sendRewardClaims} from './rewards';
 import {acceptedReadCoverage} from '../protocol-data/read-coverage';
+import {mapReadBatches} from './read-concurrency';
+import {accountReadClient} from './account-read-client';
 
 export const META_ABI=parseAbi(['function symbol() view returns(string)','function decimals() view returns(uint8)']);
 export const PRINCIPAL_ABI=parseAbi(['function unstake(uint256)','function balanceOf(address) view returns(uint256)','function paused() view returns(bool)']);
@@ -57,8 +59,9 @@ export async function tokenMetadata(client:BaseClient,address:Address){
 export async function readAccount(client:BaseClient,boot:Bootstrap,user:Address,date='',customToken=''){
   if(await client.getChainId()!==8453)throw Error('The read connection is not on Base.');
   const block=await client.getBlock(),wallet=emptyWallet(),known:Partial<Record<WalletField,boolean>>={},errors:string[]=[];
+  const getterClient=accountReadClient(client,boot);
   wallet.checkpoint=Number(block.timestamp);
-  const read=(address:Address,abi:readonly unknown[],functionName:string,args:readonly unknown[]=[]):Promise<any>=>client.readContract({address,abi,functionName,args,blockNumber:block.number} as any);
+  const read=(address:Address,abi:readonly unknown[],functionName:string,args:readonly unknown[]=[]):Promise<any>=>getterClient.readContract({address,abi,functionName,args,blockNumber:block.number} as any);
   const fields:[WalletField,Address][]=[['aero',boot.registry.aero.token],['iaero',boot.registry.legacy.iAERO],['usdc',boot.registry.legacy.USDC],['liq',boot.registry.legacy.LIQ]];
   await Promise.all(fields.map(async([field,address])=>{try{wallet[field]=await read(address,STAKING_ERC20_ABI,'balanceOf',[user]);known[field]=true;}catch{errors.push(field+' wallet balance could not be read.');}}));
   const get=async<T>(label:string,operation:()=>Promise<T>):Promise<T|undefined>=>{try{return await operation();}catch{errors.push(label+' could not be read.');}};
@@ -100,15 +103,15 @@ export async function readAccount(client:BaseClient,boot:Bootstrap,user:Address,
       }catch{/* Missing entries stay unknown below. */}}
     }));
   }
-  await Promise.all(unique.map(async token=>{
+  await mapReadBatches(unique,async token=>{
     const results=await Promise.allSettled(epochs.map(async epoch=>{
       if(boot.rewardTokenAddresses?.length){const amount=batched.get(token.toLowerCase())?.get(epoch);if(amount===undefined)throw Error('Unknown reward entry');return {epoch,amount};}
       return {epoch,amount:BigInt(await read(boot.registry.legacy.epochDistributor,LEGACY_STAKING_ABI,'previewClaim',[user,token,epoch]))};
     }));
     const earned=results.flatMap(r=>r.status==='fulfilled'&&r.value.amount>0n?[r.value]:[]);rewardReadErrors+=results.filter(r=>r.status==='rejected').length;
-    if(earned.length){const metadata=await tokenMetadata(client,token);for(const row of earned)rewards.push({...row,token,...metadata});}
+    if(earned.length){const metadata=await tokenMetadata(getterClient,token);for(const row of earned)rewards.push({...row,token,...metadata});}
     if(token.toLowerCase()===boot.registry.legacy.USDC.toLowerCase()&&results.length&&results.every(r=>r.status==='fulfilled')){wallet.legacyRewards=earned.reduce((sum,r)=>sum+r.amount,0n);known.legacyRewards=true;}
-  }));
+  });
   if(rewardReadErrors)errors.push(`${rewardReadErrors} selected reward entries could not be read; they are not treated as zero.`);
   return {wallet,known,errors,ethBalance,legacyReceipts:legacyReceipts===undefined?undefined:BigInt(legacyReceipts),legacyPaused:legacyPaused===undefined?undefined:Boolean(legacyPaused),oldAutoShares:oldAutoShares===undefined?undefined:BigInt(oldAutoShares),oldAutoEarned,oldAutoEpochs,rewards:rewards.sort((a,b)=>a.epoch===b.epoch?a.token.localeCompare(b.token):a.epoch>b.epoch?-1:1),rewardTokenCount:unique.length,rewardReadErrors,rewardSelectionError,readAt:Number(block.timestamp)};
 }
