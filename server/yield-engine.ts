@@ -5,7 +5,7 @@ import registry from '../config/base.registry.json' with {type:'json'};
 import {addClaim,addSnapshot,addValuation,claimValue,effectiveClaim,yieldChainTotals,receivedYieldDays,summariseYield,invalidateAnnualised,WEEK,type YieldAsset,type YieldClaim,type YieldLedger} from '../src/protocol-data/yield-model.ts';
 import {historicalClaimPrice} from './yield-prices.ts';
 import {reservePrice} from './protocol-metrics.ts';
-import {createCurrentYieldPricer} from './yield-current-prices.ts';
+import {createCurrentYieldPricer,finalizePendingPrices} from './yield-current-prices.ts';
 import {freshYieldPrice} from '../src/protocol-data/yield-price.ts';
 const zero='0x0000000000000000000000000000000000000000';
 const canonical=(v:unknown)=>JSON.stringify(v,(_,x)=>typeof x==='bigint'?x.toString():x);
@@ -209,6 +209,7 @@ async function collect(baseUrls:string[],boot:any){
       const observed=contexts.some(c=>c.clients.length<2),prefix=observed?'observed-':'';
       try{await recordBoundary(state,contexts,windowStart,{id:prefix+'boundary:'+windowStart,allowSingleProvider:observed});aligned=!!await recordBoundary(state,contexts,windowEnd,{id:prefix+'aligned:'+windowEnd,priceAssets:true,allowSingleProvider:observed,pricer:price});}catch{errors.push('The aligned finalized observation window is unavailable.');}
     }
+    const finalPrices=finalizePendingPrices(assets,state.snapshots,policy.pricing);assets.splice(0,assets.length,...finalPrices.assets);for(const key of finalPrices.changedKeys)priceProofs.delete(key);
     const capitalKnown=typeof boot.metrics.backingAero==='string'&&/^\d+$/.test(boot.metrics.backingAero);if(!capitalKnown)errors.push('The current capital basis could not be verified.');
     if(!aligned&&capitalKnown)addSnapshot(state,{id:'observation:'+contexts.map(c=>c.source.chainId+':'+c.block+':'+c.clients.length).join(':'),timestamp:windowEnd,recordedAt:Date.now(),backingAero:boot.metrics.backingAero,tvlUsdcWad:boot.metrics.market?.tvlUsdcWad??null,assets,pendingComplete:false,chains:contexts.map(c=>c.source.chainId),errors:[...new Set(errors)]});
     const summary=summariseYield(state,windowEnd,scopeChains,policy.economicAssetAliases,{startedAt:windowOrigin});

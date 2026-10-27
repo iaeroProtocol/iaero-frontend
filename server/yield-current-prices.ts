@@ -4,13 +4,27 @@
 import type {Address} from 'viem';
 import type {YieldAsset,YieldLedger} from '../src/protocol-data/yield-model.ts';
 import type {YieldPrice} from '../src/protocol-data/yield-price.ts';
-import {validYieldPrice,freshYieldPrice} from '../src/protocol-data/yield-price.ts';
+import {validYieldPrice,freshYieldPrice,canonicalYieldUsdc} from '../src/protocol-data/yield-price.ts';
 import {estimateTokenValue} from './reward-value.ts';
 import {priceYieldAssets,type PricePolicy,type PriceProof} from './yield-prices.ts';
 type Config={usdc:string;weth:string;swapper:string;quoteEndpoint:string;aliases:{chainId:number;token:string;baseToken:string;decimals:number}[];pricing:PricePolicy;market:{endpoint:string;minLiquidityUsdc:number}};
 type Basis={amount:bigint;value:bigint;price:YieldPrice};
 const key=(a:YieldAsset)=>[a.chainId,a.token.toLowerCase(),a.decimals,a.symbol.toUpperCase()].join(':'),same=(a:unknown,b:unknown)=>typeof a==='string'&&typeof b==='string'&&a.toLowerCase()===b.toLowerCase();
 const decimal=(v:unknown)=>{if(typeof v!=='string'||!/^\d{1,13}(?:\.\d{1,30})?$/.test(v))return null;const [whole,fraction='']=v.split('.'),n=BigInt(whole)*10n**18n+BigInt((fraction+'0'.repeat(18)).slice(0,18));return n>0n&&n<=10n**30n?n:null;};
+// A long collection can outlive an early price. Reuse a newer, provenanced
+// ratio from its aligned observation without changing any archived fact or age.
+export function finalizePendingPrices(assets:YieldAsset[],snapshots:YieldLedger['snapshots'],policy:Pick<PricePolicy,'maxAgeSeconds'|'maxFutureSeconds'>,now=Date.now()){
+ const fresh=(p:YieldPrice|undefined):p is YieldPrice=>!!p&&validYieldPrice(p)&&freshYieldPrice(p.observedAt,policy.maxAgeSeconds,policy.maxFutureSeconds,now/1000),ratios=new Map<string,YieldAsset>(),changedKeys:string[]=[];
+ for(const snapshot of snapshots)for(const a of [...snapshot.assets,...(snapshot.prices??[])])if(fresh(a.price)&&a.valueUsdcWad!==null&&BigInt(a.amount)>0n&&BigInt(a.valueUsdcWad)>0n){const old=ratios.get(key(a));if(!old||old.price!.observedAt<a.price.observedAt)ratios.set(key(a),a);}
+ const result=assets.map(a=>{
+  if(canonicalYieldUsdc(a)||BigInt(a.amount)===0n)return a;
+  const ratio=ratios.get(key(a));
+  if(ratio&&(!fresh(a.price)||ratio.price!.observedAt>a.price.observedAt)){changedKeys.push(a.chainId+':'+a.token.toLowerCase());return {...a,valueUsdcWad:(BigInt(a.amount)*BigInt(ratio.valueUsdcWad!)/BigInt(ratio.amount)).toString(),price:{...ratio.price!,carriedForward:true}};}
+  if(a.valueUsdcWad!==null&&!fresh(a.price)){changedKeys.push(a.chainId+':'+a.token.toLowerCase());const {price,...rest}=a;return {...rest,valueUsdcWad:null};}
+  return a;
+ });
+ return {assets:result,changedKeys};
+}
 export function createCurrentYieldPricer(state:YieldLedger,config:Config,options:{fetchImpl?:typeof fetch;now?:()=>number}={}){
  const fetcher=options.fetchImpl??fetch,clock=options.now??Date.now,prior=new Map<string,Basis>(),current=new Map<string,Basis>(),attempted=new Map<string,Promise<Basis|null>>();
  const usable=(p:YieldPrice)=>validYieldPrice(p)&&freshYieldPrice(p.observedAt,config.pricing.maxAgeSeconds,config.pricing.maxFutureSeconds,clock()/1000);

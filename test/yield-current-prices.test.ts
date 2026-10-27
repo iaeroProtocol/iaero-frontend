@@ -1,5 +1,5 @@
 import {describe,it,expect,vi} from 'vitest';
-import {createCurrentYieldPricer} from '../server/yield-current-prices';
+import {createCurrentYieldPricer,finalizePendingPrices} from '../server/yield-current-prices';
 import {blankLedger,addSnapshot,validateLedger,type YieldAsset} from '../src/protocol-data/yield-model';
 import {yieldPriceNote} from '../src/protocol-data/yield-display';
 import {validYieldPrice,freshYieldPrice} from '../src/protocol-data/yield-price';
@@ -24,4 +24,13 @@ describe('shared current reward valuations',()=>{
  it('prefers a fresh valid quote over an older saved value',async()=>{const a=asset(),fetcher=async(url:string)=>Response.json({sellAmount:new URL(url).searchParams.get('sellAmount'),buyAmount:'2000000'});await createCurrentYieldPricer(saved(),config,{fetchImpl:fetcher as any,now:()=>now})([a]);expect(a.valueUsdcWad).toBe((2n*E18).toString());expect(a.price?.carriedForward).toBe(false);expect(a.price?.observedAt).toBe(now/1000);});
  it('preserves price provenance in immutable ledger validation and rejects corrupt metadata',()=>{const state=saved();expect(()=>validateLedger(state,'prices')).not.toThrow();state.snapshots[0].assets[0].price!.source='made-up' as any;expect(()=>validateLedger(state,'prices')).toThrow('yield_price_provenance_invalid');expect(validYieldPrice({source:'swap-quote',observedAt:1,reference:'x',carriedForward:false})).toBe(true);});
  it('does not call an unapproved market host',async()=>{const fetcher=vi.fn(async()=>new Response('',{status:422})),a=asset();await createCurrentYieldPricer(blankLedger('p'),{...config,market:{...config.market,endpoint:'https://unapproved.example'}},{fetchImpl:fetcher,now:()=>now})([a]);expect(a.valueUsdcWad).toBeNull();expect(fetcher.mock.calls).toHaveLength(2);});
+});
+
+
+describe('publication-time pending prices',()=>{
+ it('uses a newer aligned price for current quantities without mutating receipts, archived observations or price age',()=>{const state=saved(60),a=asset('5',{valueUsdcWad:'1',price:{source:'price-feed',observedAt:now/1000-1801,reference:'old',carriedForward:false}}),before=JSON.stringify({state,a}),r=finalizePendingPrices([a],state.snapshots,policy.pricing,now);expect(r.assets[0].valueUsdcWad).toBe((15n*E18).toString());expect(r.assets[0].price).toEqual({...state.snapshots[0].assets[0].price,carriedForward:true});expect(r.changedKeys).toEqual(['8453:'+token]);expect(JSON.stringify({state,a})).toBe(before);});
+ it('prefers a newer aligned ratio before the early quote expires',()=>{const a=asset('5',{valueUsdcWad:'1',price:{source:'price-feed',observedAt:now/1000-1700,reference:'early',carriedForward:false}});expect(finalizePendingPrices([a],saved(60).snapshots,policy.pricing,now).assets[0].price?.observedAt).toBe(now/1000-60);});
+ it.each([{age:1801,patch:{}},{age:-61,patch:{}},{age:60,patch:{chainId:1}},{age:60,patch:{decimals:18}},{age:60,patch:{symbol:'FAKE'}}])('does not refresh an expired value from an invalid or mismatched ratio %j',({age,patch})=>{const a=asset('5',{valueUsdcWad:'1',price:{source:'price-feed',observedAt:now/1000-1801,reference:'old',carriedForward:false}}),r=finalizePendingPrices([a],saved(age,patch).snapshots,policy.pricing,now);expect(r.assets[0].valueUsdcWad).toBeNull();expect(r.assets[0].price).toBeUndefined();});
+ it('keeps a newer current estimate and canonical USDC values unchanged',()=>{const a=asset('5',{valueUsdcWad:'1',price:{source:'price-feed',observedAt:now/1000,reference:'new',carriedForward:false}}),u=asset('1000000',{token:policy.chains[0].usdc!,decimals:6,symbol:'USDC',valueUsdcWad:E18.toString()});const r=finalizePendingPrices([a,u],saved(60).snapshots,policy.pricing,now);expect(r.assets).toEqual([a,u]);expect(r.changedKeys).toEqual([]);});
+ it('marks monitoring partial when prices expire after an otherwise successful collection',()=>{const h=historyHealth({readAtMs:now,summary:{historyComplete:true,pendingPartial:false},assets:saved(1801).snapshots[0].assets,errors:[]},{complete:true,readAtMs:now},true,now);expect(h.pricedPendingComplete).toBe(false);expect(h.healthy).toBe(false);expect(h.status).toBe('partial');});
 });
