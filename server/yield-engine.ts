@@ -1,3 +1,4 @@
+import {readRpcFetch} from './read-rpc-fetch.ts';
 import {createPublicClient,decodeEventLog,encodeEventTopics,http,isAddress,parseAbi,toHex,type Address} from 'viem';
 import policy from '../config/protocol-yield.json' with {type:'json'};
 import registry from '../config/base.registry.json' with {type:'json'};
@@ -41,7 +42,7 @@ export function yieldReadSources(baseUrls:string[]){
 }
 async function context(source:Source,urls:string[]):Promise<Context>{
   if(!urls.length)throw Error('yield_chain_connection_unavailable');
-  const clients=urls.map(url=>createPublicClient({transport:http(url,{retryCount:0,timeout:20000}),ccipRead:false}));
+  const clients=urls.map(url=>createPublicClient({transport:http(url,{retryCount:0,timeout:20000,fetchFn:readRpcFetch}),ccipRead:false}));
   const ids=await Promise.all(clients.map(c=>c.getChainId()));if(ids.some(id=>id!==source.chainId))throw Error('yield_wrong_chain');
   const heads=await Promise.all(clients.map(c=>c.getBlock({blockTag:'finalized'}))),block=heads.reduce((n,h)=>h.number<n?h.number:n,heads[0].number);
   const header=async(at:bigint)=>{const rows=await Promise.all(clients.map(c=>c.getBlock({blockNumber:at})));if(rows.some(h=>h.hash!==rows[0].hash||h.timestamp!==rows[0].timestamp))throw Error('yield_header_disagreement');return rows[0];};

@@ -1,3 +1,4 @@
+import {readRpcFetch} from './read-rpc-fetch.ts';
 import {allowApiRequest,configuredBaseReads,clientAddressResolver} from './access-policy.ts';
 import {liqYield} from './liq-yield.ts';
 import {readFile} from 'node:fs/promises';
@@ -45,7 +46,7 @@ let bootCache:{at:number;data:any}|undefined,bootInFlight:Promise<any>|undefined
 const valueCache=new Map<string,{at:number;pending:Promise<TokenValue>}>();
 async function readBootstrap(){
   const urls=await rpcSettings();
-  const clients=urls.map(url=>createPublicClient({chain:base,transport:http(url,{timeout:20000,retryCount:0}),ccipRead:false}));
+  const clients=urls.map(url=>createPublicClient({chain:base,transport:http(url,{timeout:20000,retryCount:0,fetchFn:readRpcFetch}),ccipRead:false}));
   const data=await inspectBootstrap(clients as any,bounded);
   const result={...data,tokenFilter};bootCache={at:Date.now(),data:result};return result;
 }
@@ -117,7 +118,7 @@ export function baseApiMiddleware(options:{publicOrigin?:string;collect?:boolean
       await publicBootstrap();
       const [url]=await rpcSettings();
       const result=await bounded(async()=>{
-        const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:canonical,signal:AbortSignal.timeout(25000)});
+        const response=await readRpcFetch(url,{method:'POST',headers:{'content-type':'application/json'},body:canonical,signal:AbortSignal.timeout(25000)});
         if(!response.ok)throw Error('Base connection unavailable.');return scrub(await response.json());
       });
       respond(200,result);

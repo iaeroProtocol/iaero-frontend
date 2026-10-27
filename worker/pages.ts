@@ -3,6 +3,7 @@
 import history from './index.ts';
 import type {YieldDB} from './d1-store.ts';
 import {createAppReadApi,appJson,readApiPaths,type AppReadEnv} from './app-api.ts';
+import {createBootstrapCache} from './bootstrap-cache.ts';
 import {GET as holdings} from '../server/rift-holdings.ts';
 import {rateKey,touch} from '../src/restored/lib/rift/rate-limit.ts';
 
@@ -52,7 +53,7 @@ export function createPagesHandler(options:{readApi?:ReturnType<typeof createApp
     if(!upstream.headers.get('content-type')?.includes('application/json'))return appJson({error:'The previous API is temporarily unavailable.'},503);
     reply=new Response(upstream.body,{status:upstream.status,headers:{'content-type':'application/json','cache-control':upstream.headers.get('cache-control')??'no-store'}});
    }else if(readApiPaths.has(url.pathname)){
-    let service=options.readApi??services.get(env);if(!service){service=createAppReadApi(env);services.set(env,service);}reply=await service(request);
+    let service=options.readApi??services.get(env);if(!service){service=createAppReadApi(env,{bootstrapCache:createBootstrapCache(env.YIELD_DB)});services.set(env,service);}reply=await service(request);
    }else return appJson({error:'Not found.'},404);
    const headers=new Headers(reply.headers);headers.set('x-content-type-options','nosniff');headers.set('x-frame-options','DENY');headers.set('referrer-policy','strict-origin-when-cross-origin');
    return new Response(request.method==='HEAD'?null:reply.body,{status:reply.status,headers});

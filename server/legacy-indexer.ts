@@ -1,3 +1,4 @@
+import {readRpcFetch} from './read-rpc-fetch.ts';
 import {createPublicClient,http,parseAbi,decodeEventLog,encodeEventTopics,toHex,keccak256,isAddress} from 'viem';
 import config from '../config/legacy-history.json' with {type:'json'};
 const events=parseAbi(['event RewardFunded(address indexed token,uint256 indexed epochId,uint256 amount)','event Harvested(uint256 indexed epoch,uint256 usdcGained,bool finalized)']);
@@ -7,7 +8,7 @@ export type LegacyIndex={version:1;chainId:8453;targets:Record<string,Cursor>;he
 const canonical=(v:unknown)=>JSON.stringify(v,(_,x)=>typeof x==='bigint'?x.toString():x),shape=(rows:any[])=>rows.map(l=>({address:l.address.toLowerCase(),block:l.blockNumber,hash:l.blockHash,transaction:l.transactionHash,index:l.logIndex,topics:l.topics,data:l.data})).sort((a,b)=>Number(BigInt(a.block)-BigInt(b.block))||Number(BigInt(a.index)-BigInt(b.index)));
 export async function indexLegacy(urls:string[],previous?:LegacyIndex,maxRequests=120,options:{clients?:IndexClient[]}={}):Promise<LegacyIndex>{
  if(urls.length!==2||new URL(urls[0]).hostname===new URL(urls[1]).hostname)throw Error('legacy_independent_providers_required');
- const clients:IndexClient[]=options.clients??urls.map(u=>createPublicClient({transport:http(u,{timeout:20000,retryCount:0}),ccipRead:false}));
+ const clients:IndexClient[]=options.clients??urls.map(u=>createPublicClient({transport:http(u,{timeout:20000,retryCount:0,fetchFn:readRpcFetch}),ccipRead:false}));
  if((await Promise.all(clients.map(c=>c.getChainId()))).some(id=>id!==8453))throw Error('legacy_wrong_chain');
  const heads=await Promise.all(clients.map(c=>c.getBlock({blockTag:'finalized'}))),head=heads.reduce((n,h)=>h.number<n?h.number:n,heads[0].number);
  const header=async(at:bigint)=>{const h=await Promise.all(clients.map(c=>c.getBlock({blockNumber:at})));if(h.some(v=>v.hash!==h[0].hash||v.timestamp!==h[0].timestamp))throw Error('legacy_header_disagreement');return h[0];};

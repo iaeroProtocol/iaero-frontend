@@ -1,3 +1,4 @@
+import {readRpcFetch} from './read-rpc-fetch.ts';
 // Portable read-only capital-basis adapter shared by the scheduled Worker.
 import {createPublicClient,http,parseAbi,stringToHex} from 'viem';
 import registry from '../config/base.registry.json' with {type:'json'};
@@ -6,7 +7,7 @@ import {verifyNewStack} from './new-stack.ts';
 import {reservePrice} from './protocol-metrics.ts';
 export async function yieldBootstrap(urls:string[]){
  if(urls.length!==2||new URL(urls[0]).hostname===new URL(urls[1]).hostname)throw Error('yield_independent_base_providers_required');
- const clients=urls.map(url=>createPublicClient({transport:http(url,{retryCount:0,timeout:20000}),ccipRead:false}));
+ const clients=urls.map(url=>createPublicClient({transport:http(url,{retryCount:0,timeout:20000,fetchFn:readRpcFetch}),ccipRead:false}));
  if((await Promise.all(clients.map(c=>c.getChainId()))).some(id=>id!==8453))throw Error('yield_base_chain');
  const heads=await Promise.all(clients.map(c=>c.getBlock({blockTag:'finalized'}))),block=heads.reduce((n,h)=>h.number<n?h.number:n,heads[0].number),headers=await Promise.all(clients.map(c=>c.getBlock({blockNumber:block})));
  if(headers.some(h=>h.hash!==headers[0].hash||h.timestamp!==headers[0].timestamp)||Date.now()/1000-Number(headers[0].timestamp)>3600)throw Error('yield_base_header');
