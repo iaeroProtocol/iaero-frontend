@@ -272,3 +272,6 @@ The final initial cloud archive contains 361 byte-verified observations, with ev
 Static compatibility closing check: restored the original Rift notification worker byte-for-byte and retained the old brand-image URL for notifications/social links. The isolated browser registration check requests no permission and shows no notification. The worker has no fetch handler and cannot control the app scope.
 
 Hosted-build packaging correction: Cloudflare caught omitted server modules in the first release checkout. All 19 server source files were added; the actual release checkout then passed its Pages build and diff/credential checks. The original keeper/docs remain unchanged. Hosted rebuild and production activation remain separately recorded.
+
+
+27 October hosted-preview compatibility follow-up: retained the original generic `/api/0x/quote` interface on the fixed prior deployment, alongside stats/prices/report APIs. The new `/api/sweep/quote` route keeps its own verified-swapper, token and destination guards. Regression checks cover generic-chain query preservation and injected-option rejection on the new route. API suite: 33/33 pass; typecheck passes. The hosted branch has built successfully, but live API and recorder acceptance remain open on Workers Free; production is unchanged. No real wallet transaction or signature.

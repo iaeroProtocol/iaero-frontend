@@ -10,7 +10,7 @@ import {checkQuoteServiceResponse,SweepQuoteError} from '../server/sweep-quote.t
 
 export type AppReadEnv={BASE_READ_RPC_URLS?:string;ZERO_EX_API_KEY?:string};
 export const appJson=(value:unknown,status=200,headers:Record<string,string>={})=>new Response(JSON.stringify(value,(_,v)=>typeof v==='bigint'?v.toString():v),{status,headers:{'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff',...headers}});
-export const readApiPaths=new Set(['/api/base','/api/contracts','/api/rewards/value','/api/sweep/quote','/api/liq-yield','/api/0x/quote']);
+export const readApiPaths=new Set(['/api/base','/api/contracts','/api/rewards/value','/api/sweep/quote','/api/liq-yield']);
 
 // Fetch + injected secret bindings only: no filesystem, SQLite or signing keys.
 export function createAppReadApi(env:AppReadEnv,options:{fetchImpl?:typeof fetch;inspect?:()=>Promise<any>;now?:()=>number}={}){
@@ -54,13 +54,11 @@ export function createAppReadApi(env:AppReadEnv,options:{fetchImpl?:typeof fetch
    }
    const params=url.searchParams,sellToken=params.get('sellToken')??'',sellAmount=params.get('sellAmount')??'',slippage=Number(params.get('slippageBps'));
    if(!isAddress(sellToken)||BigInt(sellToken)===0n||[registry.legacy.iAERO,registry.legacy.stiAERO,registry.legacy.USDC].some(a=>a.toLowerCase()===sellToken.toLowerCase())||!/^\d{1,78}$/.test(sellAmount)||BigInt(sellAmount)<=0n||BigInt(sellAmount)>=2n**256n||!Number.isInteger(slippage)||slippage<10||slippage>500)return appJson({error:'Invalid token, amount or slippage.'},400);
-   // Preserve the existing 0x URL without forwarding arbitrary upstream options.
-   if(path==='/api/0x/quote'&&(params.get('chainId')!=='8453'||params.get('buyToken')?.toLowerCase()!==registry.legacy.USDC.toLowerCase()||params.get('taker')?.toLowerCase()!==registry.sweep.swapper.toLowerCase()||params.get('recipient')?.toLowerCase()!==registry.sweep.swapper.toLowerCase()))return appJson({error:'Only the configured Base reward-sweep route is supported.'},400);
    const boot=await bootstrap();if(!boot.sweepReady)return appJson({error:'The deployed reward swapper is not verified.'},503);
    const data=await quote(sellToken,BigInt(sellAmount),slippage);
    if(data.liquidityAvailable===false||!data.transaction?.data||!isAddress(data.transaction.to)||String(data.sellAmount)!==sellAmount||!/^\d{1,78}$/.test(String(data.buyAmount))||BigInt(data.buyAmount)<=0n||BigInt(data.buyAmount)>=2n**256n||BigInt(data.transaction.value??'0')!==0n)return appJson({code:'INVALID_EXECUTABLE_QUOTE',error:'The service did not return a valid executable USDC quote.'},422);
    if(data.sellToken&&String(data.sellToken).toLowerCase()!==sellToken.toLowerCase()||data.buyToken&&String(data.buyToken).toLowerCase()!==registry.legacy.USDC.toLowerCase())return appJson({code:'INVALID_EXECUTABLE_QUOTE',error:'Quote tokens do not match the requested swap.'},422);
-   return appJson(path==='/api/0x/quote'?data:{sellToken,sellAmount,buyToken:registry.legacy.USDC,buyAmount:String(data.buyAmount),minBuyAmount:String(data.minBuyAmount??'0'),taker:registry.sweep.swapper,recipient:registry.sweep.swapper,transaction:{to:data.transaction.to,data:data.transaction.data,value:'0'},quotedAt:now()});
+   return appJson({sellToken,sellAmount,buyToken:registry.legacy.USDC,buyAmount:String(data.buyAmount),minBuyAmount:String(data.minBuyAmount??'0'),taker:registry.sweep.swapper,recipient:registry.sweep.swapper,transaction:{to:data.transaction.to,data:data.transaction.data,value:'0'},quotedAt:now()});
   }catch(error){
    if(error instanceof SweepQuoteError)return appJson({code:error.code,error:error.message},error.status);
    return appJson({error:path==='/api/rewards/value'?'Reward value is unavailable. Claims are unaffected.':path.includes('quote')?'The quote connection is temporarily unavailable. Retry later.':'Verified Base read connection unavailable. Retry later.'},503);

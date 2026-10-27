@@ -8,7 +8,7 @@ import {rateKey,touch} from '../src/restored/lib/rift/rate-limit.ts';
 
 export type PagesEnv=AppReadEnv&{ASSETS:{fetch:(request:Request)=>Promise<Response>};YIELD_DB:YieldDB;COLLECTOR_ENABLED?:string;APP_ALLOWED_ORIGINS?:string;LEGACY_API_ORIGIN?:string};
 const historyPaths=new Set(['/api/protocol-yield','/api/protocol-yield/history','/api/protocol-yield/health','/api/legacy-history']);
-const preservedPaths:Record<string,string>={'/api/stats':'GET','/api/prices/token':'GET','/api/spam-report':'POST'};
+const preservedPaths:Record<string,string>={'/api/0x/quote':'GET','/api/stats':'GET','/api/prices/token':'GET','/api/spam-report':'POST'};
 export function configuredAppOrigins(raw:string){
  try{const values=JSON.parse(raw);if(!Array.isArray(values)||!values.length||values.length>16)throw Error();return new Set(values.map(v=>{const u=new URL(v),h=u.hostname.toLowerCase().replace(/\.$/,'');if(u.protocol!=='https:'||u.username||u.password||u.pathname!=='/'||u.search||u.hash||h==='localhost'||h.endsWith('.localhost')||/^(127|0|10)\./.test(h)||/^192\.168\./.test(h)||/^169\.254\./.test(h)||/^172\.(1[6-9]|2[0-9]|3[01])\./.test(h)||h.startsWith('['))throw Error();return u.origin;}));}catch{throw Error('Public application origins are not configured.');}
 }
