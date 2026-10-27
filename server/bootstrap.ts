@@ -4,22 +4,23 @@ import deployment from '../config/saero.deployment.json' with {type:'json'};
 import {readProtocolMarketMetrics} from './protocol-metrics.ts';
 import {verifyNewStack} from './new-stack.ts';
 import type {Bootstrap} from '../src/live/types.ts';
+import {readCoverage} from '../src/protocol-data/read-coverage.ts';
 type Client={getChainId:()=>Promise<number>;getBlock:(request:any)=>Promise<any>;getCode:(request:any)=>Promise<`0x${string}`|undefined>;readContract:(request:any)=>Promise<any>};
 type Run=<T>(job:()=>Promise<T>)=>Promise<T>;
 const canonical=(v:unknown)=>JSON.stringify(v,(_,x)=>typeof x==='bigint'?x.toString():x);
 const same=(a:unknown,b:string)=>typeof a==='string'&&a.toLowerCase()===b.toLowerCase();
-/** Domains share one independently verified header, not one failure flag. */
+/** Domains share one finalized header; each domain keeps its own failure flag. */
 export async function inspectBootstrap(clients:Client[],run:Run=job=>job()):Promise<Bootstrap>{
- if(clients.length!==2||(await Promise.all(clients.map(c=>c.getChainId()))).some(id=>id!==8453))throw Error('Two Base read connections are required.');
- const final=await Promise.all(clients.map(c=>c.getBlock({blockTag:'finalized'}))),block=final[0].number<final[1].number?final[0].number:final[1].number;
+ if(clients.length<1||clients.length>2||(await Promise.all(clients.map(c=>c.getChainId()))).some(id=>id!==8453))throw Error('Approved Base read connections are required.');
+ const final=await Promise.all(clients.map(c=>c.getBlock({blockTag:'finalized'}))),block=final.reduce((n,h)=>h.number<n?h.number:n,final[0].number);
  const headers=await Promise.all(clients.map(c=>c.getBlock({blockNumber:block}))),timestamp=Number(headers[0].timestamp);
  if(headers.some(h=>h.hash!==headers[0].hash||h.timestamp!==headers[0].timestamp)||!Number.isSafeInteger(timestamp)||timestamp>Date.now()/1000+60||Date.now()/1000-timestamp>3600)throw Error('Finalized Base snapshot is stale or disagrees.');
- const snapshot={block:block.toString(),hash:headers[0].hash,timestamp,independentProviders:2},serviceErrors:Record<string,string>={};
+ const snapshot={block:block.toString(),hash:headers[0].hash,timestamp,independentProviders:clients.length},serviceErrors:Record<string,string>={};
  const optional=async<T>(domain:string,operation:()=>Promise<T>,fallback:T):Promise<T>=>{try{return await operation();}catch{serviceErrors[domain]=domain+' readback is unavailable; its actions remain disabled.';return fallback;}};
  const targets={...registry.legacy,aero:registry.aero.token,votingEscrow:registry.aero.votingEscrow,liqDistributor:registry.liqStaking.distributor,forwarder:registry.forwarder,...Object.fromEntries(Object.entries(registry.sweep).filter(([key])=>key!=='quoteEndpoint'))};
  const contracts:Bootstrap['contracts']={};
  await Promise.all(Object.entries(targets).map(async([name,address])=>{
-  try{const codes=await Promise.all(clients.map(c=>run(()=>c.getCode({address:address as Address,blockNumber:block}))));if(codes[0]!==codes[1])throw Error();contracts[name]={address:address as Address,deployed:!!codes[0]&&codes[0]!=='0x',codeHash:codes[0]&&codes[0]!=='0x'?keccak256(codes[0]):null};}
+  try{const codes=await Promise.all(clients.map(c=>run(()=>c.getCode({address:address as Address,blockNumber:block}))));if(codes.some(code=>code!==codes[0]))throw Error();contracts[name]={address:address as Address,deployed:!!codes[0]&&codes[0]!=='0x',codeHash:codes[0]&&codes[0]!=='0x'?keccak256(codes[0]):null};}
   catch{contracts[name]={address:address as Address,deployed:false,codeHash:null};serviceErrors['contract:'+name]='The '+name+' runtime readback is unavailable.';}
  }));
  const read=async(address:string,signature:string,args:readonly unknown[]=[])=>{
@@ -46,8 +47,8 @@ export async function inspectBootstrap(clients:Client[],run:Run=job=>job()):Prom
  const totalLegacyStaked=await optional<string|undefined>('Previous total stake',async()=>String(await read(registry.legacy.epochDistributor,'function totalStaked() view returns(uint256)')),undefined);
  const backingAero=stake?.amount!==undefined?String(stake.amount):undefined;
  const market=await readProtocolMarketMetrics(read,registry,backingAero===undefined?undefined:BigInt(backingAero),snapshot).catch(()=>undefined);
- const newStack=await verifyNewStack(deployment,registry as any,read,async(address)=>{const codes=await Promise.all(clients.map(c=>run(()=>c.getCode({address,blockNumber:block}))));if(codes[0]!==codes[1])throw Error('Runtime disagreement.');return codes[0];});
+ const newStack=await verifyNewStack(deployment,registry as any,read,async(address)=>{const codes=await Promise.all(clients.map(c=>run(()=>c.getCode({address,blockNumber:block}))));if(codes.some(code=>code!==codes[0]))throw Error('Runtime disagreement.');return codes[0];});
  let allocations:{chainId:string;amount:string}[]|undefined;
  try{const ids=await read(registry.aero.voter,'function allocationChainIds(uint256) view returns(uint256[])',[BigInt(registry.aero.protocolNft)]);if(!Array.isArray(ids)||ids.length>32)throw Error();allocations=await Promise.all([...new Set([0n,...ids])].map(async(chainId:any)=>({chainId:String(chainId),amount:String(await read(registry.aero.voter,'function allocationChainAmounts(uint256,uint256) view returns(uint128)',[BigInt(registry.aero.protocolNft),BigInt(chainId)]))})));}catch{serviceErrors.Allocations='Current chain allocations could not be verified.';}
- return {registry:registry as unknown as Bootstrap['registry'],liqStakingReady,newStack,rewardTokenAddresses,rewardRegistryError,sweepReady,marketRouteReady,verifiedAt:new Date().toISOString(),snapshot,contracts,serviceErrors,legacyReady,legacyPaused,oldAutoReady,newStackReady:newStack.ready,newStackReason:newStack.reason,metrics:{market,liqStaking,allocations,backingAero,permanent:stake?.isPermanent,protocolNftOwner:owner,legacyTotalStaked:totalLegacyStaked}};
+ return {registry:registry as unknown as Bootstrap['registry'],readCoverage:readCoverage(clients.length),liqStakingReady,newStack,rewardTokenAddresses,rewardRegistryError,sweepReady,marketRouteReady,verifiedAt:new Date().toISOString(),snapshot,contracts,serviceErrors,legacyReady,legacyPaused,oldAutoReady,newStackReady:newStack.ready,newStackReason:newStack.reason,metrics:{market,liqStaking,allocations,backingAero,permanent:stake?.isPermanent,protocolNftOwner:owner,legacyTotalStaked:totalLegacyStaked}};
 }

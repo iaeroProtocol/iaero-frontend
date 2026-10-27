@@ -7,7 +7,7 @@ import {D1YieldStore} from '../worker/d1-store.ts';
 import {loadLedger,addAssessment,addClaim,addSnapshot,addValuation} from '../server/yield-ledger.ts';
 import {yieldPosition,yieldReadSources} from '../server/yield-engine.ts';
 const raw=await readFile(resolve('../../protocol/.env'),'utf8'),get=name=>{const m=raw.match(new RegExp('^\\s*(?:export\\s+)?'+name+'\\s*=\\s*(.*)$','m'));if(!m)throw Error('Read-only RPC configuration unavailable.');return m[1].trim().replace(/^["']|["']$/g,'');};
-const base=[get('RPC_URL'),'https://base-mainnet.infura.io/v3/'+get('INFURA_API_KEY')],sources=Object.fromEntries(yieldReadSources(base).map(({source,urls})=>[source.chainId,urls]));
+const base=[get('RPC_URL')],sources=Object.fromEntries(yieldReadSources(base).map(({source,urls})=>[source.chainId,urls]));
 const enabled=process.env.LOCAL_COLLECTOR_ENABLED!=='false';
 const mf=new Miniflare({modules:true,scriptPath:resolve('artifacts/shared-worker/index.js'),compatibilityDate:'2026-07-30',host:'127.0.0.1',port:4319,d1Databases:{YIELD_DB:'shared-history-local'},d1Persist:resolve('.local-data/shared-history'),bindings:{COLLECTOR_ENABLED:enabled?'true':'false',YIELD_RPC_SOURCES:JSON.stringify(sources)}});
 const db=await mf.getD1Database('YIELD_DB'),sql=(await Promise.all(['0001_yield.sql','0002_claim_assessments.sql'].map(f=>readFile('worker/migrations/'+f,'utf8')))).join('\n');for(const statement of sql.split(/;\s*\n/).filter(s=>s.trim()))await db.exec(statement+';');

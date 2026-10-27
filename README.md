@@ -14,7 +14,7 @@ The local server selects only approved read-only RPC settings. No signing key is
 
 The Pages environment needs these bindings:
 
-- `BASE_READ_RPC_URLS`: encrypted JSON array of two approved, independently hosted Base endpoints.
+- `BASE_READ_RPC_URLS`: encrypted JSON array containing the owner-approved Alchemy Base endpoint. Two independent HTTPS providers remain supported for future corroboration.
 - `ZERO_EX_API_KEY`: the existing server-side 0x credential.
 - `YIELD_DB`: the shared Cloudflare D1 ledger.
 - `APP_ALLOWED_ORIGINS`: explicit public HTTPS origins allowed to call the app APIs.
@@ -35,4 +35,6 @@ Run `npm test`, `npm run typecheck`, and `node --test test/restored-rift/*.test.
 
 These are author checks. They do not assert independent contract review, real-owner signing or physical-phone acceptance. Contract deployment and activation remain separate from publishing the frontend.
 
-Provider reliability: private RPC reads are paced per API key across chains, with bounded retries for HTTP 429/502/503/504 and Retry-After support. Authentication failures and contract reverts are preserved. Pages shares a one-minute, two-provider verification snapshot through the derived cache in migration `0003_bootstrap_cache.sql`; expired proofs never become a fallback and cache hits do not renew their lifetime. This cache stores public contract metadata, not personal wallet balances or protocol reward facts. Apply the additive migration before publishing this backend.
+Provider reliability: private RPC reads are paced per API key across chains, with bounded retries for HTTP 429/502/503/504 and Retry-After support. Authentication failures and contract reverts are preserved. Pages shares a one-minute finalized verification snapshot from the configured provider(s) through the derived cache in migration `0003_bootstrap_cache.sql`; expired proofs never become a fallback and cache hits do not renew their lifetime. This cache stores public contract metadata, not personal wallet balances or protocol reward facts. Apply the additive migration before publishing this backend.
+
+27 October operational decision: the owner requested Alchemy-only frontend and recorder reads after Infura exhausted its daily quota. The policy in `config/frontend-read-policy.json` accepts one Alchemy endpoint for app operation; API responses and the UI retain the actual provider count and mark independent confirmation pending. New Base, Ethereum and Robinhood observations use one provider each. Historical facts keep their original coverage. This does not close the separate two-provider contract launch gate.

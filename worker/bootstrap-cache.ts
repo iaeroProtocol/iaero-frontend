@@ -1,14 +1,15 @@
 import type {YieldDB} from './d1-store.ts';
 import type {Bootstrap} from '../src/live/types.ts';
+import {acceptedReadCoverage} from '../src/protocol-data/read-coverage.ts';
 // [DECISION] Retain the original one-minute verification lifetime. The shared
-// cache prevents each visitor/isolate repeating the same two-provider reads.
+// cache prevents each visitor/isolate repeating the same configured-provider reads.
 export function bootstrapLifetime(value:Bootstrap){return Object.keys(value.serviceErrors??{}).length?5000:60000;}
 // Bump the format version when verification rules change. Provider credentials,
 // registry and accepted deployment are also included in the opaque identity.
-export async function bootstrapCacheKey(context:unknown){const bytes=new TextEncoder().encode(JSON.stringify(['bootstrap-v2-20261027',context]));return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),b=>b.toString(16).padStart(2,'0')).join('');}
+export async function bootstrapCacheKey(context:unknown){const bytes=new TextEncoder().encode(JSON.stringify(['bootstrap-v3-alchemy-20261027',context]));return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),b=>b.toString(16).padStart(2,'0')).join('');}
 function valid(value:Bootstrap,now:number){
  const verified=Date.parse(value?.verifiedAt??'');
- return value?.registry?.chainId===8453&&value.snapshot?.independentProviders===2&&/^\d+$/.test(value.snapshot.block)&&/^0x[\da-f]{64}$/i.test(value.snapshot.hash)&&Number.isSafeInteger(value.snapshot.timestamp)&&value.snapshot.timestamp<=now/1000+60&&now/1000-value.snapshot.timestamp<=3600&&Number.isFinite(verified)&&verified<=now+5000&&now-verified<bootstrapLifetime(value)&&['legacyReady','oldAutoReady','liqStakingReady','sweepReady','marketRouteReady','newStackReady'].every(k=>typeof (value as any)[k]==='boolean');
+ return value?.registry?.chainId===8453&&acceptedReadCoverage(value.snapshot?.independentProviders,value.readCoverage)&&/^\d+$/.test(value.snapshot.block)&&/^0x[\da-f]{64}$/i.test(value.snapshot.hash)&&Number.isSafeInteger(value.snapshot.timestamp)&&value.snapshot.timestamp<=now/1000+60&&now/1000-value.snapshot.timestamp<=3600&&Number.isFinite(verified)&&verified<=now+5000&&now-verified<bootstrapLifetime(value)&&['legacyReady','oldAutoReady','liqStakingReady','sweepReady','marketRouteReady','newStackReady'].every(k=>typeof (value as any)[k]==='boolean');
 }
 export function createBootstrapCache(db:YieldDB,options:{now?:()=>number;sleep?:(ms:number)=>Promise<void>;maxWaitMs?:number}={}){
  const now=options.now??Date.now,wait=options.sleep??(ms=>new Promise(r=>setTimeout(r,ms)));

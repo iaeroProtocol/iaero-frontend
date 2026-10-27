@@ -1,3 +1,4 @@
+import {configuredBaseReads} from '../server/read-rpc-policy.ts';
 import {createYieldService,yieldPosition} from '../server/yield-engine.ts';
 import {yieldBootstrap} from '../server/yield-bootstrap.ts';
 import policy from '../config/protocol-yield.json' with {type:'json'};
@@ -7,7 +8,7 @@ import {D1YieldStore,type YieldDB} from './d1-store.ts';
 type Env={YIELD_DB:YieldDB;YIELD_RPC_SOURCES?:string;COLLECTOR_ENABLED?:string};
 const json=(data:unknown,status=200,extra:Record<string,string>={})=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json','cache-control':'public, max-age=30','access-control-allow-origin':'*','x-content-type-options':'nosniff',...extra}});
 const rowCursor=(value:string|null)=>{if(value===null)return 0;if(!/^\d{1,15}$/.test(value))throw Error('invalid_cursor');return Number(value);};
-export function parseRpcSources(raw:string){const data=JSON.parse(raw) as Record<string,string[]>;for(const chain of policy.chains){const urls=data[chain.chainId]??[];if(!Array.isArray(urls)||urls.length>2||!urls.every(u=>{try{return typeof u==='string'&&new URL(u).protocol==='https:';}catch{return false;}}))throw Error('yield_rpc_configuration');if(urls.length>1&&new URL(urls[0]).hostname===new URL(urls[1]).hostname)throw Error('yield_providers_not_independent');}if(data[8453]?.length!==2)throw Error('yield_base_providers_required');return data;}
+export function parseRpcSources(raw:string){const data=JSON.parse(raw) as Record<string,string[]>;for(const chain of policy.chains){const urls=data[chain.chainId]??[];if(!Array.isArray(urls)||urls.length>2||!urls.every(u=>{try{return typeof u==='string'&&new URL(u).protocol==='https:';}catch{return false;}}))throw Error('yield_rpc_configuration');if(urls.length>1&&new URL(urls[0]).hostname===new URL(urls[1]).hostname)throw Error('yield_providers_not_independent');}try{configuredBaseReads(JSON.stringify(data[8453]??[]));}catch{throw Error('yield_base_providers_required');}return data;}
 export async function collectScheduled(env:Env){
  if(env.COLLECTOR_ENABLED!=='true')return {status:'disabled'};
  const store=new D1YieldStore(env.YIELD_DB,yieldPosition,crypto.randomUUID());if(!await store.acquire())return {status:'already_running'};

@@ -1,3 +1,5 @@
+import {configuredBaseReads} from './read-rpc-policy.ts';
+import {readCoverage} from '../src/protocol-data/read-coverage.ts';
 import {readRpcFetch} from './read-rpc-fetch.ts';
 // Portable read-only capital-basis adapter shared by the scheduled Worker.
 import {createPublicClient,http,parseAbi,stringToHex} from 'viem';
@@ -6,7 +8,7 @@ import deployment from '../config/saero.deployment.json' with {type:'json'};
 import {verifyNewStack} from './new-stack.ts';
 import {reservePrice} from './protocol-metrics.ts';
 export async function yieldBootstrap(urls:string[]){
- if(urls.length!==2||new URL(urls[0]).hostname===new URL(urls[1]).hostname)throw Error('yield_independent_base_providers_required');
+ configuredBaseReads(JSON.stringify(urls));
  const clients=urls.map(url=>createPublicClient({transport:http(url,{retryCount:0,timeout:20000,fetchFn:readRpcFetch}),ccipRead:false}));
  if((await Promise.all(clients.map(c=>c.getChainId()))).some(id=>id!==8453))throw Error('yield_base_chain');
  const heads=await Promise.all(clients.map(c=>c.getBlock({blockTag:'finalized'}))),block=heads.reduce((n,h)=>h.number<n?h.number:n,heads[0].number),headers=await Promise.all(clients.map(c=>c.getBlock({blockNumber:block})));
@@ -20,5 +22,5 @@ export async function yieldBootstrap(urls:string[]){
  if(same(t0,registry.aero.token)&&same(t1,registry.legacy.USDC))price=reservePrice(BigInt(reserves[0]),BigInt(reserves[1]),Number(ad),Number(ud));
  else if(same(t1,registry.aero.token)&&same(t0,registry.legacy.USDC))price=reservePrice(BigInt(reserves[1]),BigInt(reserves[0]),Number(ad),Number(ud));else throw Error('yield_price_pair');
  const newStack=await verifyNewStack(deployment,registry as any,read,async(address)=>{const codes=await Promise.all(clients.map(c=>c.getCode({address:address as `0x${string}`,blockNumber:block})));if(codes.some(v=>v!==codes[0]))throw Error('Runtime disagreement');return codes[0];});
- return {newStack,snapshot:{block:block.toString(),timestamp:Number(headers[0].timestamp),hash:headers[0].hash,independentProviders:2},metrics:{backingAero:stake.amount.toString(),market:{tvlUsdcWad:price===null?null:(BigInt(stake.amount)*price/10n**BigInt(ad)).toString()}}};
+ return {newStack,readCoverage:readCoverage(clients.length),snapshot:{block:block.toString(),timestamp:Number(headers[0].timestamp),hash:headers[0].hash,independentProviders:clients.length},metrics:{backingAero:stake.amount.toString(),market:{tvlUsdcWad:price===null?null:(BigInt(stake.amount)*price/10n**BigInt(ad)).toString()}}};
 }

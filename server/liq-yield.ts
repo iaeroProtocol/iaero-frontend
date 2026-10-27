@@ -1,9 +1,10 @@
+import {acceptedReadCoverage,type ReadCoverage} from '../src/protocol-data/read-coverage.ts';
 import policy from '../config/liq-yield.json' with {type:'json'};
 import yieldPolicy from '../config/protocol-yield.json' with {type:'json'};
 import {priceYieldAssets} from './yield-prices.ts';
 import type {Bootstrap} from '../src/live/types.ts';
 const E18=10n**18n,word=(v:unknown):v is string=>typeof v==='string'&&/^\d{1,78}$/.test(v)&&BigInt(v)<2n**256n;
-export type LiqYieldReport={status:'estimated'|'unavailable';aprPct:number|null;reason:string|null;readAtMs:number;asOfBlock:string;chainTimestamp:number;readProviders:number;forecastUpdatedAt:string|null;forecastEpochStart:number|null;forecastMaxAgeSeconds:number;weeklyProtocolUsdWad:string|null;weeklyLiqUsdcWad:string|null;totalStaked:string|null;stakedValueUsdcWad:string|null;liqPriceUsdcWad:string|null;usdcPriceUsdWad:string|null;revenueShareBps:number;annualWeeks:number;sourceUrl:string};
+export type LiqYieldReport={readCoverage?:ReadCoverage;status:'estimated'|'unavailable';aprPct:number|null;reason:string|null;readAtMs:number;asOfBlock:string;chainTimestamp:number;readProviders:number;forecastUpdatedAt:string|null;forecastEpochStart:number|null;forecastMaxAgeSeconds:number;weeklyProtocolUsdWad:string|null;weeklyLiqUsdcWad:string|null;totalStaked:string|null;stakedValueUsdcWad:string|null;liqPriceUsdcWad:string|null;usdcPriceUsdWad:string|null;revenueShareBps:number;annualWeeks:number;sourceUrl:string};
 // [VERIFIED: old useStaking.calculateLiqStakingAPR; TreasuryDistributor.LIQ_SHARE_BPS]
 // Keep the published forecast method as APR, not compounded or actually received APY.
 export function calculateLiqApr(weeklyUsd:bigint,totalStaked:bigint,liqPriceUsdc:bigint,usdcPriceUsd:bigint,decimals=18){
@@ -21,11 +22,11 @@ export function readWeeklyForecast(data:any,now:number){
 }
 export async function loadLiqYield(boot:Bootstrap,options:{fetchImpl?:typeof fetch;now?:number}={}):Promise<LiqYieldReport>{
  const now=options.now??Date.now(),fetcher=options.fetchImpl??fetch,m=boot.metrics.market,totals=boot.metrics.liqStaking;
- const out:LiqYieldReport={status:'unavailable',aprPct:null,reason:null,readAtMs:now,asOfBlock:boot.snapshot.block,chainTimestamp:boot.snapshot.timestamp,readProviders:boot.snapshot.independentProviders,forecastUpdatedAt:null,forecastEpochStart:null,forecastMaxAgeSeconds:policy.forecastMaxAgeSeconds,weeklyProtocolUsdWad:null,weeklyLiqUsdcWad:null,totalStaked:totals?.totalStaked??null,stakedValueUsdcWad:null,liqPriceUsdcWad:m?.liqPriceUsdcWad??null,usdcPriceUsdWad:null,revenueShareBps:policy.revenueShareBps,annualWeeks:policy.annualWeeks,sourceUrl:policy.forecastUrl};
+ const out:LiqYieldReport={readCoverage:boot.readCoverage,status:'unavailable',aprPct:null,reason:null,readAtMs:now,asOfBlock:boot.snapshot.block,chainTimestamp:boot.snapshot.timestamp,readProviders:boot.snapshot.independentProviders,forecastUpdatedAt:null,forecastEpochStart:null,forecastMaxAgeSeconds:policy.forecastMaxAgeSeconds,weeklyProtocolUsdWad:null,weeklyLiqUsdcWad:null,totalStaked:totals?.totalStaked??null,stakedValueUsdcWad:null,liqPriceUsdcWad:m?.liqPriceUsdcWad??null,usdcPriceUsdWad:null,revenueShareBps:policy.revenueShareBps,annualWeeks:policy.annualWeeks,sourceUrl:policy.forecastUrl};
  try{
-  if(!boot.liqStakingReady||!totals||!word(totals.totalStaked)||boot.snapshot.independentProviders!==2)throw Error('Verified LIQ staking totals are unavailable.');
+  if(!boot.liqStakingReady||!totals||!word(totals.totalStaked)||!acceptedReadCoverage(boot.snapshot.independentProviders,boot.readCoverage))throw Error('Verified LIQ staking totals are unavailable.');
   if(totals.paused!==false)throw Error('LIQ staking is paused.');
-  if(!m||m.readProviders!==2||now-m.readAtMs>120000||m.readAtMs>now+60000||!word(m.liqPriceUsdcWad)||BigInt(m.liqPriceUsdcWad)<=0n||m.liqDecimals===null)throw Error('A current verified LIQ price is unavailable.');
+  if(!m||!acceptedReadCoverage(m.readProviders,boot.readCoverage)||now-m.readAtMs>120000||m.readAtMs>now+60000||!word(m.liqPriceUsdcWad)||BigInt(m.liqPriceUsdcWad)<=0n||m.liqDecimals===null)throw Error('A current verified LIQ price is unavailable.');
   const asset={chainId:8453,token:boot.registry.legacy.USDC,amount:'1000000',decimals:6,symbol:'USDC',valueUsdcWad:null as string|null};
   const [forecast,proofs]=await Promise.all([
    (async()=>{const response=await fetcher(policy.forecastUrl,{cache:'no-store',signal:AbortSignal.timeout(10000)});if(!response.ok)throw Error('The published weekly forecast is unavailable.');return readWeeklyForecast(await response.json(),now);})(),

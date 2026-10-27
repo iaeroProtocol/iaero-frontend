@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "singleAlchemyApproved": true,
+  "approvedAt": "2026-10-27",
+  "decision": "Owner requested Alchemy-only operation after Infura exhausted its quota.",
+  "independentLaunchProvidersRequired": 2
+}

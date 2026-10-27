@@ -32,7 +32,7 @@ export function yieldReadSources(baseUrls:string[]){
     if(source.key==='base')return {source,urls:baseUrls};
     const url=new URL(baseUrls[0]);if(url.hostname!=='base-mainnet.g.alchemy.com')return {source,urls:[]};
     url.hostname=source.key==='ethereum'?'eth-mainnet.g.alchemy.com':'robinhood-mainnet.g.alchemy.com';
-    if(source.key==='ethereum'){
+    if(source.key==='ethereum'&&baseUrls[1]){
       const independent=new URL(baseUrls[1]);if(independent.hostname!=='base-mainnet.infura.io')return {source,urls:[url.href]};
       independent.hostname='mainnet.infura.io';return {source,urls:[url.href,independent.href]};
     }

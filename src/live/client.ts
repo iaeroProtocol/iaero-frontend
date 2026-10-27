@@ -9,6 +9,7 @@ import {executeNew} from './new-stack';
 import {executeLiq} from './liq';
 import {emptyWallet,liveReason,type Bootstrap,type LegacyReward,type LiveState,type WalletField} from './types';
 import {CLAIM_MANY_ABI,sendRewardClaims} from './rewards';
+import {acceptedReadCoverage} from '../protocol-data/read-coverage';
 
 export const META_ABI=parseAbi(['function symbol() view returns(string)','function decimals() view returns(uint8)']);
 export const PRINCIPAL_ABI=parseAbi(['function unstake(uint256)','function balanceOf(address) view returns(uint256)','function paused() view returns(bool)']);
@@ -21,7 +22,7 @@ export function publicError(error:unknown){
 }
 export async function fetchBootstrap():Promise<Bootstrap>{
   const response=await fetch('/api/contracts',{cache:'no-store'}),data=await response.json();
-  if(!response.ok||data.registry?.chainId!==8453||data.snapshot?.independentProviders!==2)throw Error('Verified Base contract data is unavailable. Refresh to retry.');
+  if(!response.ok||data.registry?.chainId!==8453||!acceptedReadCoverage(data.snapshot?.independentProviders,data.readCoverage))throw Error('Verified Base contract data is unavailable. Refresh to retry.');
   for(const address of Object.values(data.registry.legacy))if(typeof address!=='string'||!isAddress(address))throw Error('Invalid Base contract registry.');
   return data;
 }

@@ -1,3 +1,4 @@
+import {acceptedReadCoverage} from '../protocol-data/read-coverage';
 import {protocolDataUrl} from '../protocol-data/api';
 import {isAddress,parseAbi,type Address} from 'viem';
 import type {BaseClient} from './client';
@@ -8,7 +9,7 @@ export type LegacyDiscovery={firstEpoch?:string;lastEpoch?:string;complete:boole
 const metadata=parseAbi(['function symbol() view returns(string)','function decimals() view returns(uint8)']);
 export async function readFundedHistory(client:BaseClient,boot:Bootstrap,user:Address){
  const response=await fetch(protocolDataUrl('/api/legacy-history'),{cache:'no-store'});if(!response.ok)throw Error('Full funded history is temporarily unavailable. Date-based claims remain available.');const index=await response.json();
- if(index.version!==1||index.chainId!==8453||index.providers!==2||!index.targets||!/^\d+$/.test(index.head))throw Error('Funding history is still being indexed.');
+ if(index.version!==1||index.chainId!==8453||!acceptedReadCoverage(index.providers,index.readCoverage)||!index.targets||!/^\d+$/.test(index.head))throw Error('Funding history is still being indexed.');
  const pairs=index.targets.staking?.pairs??[],autoEpochs=index.targets.autoVault?.epochs??[];if(!Array.isArray(pairs)||pairs.length>250000||!Array.isArray(autoEpochs))throw Error('Funding index is invalid.');
  const block=await client.getBlock(),current=block.timestamp/604800n*604800n,groups=new Map<string,Address[]>(),unique=new Set<string>();
  for(const p of pairs){if(!isAddress(p.token)||!/^\d+$/.test(p.epoch)||BigInt(p.epoch)%604800n!==0n)throw Error('Invalid funded token/week.');if(BigInt(p.epoch)>current)continue;const key=p.token.toLowerCase()+':'+p.epoch;if(unique.has(key))continue;unique.add(key);groups.set(p.epoch,[...(groups.get(p.epoch)??[]),p.token]);}

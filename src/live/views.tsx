@@ -1,3 +1,4 @@
+import {acceptedReadCoverage} from '../protocol-data/read-coverage';
 import {PortfolioDashboard} from './portfolio-dashboard';
 import {ExactAmount,BalanceAmount} from './exact-amount';
 import {Component,lazy,Suspense,useRef,useState,type ReactNode} from 'react';
@@ -38,7 +39,7 @@ export function LiveStatus(){
     <div className={'live-status connection-strip'+(healthy?' is-healthy':'')}>
       <span className={'live-status-indicator '+(healthy?'verified':'')}/>
       <strong>{l.error?'Base reads interrupted':l.boot?'Connected to Base':'Connecting to Base'}</strong>
-      {healthy?<details className="connection-details"><summary>Contract status <Icon name="chevron" size={14}/></summary><div><p>{l.boot!.legacyReady?'Legacy claims and withdrawals connected.':'Previous staking readback is unavailable.'}</p><p>{connection.message}</p><span className={'pill pill-'+(connection.active?'blue':'amber')}>{connection.label}</span></div></details>:<span className="connection-message">{l.error??'Checking deployed contracts with two providers.'}</span>}
+      {healthy?<details className="connection-details"><summary>{l.boot!.snapshot.independentProviders===1?'1 provider':'Contract status'} <Icon name="chevron" size={14}/></summary><div>{l.boot!.snapshot.independentProviders===1&&<p>Alchemy only · independent confirmation pending.</p>}<p>{l.boot!.legacyReady?'Legacy claims and withdrawals connected.':'Previous staking readback is unavailable.'}</p><p>{connection.message}</p><span className={'pill pill-'+(connection.active?'blue':'amber')}>{connection.label}</span></div></details>:<span className="connection-message">{l.error??'Checking deployed contracts with Alchemy.'}</span>}
       <button className="text-link connection-refresh" disabled={l.loading} onClick={()=>void s.liveControls!.refresh()} aria-label="Refresh live contract data"><Icon name="refresh" size={16}/><span>{l.loading?'Reading…':'Refresh'}</span></button>
     </div>
     {healthy&&!l.boot!.newStackReady&&<p className="deployment-caption"><span className="deployment-dot"/>{connection.label} · {l.boot!.legacyReady?'legacy claims & withdrawals available':'legacy verification unavailable'}</p>}
@@ -112,7 +113,7 @@ export function LiveLegacyDialog({onClose}:{onClose:()=>void}){
 
 export function LiveProtocolStats(){
   const {live:l}=usePreview(),b=l?.boot,data=b?.metrics.market;
-  const fresh=data&&Number.isSafeInteger(data.readAtMs)&&data.readProviders===2&&Date.now()-data.readAtMs<=120000&&data.readAtMs<=Date.now()+5000;
+  const fresh=data&&Number.isSafeInteger(data.readAtMs)&&acceptedReadCoverage(data.readProviders,b?.readCoverage)&&Date.now()-data.readAtMs<=120000&&data.readAtMs<=Date.now()+5000;
   const m=fresh?data:undefined;
   const number=(value:string|null|undefined,compact=false)=>{
     if(value==null)return '—';const n=BigInt(value);

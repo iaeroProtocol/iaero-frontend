@@ -30,8 +30,7 @@ async function rpcSettings(){
       if(!match)throw Error('Base read connection is not configured.');
       return match[1].trim().replace(/^["']|["']$/g,'');
     };
-    const urls=[get('RPC_URL'),'https://base-mainnet.infura.io/v3/'+get('INFURA_API_KEY')];
-    if(!urls.every(u=>new URL(u).protocol==='https:')||new URL(urls[0]).hostname===new URL(urls[1]).hostname)throw Error('Two independent Base read providers are required.');
+    const urls=configuredBaseReads(JSON.stringify([get('RPC_URL')]));
     return urls;
   })();
   return settings;
