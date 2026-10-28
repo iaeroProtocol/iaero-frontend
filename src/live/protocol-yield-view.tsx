@@ -6,6 +6,7 @@ import {Icon} from '../icons';
 import {useProtocolYield} from './use-protocol-yield';
 import {protocolYieldDisplay,yieldPriceNote,formatYieldPercent as percent} from '../protocol-data/yield-display';
 import {fundedIaeroYield} from './position-model';
+import {IaeroYieldEstimate} from './iaero-yield-view';
 import {exportProtocolHistory} from '../protocol-data/api';
 import type {YieldAsset,YieldClaim} from '../protocol-data/yield-model';
 
@@ -36,6 +37,8 @@ export function ProtocolYieldCard({dashboard=false}:{dashboard?:boolean}={}){
     <header><div><p className="label-with-dot"><span className="small-blue-dot"/>Protocol yield</p><h3>{dashboard?'Your backing, earning.':'Your backing is earning.'}</h3><p>Income earned by sAERO NFT #{data?.positionId??'1584'}, before distribution to stakers.</p></div><button className="icon-button" aria-label="Refresh protocol yield" onClick={refresh}><Icon name="refresh" size={18}/></button></header>
     {!data?<div className="yield-loading" role="status">{error?'Yield data is temporarily unavailable. Saved history is retained.':'Reading current rewards and indexing finalized claims…'}</div>:<>
       <div className="yield-metrics"><div><span>{data.summary.pendingPartial?'Priced pending subtotal':'Pending reward estimate'}</span><strong>{unknown?'—':usdc(data.summary.pendingValueUsdcWad)} <small>USDC</small></strong><p>Earned on the position · awaiting claim</p></div><div><span>Claimed reward value · last 7 days</span><strong>{unknown?'—':usdc(data.summary.receivedValueUsdcWad)} <small>USDC</small></strong><p>{data.summary.receivedPartial?'USDC subtotal; other received tokens are unpriced.':data.summary.historyComplete?'Value at receipt · before conversion and staker distribution':'History synchronization in progress'}</p></div></div>
+      <IaeroYieldEstimate data={data} unknown={unknown}/>
+      <p className="yield-gross-label">Gross yield on AERO backing</p>
       <div className="yield-apy"><div><span>Earned APY · {rate!.label}</span><strong>{unknown?'—':percent(rate!.earned)}</strong></div><div><span>Received APY · {rate!.label}</span><strong>{unknown?'—':percent(rate!.received)}</strong></div></div>
       {rate?.qualification&&<p className="yield-window-qualification">{rate.qualification}</p>}
       {dashboard&&<div className="dashboard-funded-rate"><span>Funded staking APR</span><strong>{percent(funded?.apr)}</strong><small>{app.live?.boot?.newStackReady?funded?.reason:'Awaiting verified deployment'}</small></div>}

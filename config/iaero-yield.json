@@ -1,0 +1,10 @@
+{
+  "legacyStakersBps": 8000,
+  "stakingDecimals": 18,
+  "marketMaxAgeMs": 120000,
+  "sources": [
+    "protocol/contracts/RewardsHarvesterV2.sol: processAndDistribute, PROTOCOL_BASE_BPS and PEG_ACTION_BPS (80/10/10)",
+    "iaero-frontend/src/components/contracts/hooks/useStaking.ts: calculateStakingAPR (totalStaked times iAERO market price)",
+    "Owner decision 2026-10-28: use iAERO market price for the holder yield estimate"
+  ]
+}
