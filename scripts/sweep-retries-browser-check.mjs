@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {liveFixture} from './live-fixture.mjs';
 const origin=process.env.PREVIEW_URL??'http://127.0.0.1:4330';
-assert.equal(new URL(origin).hostname,'127.0.0.1');
+assert(['127.0.0.1','app.iaero.finance','saero-functionality-20261027.iaero-frontend.pages.dev'].includes(new URL(origin).hostname));
+const config=await fetch(origin+'/frontend-config.json').then(r=>r.json());if(process.env.SWEEP_RETRY_COMMIT)assert.equal(config.sourceCommit,process.env.SWEEP_RETRY_COMMIT);
 const out=process.env.SWEEP_RETRY_OUTPUT??'artifacts/sweep-retries-20261028/browser';await mkdir(out,{recursive:true});
 const checks=[];
 for(const width of [1440,390,320]){
- const f=await liveFixture({viewport:{width,height:width<500?844:1050},reducedMotion:'reduce'}),{page,state,writes,unit}=f;
+ const f=await liveFixture({viewport:{width,height:width<500?844:1050},reducedMotion:'reduce'},origin),{page,state,writes,unit}=f;
  state.failedBroadcastNames=new Map();
  const tools=()=>page.getByRole('region',{name:'Reward tools',exact:true}),dialog=()=>page.getByRole('dialog');
  const open=async(name='Sweep to USDC',bps=100,retries=true)=>{
@@ -32,4 +33,4 @@ for(const width of [1440,390,320]){
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);assert.deepEqual(f.errors,[]);assert.deepEqual(f.external,[]);record('no browser exceptions, unwanted external requests or horizontal overflow');
  }catch(error){await page.screenshot({path:out+'/'+width+'-FAILURE.png',fullPage:true});throw error;}finally{await f.browser.close();}
 }
-await writeFile(out+'/RESULT.json',JSON.stringify({status:'PASS',scope:'Mocked wallet and chain only; no real signature or transaction',checks},null,2)+'\n');console.log(JSON.stringify({status:'PASS',checks:checks.length}));
+await writeFile(out+'/RESULT.json',JSON.stringify({status:'PASS',origin,sourceCommit:config.sourceCommit,scope:'Mocked wallet and chain only; public frontend assets; no real signature or transaction',checks},null,2)+'\n');console.log(JSON.stringify({status:'PASS',origin,sourceCommit:config.sourceCommit,checks:checks.length}));
