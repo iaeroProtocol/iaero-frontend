@@ -13,3 +13,12 @@ export function accountReadClient(client:BaseClient,boot:Bootstrap):BaseClient{
   batch:{multicall:{batchSize:16384,wait:0}},ccipRead:false,
  }) as unknown as BaseClient;
 }
+
+// One current header and chain check for all display readers in a refresh.
+// This scope is never passed to transaction simulation or sending.
+export async function accountReadScope(client:BaseClient,boot:Bootstrap):Promise<BaseClient>{
+ const [chainId,block]=await Promise.all([client.getChainId(),client.getBlock()]);
+ if(chainId!==8453)throw Error('The read connection is not on Base.');
+ const reader=accountReadClient(client,boot);
+ return {...reader,getChainId:async()=>chainId,getBlock:async()=>block} as BaseClient;
+}

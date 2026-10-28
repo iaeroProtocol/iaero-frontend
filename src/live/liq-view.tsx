@@ -5,12 +5,13 @@ import {Button,Dialog,EmptyWallet,Info,SegmentedTabs} from '../components';
 import {TokenIcon,Icon} from '../icons';
 import {publicBaseClient,publicError} from './client';
 import {readLiq,type LiqPosition} from './liq';
+import {accountReadClient} from './account-read-client';
 import {PartialAmount,chosenAmount} from './partial-amount';
 import {priceRewards,valueText,type RewardValuation} from './reward-value';
 export default function LiqDialog({onClose}:{onClose:()=>void}){
  const s=usePreview(),l=s.live!,[position,setPosition]=useState<LiqPosition>(),[error,setError]=useState(''),[route,setRoute]=useState<'rewards'|'stake'|'withdraw'>('rewards'),[text,setText]=useState(''),[values,setValues]=useState<RewardValuation>(),[client]=useState(publicBaseClient),[refresh,setRefresh]=useState(0),[extra,setExtra]=useState(''),[additional,setAdditional]=useState<Address[]>([]),[reading,setReading]=useState(false);
  const additionalKey=additional.join(','),confirmed=l.confirmedHashes?.join(',');
- useEffect(()=>{let active=true;setPosition(undefined);setValues(undefined);setError('');setReading(false);if(l.address&&l.boot&&l.boot.liqStakingReady){setReading(true);void readLiq(client,l.boot,l.address,{additionalTokens:additional}).then(p=>{if(active)setPosition(p);}).catch(e=>{if(active)setError(publicError(e));}).finally(()=>{if(active)setReading(false);});}return()=>{active=false;};},[l.address,l.boot?.liqStakingReady,l.readAt,l.error,confirmed,refresh,client,additionalKey]);
+ useEffect(()=>{let active=true;setPosition(undefined);setValues(undefined);setError('');setReading(false);if(l.address&&l.boot&&l.boot.liqStakingReady){setReading(true);void readLiq(accountReadClient(client,l.boot),l.boot,l.address,{additionalTokens:additional}).then(p=>{if(active)setPosition(p);}).catch(e=>{if(active)setError(publicError(e));}).finally(()=>{if(active)setReading(false);});}return()=>{active=false;};},[l.address,l.boot?.liqStakingReady,l.readAt,l.error,confirmed,refresh,client,additionalKey]);
  const rows=useMemo(()=>position?.rewards.map(r=>({...r,epoch:0n}))??[],[position]);
  useEffect(()=>{const abort=new AbortController();setValues(undefined);if(l.boot&&position)void priceRewards('liq',rows,l.boot.registry.legacy.USDC,setValues,abort.signal);return()=>abort.abort();},[rows,l.boot?.registry.legacy.USDC]);
  const picked=chosenAmount(text,route==='stake'?position?.wallet:position?.balance),locked=position?.unlockTime===undefined||position.unlockTime>position.timestamp,reason=s.disabledReason(route==='stake'?'liqStake':'liqWithdraw'),expired=!!values&&Date.now()-values.asOf>120000;

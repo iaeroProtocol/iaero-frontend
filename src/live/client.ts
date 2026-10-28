@@ -22,7 +22,12 @@ export function publicError(error:unknown){
   if(error instanceof Error&&error.message.length<220&&!/https?:|request body|details:/i.test(error.message))return error.message;
   return 'The contract read or wallet request could not complete. Check the network, balances and pending transaction notice before retrying.';
 }
-export async function fetchBootstrap():Promise<Bootstrap>{
+let bootstrapRead:Promise<Bootstrap>|undefined;
+// Share only the pending browser read. A completed proof is never cached here.
+export function fetchBootstrap():Promise<Bootstrap>{
+ if(!bootstrapRead)bootstrapRead=loadBootstrap().finally(()=>{bootstrapRead=undefined;});return bootstrapRead;
+}
+async function loadBootstrap():Promise<Bootstrap>{
   const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),25000);
   let response:Response,data:any;
   try{response=await fetch('/api/contracts',{cache:'no-store',signal:abort.signal});data=await response.json();}
@@ -56,14 +61,14 @@ export async function tokenMetadata(client:BaseClient,address:Address){
   return metaCache.get(key)!;
 }
 
-export async function readAccount(client:BaseClient,boot:Bootstrap,user:Address,date='',customToken=''){
+export async function readAccount(client:BaseClient,boot:Bootstrap,user:Address,date='',customToken='',preparedReader?:BaseClient){
   if(await client.getChainId()!==8453)throw Error('The read connection is not on Base.');
   const block=await client.getBlock(),wallet=emptyWallet(),known:Partial<Record<WalletField,boolean>>={},errors:string[]=[];
-  const getterClient=accountReadClient(client,boot);
+  const getterClient=preparedReader??accountReadClient(client,boot);
   wallet.checkpoint=Number(block.timestamp);
   const read=(address:Address,abi:readonly unknown[],functionName:string,args:readonly unknown[]=[]):Promise<any>=>getterClient.readContract({address,abi,functionName,args,blockNumber:block.number} as any);
   const fields:[WalletField,Address][]=[['aero',boot.registry.aero.token],['iaero',boot.registry.legacy.iAERO],['usdc',boot.registry.legacy.USDC],['liq',boot.registry.legacy.LIQ]];
-  await Promise.all(fields.map(async([field,address])=>{try{wallet[field]=await read(address,STAKING_ERC20_ABI,'balanceOf',[user]);known[field]=true;}catch{errors.push(field+' wallet balance could not be read.');}}));
+  const balances=Promise.all(fields.map(async([field,address])=>{try{wallet[field]=await read(address,STAKING_ERC20_ABI,'balanceOf',[user]);known[field]=true;}catch{errors.push(field+' wallet balance could not be read.');}}));
   const get=async<T>(label:string,operation:()=>Promise<T>):Promise<T|undefined>=>{try{return await operation();}catch{errors.push(label+' could not be read.');}};
   const [legacyStake,legacyReceipts,legacyPaused,epoch,ethBalance,oldAutoShares]=await Promise.all([
     get('Legacy principal',()=>read(boot.registry.legacy.epochDistributor,LEGACY_STAKING_ABI,'balanceOf',[user])),
@@ -73,6 +78,7 @@ export async function readAccount(client:BaseClient,boot:Bootstrap,user:Address,
     get('Base ETH balance',()=>client.getBalance({address:user,blockNumber:block.number})),
     get('Old AutoVault shares',()=>read(boot.registry.legacy.autoVault,OLD_AUTO_ABI,'sharesOf',[user]))
   ]);
+  await balances;
   if(legacyStake!==undefined){wallet.legacyStake=BigInt(legacyStake);known.legacyStake=true;}
   const currentEpoch=epoch!==undefined?BigInt(epoch):undefined;
   let selected=currentEpoch,rewardSelectionError:string|undefined;
@@ -82,7 +88,7 @@ export async function readAccount(client:BaseClient,boot:Bootstrap,user:Address,
   }
   const epochs=selected===undefined?[]:Array.from({length:4},(_,i)=>selected!-BigInt(i)*604800n).filter(e=>e>=0n);
   const oldAutoEpochs=selected===undefined?[]:Array.from({length:26},(_,i)=>selected!-BigInt(i)*604800n).filter(e=>e>=0n);
-  const oldAutoEarned=oldAutoEpochs.length?await get('Old AutoVault rewards',async()=>{const value=await read(boot.registry.legacy.autoVault,OLD_AUTO_ABI,'previewUSDCMany',[user,oldAutoEpochs]);return BigInt(value[1]);}):undefined;
+  const autoRewards=oldAutoEpochs.length?get('Old AutoVault rewards',async()=>{const value=await read(boot.registry.legacy.autoVault,OLD_AUTO_ABI,'previewUSDCMany',[user,oldAutoEpochs]);return BigInt(value[1]);}):undefined;
   const tokens=[...boot.registry.knownLegacyRewardTokens.map(t=>t.address),...(boot.rewardTokenAddresses??[])];
   if(boot.rewardRegistryError)errors.push(boot.rewardRegistryError);
   if(customToken){if(!isAddress(customToken))rewardSelectionError='The additional token address is invalid. Only configured tokens were read; principal reads are unaffected.';else tokens.push(getAddress(customToken));}
@@ -112,6 +118,7 @@ export async function readAccount(client:BaseClient,boot:Bootstrap,user:Address,
     if(earned.length){const metadata=await tokenMetadata(getterClient,token);for(const row of earned)rewards.push({...row,token,...metadata});}
     if(token.toLowerCase()===boot.registry.legacy.USDC.toLowerCase()&&results.length&&results.every(r=>r.status==='fulfilled')){wallet.legacyRewards=earned.reduce((sum,r)=>sum+r.amount,0n);known.legacyRewards=true;}
   });
+  const oldAutoEarned=await autoRewards;
   if(rewardReadErrors)errors.push(`${rewardReadErrors} selected reward entries could not be read; they are not treated as zero.`);
   return {wallet,known,errors,ethBalance,legacyReceipts:legacyReceipts===undefined?undefined:BigInt(legacyReceipts),legacyPaused:legacyPaused===undefined?undefined:Boolean(legacyPaused),oldAutoShares:oldAutoShares===undefined?undefined:BigInt(oldAutoShares),oldAutoEarned,oldAutoEpochs,rewards:rewards.sort((a,b)=>a.epoch===b.epoch?a.token.localeCompare(b.token):a.epoch>b.epoch?-1:1),rewardTokenCount:unique.length,rewardReadErrors,rewardSelectionError,readAt:Number(block.timestamp)};
 }

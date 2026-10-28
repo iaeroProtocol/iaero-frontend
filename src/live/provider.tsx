@@ -7,6 +7,7 @@ import type {ReadClient} from '../protocol/streamingClient';
 import {executeLiveAction,fetchBootstrap,publicBaseClient,publicError,readAccount,walletIdentity,type ExecutionContext} from './client';
 import {emptyWallet,initialLiveState,liveReason,type LiveState,type WalletChoice} from './types';
 import {readLiq} from './liq';
+import {accountReadScope} from './account-read-client';
 import {readNewPosition} from './new-stack';
 import {readFundedHistory} from './legacy-history';
 import {walletWorkflow} from './session';
@@ -44,12 +45,14 @@ export function LiveProvider({children}:{children:ReactNode}){
       const boot=await fetchBootstrap();if(ticket!==readTicket.current)return;
       setLive(s=>({...s,boot,error:undefined}));
       if(!old.address)return;
-      const block=await client.getBlock(),pinned={...client,getBlock:async()=>block} as typeof client;
+      const pinned=await accountReadScope(client,boot);
       const liqRead=boot.liqStakingReady?readLiq(pinned,boot,old.address,{rewards:false,stakeSummaryOnly:true}).catch(()=>undefined):Promise.resolve(undefined);
-      const result={...await readAccount(pinned,boot,old.address,selection.date,selection.customToken),newPosition:undefined as LiveState['newPosition'],liqPosition:undefined as LiveState['liqPosition']},scope=selection.scope;
-      if(boot.newStackReady){try{const fresh=await readNewPosition(pinned,boot,old.address);Object.assign(result,{newPosition:fresh});if(fresh.stream?.balance!==undefined){result.wallet.staked=fresh.stream.balance;result.known.staked=true;if(fresh.stream.earned!==undefined){result.wallet.earned=fresh.stream.earned;result.known.earned=true;}}if(fresh.auto?.shares!==undefined){result.wallet.autoStaked=fresh.auto.shares;result.known.autoStaked=true;}if(fresh.auto?.earned!==undefined){result.wallet.autoEarned=fresh.auto.earned;result.known.autoEarned=true;}}catch{result.errors.push('New position reads unavailable; no zero balance is inferred.');}}
+      const newRead=boot.newStackReady?readNewPosition(pinned,boot,old.address).then(data=>({data,error:false})).catch(()=>({data:undefined,error:true})):Promise.resolve({data:undefined,error:false});
+      const historyRead=selection.scope==='all'?readFundedHistory(pinned,boot,old.address).then(data=>({data,error:undefined as unknown})).catch(error=>({data:undefined,error})):Promise.resolve({data:undefined,error:undefined as unknown});
+      const result={...await readAccount(pinned,boot,old.address,selection.date,selection.customToken,pinned),newPosition:undefined as LiveState['newPosition'],liqPosition:undefined as LiveState['liqPosition']},scope=selection.scope;
+      const currentPosition=await newRead;if(currentPosition.error)result.errors.push('New position reads unavailable; no zero balance is inferred.');if(currentPosition.data){const fresh=currentPosition.data;result.newPosition=fresh;if(fresh.stream?.balance!==undefined){result.wallet.staked=fresh.stream.balance;result.known.staked=true;if(fresh.stream.earned!==undefined){result.wallet.earned=fresh.stream.earned;result.known.earned=true;}}if(fresh.auto?.shares!==undefined){result.wallet.autoStaked=fresh.auto.shares;result.known.autoStaked=true;}if(fresh.auto?.earned!==undefined){result.wallet.autoEarned=fresh.auto.earned;result.known.autoEarned=true;}}
       if(boot.liqStakingReady){result.liqPosition=await liqRead;if(!result.liqPosition)result.errors.push('LIQ staking balance unavailable; no zero is inferred.');}
-      if(scope==='all'){try{Object.assign(result,await readFundedHistory(pinned,boot,old.address));}catch(e){result.errors.push(publicError(e));}}
+      const funded=await historyRead;if(funded.error)result.errors.push(publicError(funded.error));if(funded.data)Object.assign(result,funded.data);
       if(ticket!==readTicket.current||current.current.live.address?.toLowerCase()!==old.address.toLowerCase())return;
       setWallet(result.wallet);
       setLive(s=>({...s,...result,historyMode:scope,legacyDiscovery:scope==='all'?(result as any).legacyDiscovery:undefined,selectedDate:selection.date,customToken:selection.customToken,error:undefined}));
