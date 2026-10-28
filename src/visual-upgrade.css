@@ -305,7 +305,7 @@
 .connection-price-copy small{font-size:.6875rem;font-weight:500;color:var(--muted)}
 .connection-strip .connection-details{margin-left:0}
 @media(max-width:640px){
- .connection-strip{display:grid;grid-template-columns:8px minmax(0,1fr) auto 44px;gap:8px;padding:10px 12px}
+ .connection-strip{display:grid;grid-template-columns:8px minmax(0,1fr) auto 44px;gap:6px;padding:4px 12px}
  .connection-strip>.live-status-indicator{grid-column:1;grid-row:1}
  .connection-strip>strong{grid-column:2;grid-row:1;white-space:normal;font-size:.8125rem;line-height:1.4}
  .connection-strip>.connection-details{grid-column:3;grid-row:1;position:static}
@@ -314,8 +314,8 @@
  .connection-strip>.connection-refresh{grid-column:4;grid-row:1;min-width:44px;width:44px;justify-content:center;padding-inline:0}
  .connection-refresh>span{display:none}
  .connection-strip>.connection-message{grid-column:2 / 4;min-width:0;order:4}
- .connection-strip>.connection-prices{grid-column:1 / -1;order:5;width:100%;margin:2px 0 0;padding-top:9px;border-top:1px solid var(--line);justify-content:space-between;gap:12px}
- .connection-price-copy{display:grid;gap:1px}.connection-price-copy>span{font-size:.75rem}
+ .connection-strip>.connection-prices{grid-column:1 / -1;order:5;width:100%;margin:2px 0 0;padding-top:7px;border-top:1px solid var(--line);justify-content:space-between;gap:12px}
+ .connection-price-copy{display:grid;gap:1px}.connection-price-copy>span{font-size:.75rem;line-height:1.25}
  .connection-price-copy small{font-size:.625rem}
 }
 
