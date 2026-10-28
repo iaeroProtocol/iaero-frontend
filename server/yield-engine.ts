@@ -7,6 +7,7 @@ import {historicalClaimPrice} from './yield-prices.ts';
 import {reservePrice} from './protocol-metrics.ts';
 import {createCurrentYieldPricer,finalizePendingPrices} from './yield-current-prices.ts';
 import {freshYieldPrice} from '../src/protocol-data/yield-price.ts';
+import {yieldContractReader} from './yield-read-client.ts';
 const zero='0x0000000000000000000000000000000000000000';
 const canonical=(v:unknown)=>JSON.stringify(v,(_,x)=>typeof x==='bigint'?x.toString():x);
 const same=(a:unknown,b:unknown)=>String(a).toLowerCase()===String(b).toLowerCase();
@@ -31,12 +32,14 @@ export function yieldReadSources(baseUrls:string[]){
   return policy.chains.map(source=>{
     if(source.key==='base')return {source,urls:baseUrls};
     const url=new URL(baseUrls[0]);if(url.hostname!=='base-mainnet.g.alchemy.com')return {source,urls:[]};
-    url.hostname=source.key==='ethereum'?'eth-mainnet.g.alchemy.com':'robinhood-mainnet.g.alchemy.com';
+    const hosts:Record<string,string>={ethereum:'eth-mainnet.g.alchemy.com',robinhood:'robinhood-mainnet.g.alchemy.com',arbitrum:'arb-mainnet.g.alchemy.com'};
+    if(!hosts[source.key])return {source,urls:[]};
+    url.hostname=hosts[source.key];
     if(source.key==='ethereum'&&baseUrls[1]){
       const independent=new URL(baseUrls[1]);if(independent.hostname!=='base-mainnet.infura.io')return {source,urls:[url.href]};
       independent.hostname='mainnet.infura.io';return {source,urls:[url.href,independent.href]};
     }
-    return {source,urls:[url.href]}; // Robinhood remains explicitly single-provider.
+    return {source,urls:[url.href]}; // Remote chains remain explicitly single-provider.
 
   });
 }
@@ -47,7 +50,8 @@ async function context(source:Source,urls:string[]):Promise<Context>{
   const heads=await Promise.all(clients.map(c=>c.getBlock({blockTag:'finalized'}))),block=heads.reduce((n,h)=>h.number<n?h.number:n,heads[0].number);
   const header=async(at:bigint)=>{const rows=await Promise.all(clients.map(c=>c.getBlock({blockNumber:at})));if(rows.some(h=>h.hash!==rows[0].hash||h.timestamp!==rows[0].timestamp))throw Error('yield_header_disagreement');return rows[0];};
   const head=await header(block);if(Date.now()/1000-Number(head.timestamp)>3600)throw Error('yield_finalized_head_stale');
-  const read=async(a:string,s:string,args:readonly unknown[]=[],at=block)=>{const abi=parseAbi([s]),functionName=s.match(/^function (\w+)/)![1];const values=await Promise.all(clients.map(c=>c.readContract({address:a as Address,abi,functionName,args,blockNumber:at} as any)));if(values.some(v=>canonical(v)!==canonical(values[0])))throw Error('yield_read_disagreement');return values[0];};
+  const readContract=yieldContractReader(clients,source.chainId,policy.readBatch);
+  const read=async(a:string,s:string,args:readonly unknown[]=[],at=block)=>readContract({address:a as Address,abi:parseAbi([s]),functionName:s.match(/^function (\w+)/)![1],args,blockNumber:at});
   const factory=await read(policy.leafVoter,'function FACTORY_REGISTRY() view returns(address)');if(typeof factory!=='string'||!isAddress(factory)||same(factory,zero))throw Error('yield_factory_invalid');
   return {source,clients,block,timestamp:Number(head.timestamp),hash:head.hash!,factory,read,header};
 }

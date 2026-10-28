@@ -20,7 +20,7 @@ export function validPrice(coin:any,source:PriceSource,policy:PricePolicy,time:n
 }
 export async function priceYieldAssets(assets:YieldAsset[],policy:PricePolicy,options:{time?:number;historical?:boolean;fetchImpl?:typeof fetch}={}){
  const time=options.time??Math.floor(Date.now()/1000),fetcher=options.fetchImpl??fetch,proofs=new Map<string,PriceProof>();
- const slugs:Record<number,string>={8453:'base',1:'ethereum',4663:'robinhood'};
+ const slugs:Record<number,string>={8453:'base',1:'ethereum',4663:'robinhood',42161:'arbitrum'};
  const candidates=assets.filter(a=>a.valueUsdcWad===null&&a.decimals!==null).map(asset=>({asset,rule:policy.assets.find(r=>r.chainId===asset.chainId&&r.token.toLowerCase()===asset.token.toLowerCase()&&r.decimals===asset.decimals&&r.symbol.toUpperCase()===asset.symbol.toUpperCase())??(slugs[asset.chainId]?{chainId:asset.chainId,token:asset.token,decimals:asset.decimals,symbol:asset.symbol,sources:[{id:slugs[asset.chainId]+':'+asset.token,symbol:asset.symbol}]}:undefined)})).filter(a=>a.rule);
  if(!candidates.length)return proofs;
  const ids=[...new Set([policy.usdcSource.id,...candidates.flatMap(c=>c.rule!.sources.map(s=>s.id))])],coins=new Map<string,any>();
