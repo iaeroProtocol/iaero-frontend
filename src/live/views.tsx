@@ -17,6 +17,7 @@ import {PartialAmount,chosenAmount} from './partial-amount';
 import {ProtocolYieldCard} from './protocol-yield-view';
 import {AsyncSection} from '../async-section';
 import {connectionLabel} from './position-model';
+import {StatusPrices} from './status-prices';
 import {groupRewards,CLAIM_LIMIT} from './rewards';
 import type {SweepIntent} from './sweep-view';
 const SweepWizard=lazy(()=>import('./sweep-view').then(m=>({default:m.SweepWizard})));
@@ -39,6 +40,7 @@ export function LiveStatus(){
     <div className={'live-status connection-strip'+(healthy?' is-healthy':'')}>
       <span className={'live-status-indicator '+(healthy?'verified':'')}/>
       <strong>{l.error?'Base reads interrupted':l.boot?'Connected to Base':'Connecting to Base'}</strong>
+      <StatusPrices boot={healthy?l.boot:undefined}/>
       {healthy?<details className="connection-details"><summary>{l.boot!.snapshot.independentProviders===1?'1 provider':'Contract status'} <Icon name="chevron" size={14}/></summary><div>{l.boot!.snapshot.independentProviders===1&&<p>Alchemy only · independent confirmation pending.</p>}<p>{l.boot!.legacyReady?'Legacy claims and withdrawals connected.':'Previous staking readback is unavailable.'}</p><p>{connection.message}</p><span className={'pill pill-'+(connection.active?'blue':'amber')}>{connection.label}</span></div></details>:<span className="connection-message">{l.error??'Checking deployed contracts with Alchemy.'}</span>}
       <button className="text-link connection-refresh" disabled={l.loading} onClick={()=>void s.liveControls!.refresh()} aria-label="Refresh live contract data"><Icon name="refresh" size={16}/><span>{l.loading?'Reading…':'Refresh'}</span></button>
     </div>
