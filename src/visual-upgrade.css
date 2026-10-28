@@ -318,3 +318,8 @@
  .connection-price-copy{display:grid;gap:1px}.connection-price-copy>span{font-size:.75rem}
  .connection-price-copy small{font-size:.625rem}
 }
+
+@media(max-width:640px){
+ .live-status-wrap{gap:6px;margin-bottom:4px}
+ .deployment-caption{margin-top:0}
+}
