@@ -98,16 +98,18 @@ export function baseApiMiddleware(options:{publicOrigin?:string;collect?:boolean
       }
       if(path==='/api/sweep/quote'){
         if(req.method!=='GET')return respond(405,{error:'GET only.'});
-        const input=new URL(req.url!,'http://'+host).searchParams,sellToken=input.get('sellToken')??'',sellAmount=input.get('sellAmount')??'',slippage=Number(input.get('slippageBps'));
-        if(!isAddress(sellToken)||BigInt(sellToken)===0n||[registry.legacy.iAERO,registry.legacy.stiAERO,registry.legacy.USDC].some(a=>a.toLowerCase()===sellToken.toLowerCase())||!/^\d{1,78}$/.test(sellAmount)||BigInt(sellAmount)<=0n||BigInt(sellAmount)>=2n**256n||!Number.isInteger(slippage)||slippage<10||slippage>1000)return respond(400,{error:'Invalid token, amount or slippage.'});
+        const input=new URL(req.url!,'http://'+host).searchParams,sellToken=input.get('sellToken')??'',sellAmount=input.get('sellAmount')??'',slippage=Number(input.get('slippageBps')),buyToken=input.get('buyToken')??registry.legacy.USDC;
+        if(!isAddress(sellToken)||BigInt(sellToken)===0n||!isAddress(buyToken)||![registry.legacy.USDC,registry.aero.token].some(a=>a.toLowerCase()===buyToken.toLowerCase())||[registry.legacy.iAERO,registry.legacy.stiAERO,buyToken].some(a=>a.toLowerCase()===sellToken.toLowerCase())||!/^\d{1,78}$/.test(sellAmount)||BigInt(sellAmount)<=0n||BigInt(sellAmount)>=2n**256n||!Number.isInteger(slippage)||slippage<10||slippage>1000)return respond(400,{error:'Invalid token, amount or slippage.'});
         const boot=await publicBootstrap();if(!boot.sweepReady)return respond(503,{error:'The deployed reward swapper is not verified.'});
+        if(buyToken.toLowerCase()===registry.aero.token.toLowerCase()&&!boot.aeroCompoundReady)return respond(503,{error:'The new AERO output and compound route are not verified.'});
         // Existing public app proxy retains its own 0x credential. The local
         // browser never receives it, and cannot choose an arbitrary upstream.
         const upstream=new URL(registry.sweep.quoteEndpoint);
-        for(const [key,value] of Object.entries({chainId:'8453',sellToken,sellAmount,buyToken:registry.legacy.USDC,taker:registry.sweep.swapper,recipient:registry.sweep.swapper,slippageBps:String(slippage)}))upstream.searchParams.set(key,value);
+        for(const [key,value] of Object.entries({chainId:'8453',sellToken,sellAmount,buyToken,taker:registry.sweep.swapper,recipient:registry.sweep.swapper,slippageBps:String(slippage)}))upstream.searchParams.set(key,value);
         const quote=await bounded(async()=>{const r=await fetch(upstream,{signal:AbortSignal.timeout(25000)});const data=await r.json().catch(()=>null);checkQuoteServiceResponse(r.status,data);return data;});
-        if(quote.liquidityAvailable===false||!quote.transaction?.data||!isAddress(quote.transaction.to)||String(quote.sellAmount)!==sellAmount||!/^\d+$/.test(String(quote.buyAmount))||BigInt(quote.buyAmount)<=0n||BigInt(quote.transaction.value??'0')!==0n)return respond(422,{code:'INVALID_EXECUTABLE_QUOTE',error:'The service did not return a valid executable USDC quote.'});
-        return respond(200,{sellToken,sellAmount,buyToken:registry.legacy.USDC,buyAmount:String(quote.buyAmount),minBuyAmount:String(quote.minBuyAmount??'0'),taker:registry.sweep.swapper,recipient:registry.sweep.swapper,transaction:{to:quote.transaction.to,data:quote.transaction.data,value:'0'},quotedAt:Date.now()});
+        if(quote.liquidityAvailable===false||!quote.transaction?.data||!isAddress(quote.transaction.to)||String(quote.sellAmount)!==sellAmount||!/^\d+$/.test(String(quote.buyAmount))||BigInt(quote.buyAmount)<=0n||BigInt(quote.transaction.value??'0')!==0n)return respond(422,{code:'INVALID_EXECUTABLE_QUOTE',error:'The service did not return a valid executable quote.'});
+        if(quote.sellToken&&String(quote.sellToken).toLowerCase()!==sellToken.toLowerCase()||quote.buyToken&&String(quote.buyToken).toLowerCase()!==buyToken.toLowerCase())return respond(422,{code:'INVALID_EXECUTABLE_QUOTE',error:'Quote tokens do not match the requested swap.'});
+        return respond(200,{sellToken,sellAmount,buyToken,buyAmount:String(quote.buyAmount),minBuyAmount:String(quote.minBuyAmount??'0'),taker:registry.sweep.swapper,recipient:registry.sweep.swapper,transaction:{to:quote.transaction.to,data:quote.transaction.data,value:'0'},quotedAt:Date.now()});
       }
       if(path==='/api/contracts'){
         if(req.method!=='GET')return respond(405,{error:'GET only.'});

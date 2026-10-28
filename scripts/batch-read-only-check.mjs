@@ -33,11 +33,11 @@ try{
   let gasEstimate='NOT_RUN_NEEDS_ACTUAL_ALLOWANCES';
   if(before.every((state,i)=>state.allowance>=preview.inputs[i].amount)){
     const plan=preview.quotes.map(q=>swapStep(q,q,boot,preview.slippageBps));
-    const gas=await client.estimateContractGas({address:swapper,abi:SWEEP_ABI,functionName:'executePlanFromCallerAdvanced',args:[plan,user,{minTotalOut:preview.minimumUsdc,allowPartial:false}],account:user,gas:SWEEP_GAS_LIMIT});
+    const gas=await client.estimateContractGas({address:swapper,abi:SWEEP_ABI,functionName:'executePlanFromCallerAdvanced',args:[plan,user,{minTotalOut:preview.minimumOutput,allowPartial:false}],account:user,gas:SWEEP_GAS_LIMIT});
     assert.ok((gas*130n+99n)/100n<=SWEEP_GAS_LIMIT);gasEstimate='PASS';
   }
   const out='artifacts/batch-readback';await mkdir(out,{recursive:true});
-  const result={status:'PASS',checkedAt:new Date().toISOString(),scope:'Actual two-token approval-plus-combined-swap eth_simulateV1 using existing public Safe balances. No Safe owner signatures or owner-wallet acceptance, balance/storage/code overrides, actual approvals or transactions.',simulationProviders:1,bootstrapProviders:boot.snapshot.independentProviders,caller:user,tokens:preview.inputs,minimumUsdc:preview.minimumUsdc,balancesAndAllowancesUnchanged:true,actualBatchGasEstimate:gasEstimate,realTransactionPerformed:false};
+  const result={status:'PASS',checkedAt:new Date().toISOString(),scope:'Actual two-token approval-plus-combined-swap eth_simulateV1 using existing public Safe balances. No Safe owner signatures or owner-wallet acceptance, balance/storage/code overrides, actual approvals or transactions.',simulationProviders:1,bootstrapProviders:boot.snapshot.independentProviders,caller:user,tokens:preview.inputs,minimumOutput:preview.minimumOutput,balancesAndAllowancesUnchanged:true,actualBatchGasEstimate:gasEstimate,realTransactionPerformed:false};
   await writeFile(out+'/RESULT.json',JSON.stringify(result,(_,v)=>typeof v==='bigint'?v.toString():v,2)+'\n');
   console.log(JSON.stringify({status:'PASS',tokens:preview.inputs.map(t=>t.symbol),combinedSimulation:'PASS',actualBatchGasEstimate:gasEstimate,balancesAndAllowancesUnchanged:true,realTransactionPerformed:false}));
 }catch{console.error('Read-only two-token batch check did not pass. No transaction was sent.');process.exitCode=1;}finally{await server.close();}

@@ -32,10 +32,10 @@ export function createAppReadApi(env:AppReadEnv,options:{fetchImpl?:typeof fetch
    options.waitUntil?.(pending.catch(()=>{}));
   }return pending;
  }
- async function quote(token:Address,amount:bigint,slippage=100){
+ async function quote(token:Address,amount:bigint,slippage=100,buyToken:Address=registry.legacy.USDC as Address){
   if(!env.ZERO_EX_API_KEY)throw new SweepQuoteError('QUOTE_AUTHENTICATION',503,'The quote service authentication needs attention.');
   const upstream=new URL('https://api.0x.org/swap/allowance-holder/quote');
-  upstream.search=new URLSearchParams({chainId:'8453',sellToken:token,sellAmount:amount.toString(),buyToken:registry.legacy.USDC,taker:registry.sweep.swapper,recipient:registry.sweep.swapper,slippageBps:String(slippage)}).toString();
+  upstream.search=new URLSearchParams({chainId:'8453',sellToken:token,sellAmount:amount.toString(),buyToken,taker:registry.sweep.swapper,recipient:registry.sweep.swapper,slippageBps:String(slippage)}).toString();
   return bounded(async()=>{const r=await fetcher(upstream,{headers:{'0x-api-key':env.ZERO_EX_API_KEY!,'0x-version':'v2'},signal:AbortSignal.timeout(25000),redirect:'manual'});if(r.status>=300&&r.status<400){await r.body?.cancel();throw Error('Quote redirect refused');}const data=await r.json().catch(()=>null);checkQuoteServiceResponse(r.status,data);return data;});
  }
  const values=new Map<string,{at:number;pending:Promise<TokenValue>}>();
@@ -62,13 +62,14 @@ export function createAppReadApi(env:AppReadEnv,options:{fetchImpl?:typeof fetch
     // Never expose quote calldata or an approval as a display valuation.
     return appJson(await cached.pending);
    }
-   const params=url.searchParams,sellToken=params.get('sellToken')??'',sellAmount=params.get('sellAmount')??'',slippage=Number(params.get('slippageBps'));
-   if(!isAddress(sellToken)||BigInt(sellToken)===0n||[registry.legacy.iAERO,registry.legacy.stiAERO,registry.legacy.USDC].some(a=>a.toLowerCase()===sellToken.toLowerCase())||!/^\d{1,78}$/.test(sellAmount)||BigInt(sellAmount)<=0n||BigInt(sellAmount)>=2n**256n||!Number.isInteger(slippage)||slippage<10||slippage>1000)return appJson({error:'Invalid token, amount or slippage.'},400);
+   const params=url.searchParams,sellToken=params.get('sellToken')??'',sellAmount=params.get('sellAmount')??'',slippage=Number(params.get('slippageBps')),buyToken=params.get('buyToken')??registry.legacy.USDC;
+   if(!isAddress(sellToken)||BigInt(sellToken)===0n||!isAddress(buyToken)||![registry.legacy.USDC,registry.aero.token].some(a=>a.toLowerCase()===buyToken.toLowerCase())||[registry.legacy.iAERO,registry.legacy.stiAERO,buyToken].some(a=>a.toLowerCase()===sellToken.toLowerCase())||!/^\d{1,78}$/.test(sellAmount)||BigInt(sellAmount)<=0n||BigInt(sellAmount)>=2n**256n||!Number.isInteger(slippage)||slippage<10||slippage>1000)return appJson({error:'Invalid token, output, amount or slippage.'},400);
    const boot=await bootstrap();if(!boot.sweepReady)return appJson({error:'The deployed reward swapper is not verified.'},503);
-   const data=await quote(sellToken,BigInt(sellAmount),slippage);
-   if(data.liquidityAvailable===false||!data.transaction?.data||!isAddress(data.transaction.to)||String(data.sellAmount)!==sellAmount||!/^\d{1,78}$/.test(String(data.buyAmount))||BigInt(data.buyAmount)<=0n||BigInt(data.buyAmount)>=2n**256n||BigInt(data.transaction.value??'0')!==0n)return appJson({code:'INVALID_EXECUTABLE_QUOTE',error:'The service did not return a valid executable USDC quote.'},422);
-   if(data.sellToken&&String(data.sellToken).toLowerCase()!==sellToken.toLowerCase()||data.buyToken&&String(data.buyToken).toLowerCase()!==registry.legacy.USDC.toLowerCase())return appJson({code:'INVALID_EXECUTABLE_QUOTE',error:'Quote tokens do not match the requested swap.'},422);
-   return appJson({sellToken,sellAmount,buyToken:registry.legacy.USDC,buyAmount:String(data.buyAmount),minBuyAmount:String(data.minBuyAmount??'0'),taker:registry.sweep.swapper,recipient:registry.sweep.swapper,transaction:{to:data.transaction.to,data:data.transaction.data,value:'0'},quotedAt:now()});
+   if(buyToken.toLowerCase()===registry.aero.token.toLowerCase()&&!boot.aeroCompoundReady)return appJson({error:'The new AERO output and compound route are not verified.'},503);
+   const data=await quote(sellToken,BigInt(sellAmount),slippage,buyToken);
+   if(data.liquidityAvailable===false||!data.transaction?.data||!isAddress(data.transaction.to)||String(data.sellAmount)!==sellAmount||!/^\d{1,78}$/.test(String(data.buyAmount))||BigInt(data.buyAmount)<=0n||BigInt(data.buyAmount)>=2n**256n||BigInt(data.transaction.value??'0')!==0n)return appJson({code:'INVALID_EXECUTABLE_QUOTE',error:'The service did not return a valid executable quote.'},422);
+   if(data.sellToken&&String(data.sellToken).toLowerCase()!==sellToken.toLowerCase()||data.buyToken&&String(data.buyToken).toLowerCase()!==buyToken.toLowerCase())return appJson({code:'INVALID_EXECUTABLE_QUOTE',error:'Quote tokens do not match the requested swap.'},422);
+   return appJson({sellToken,sellAmount,buyToken,buyAmount:String(data.buyAmount),minBuyAmount:String(data.minBuyAmount??'0'),taker:registry.sweep.swapper,recipient:registry.sweep.swapper,transaction:{to:data.transaction.to,data:data.transaction.data,value:'0'},quotedAt:now()});
   }catch(error){
    if(error instanceof SweepQuoteError)return appJson({code:error.code,error:error.message},error.status);
    return appJson({error:path==='/api/rewards/value'?'Reward value is unavailable. Claims are unaffected.':path.includes('quote')?'The quote connection is temporarily unavailable. Retry later.':'Verified Base read connection unavailable. Retry later.'},503);

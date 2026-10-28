@@ -5,7 +5,7 @@ import {pendingTransaction} from '../protocol/pendingTransaction';
 export const SWEEP_GAS_LIMIT=16_000_000n;
 export const SWEEP_MAX_RETRIES=2;
 export const SWEEP_MAX_SLIPPAGE_BPS=1000;
-export type SweepRetryPolicy={maxRetries:2;maxSlippageBps:number;minimumUsdcByAttempt:bigint[];minimumIaeroByAttempt?:bigint[]};
+export type SweepRetryPolicy={maxRetries:2;maxSlippageBps:number;minimumOutputByAttempt:bigint[];minimumIaeroByAttempt?:bigint[]};
 export type SweepRetryEvent={stage:'swap'|'conversion'|'stake';attempt:number;slippageBps:number;hash?:Hash;exhausted?:boolean};
 export class SweepPreflightRevert extends Error {}
 export function retrySlippage(base:number,attempt:number){

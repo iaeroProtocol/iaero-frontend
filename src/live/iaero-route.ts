@@ -34,3 +34,23 @@ export function encodeIaeroRoute(boot:Bootstrap,user:Address,usdc:bigint,minimum
   encodeAbiParameters(MARKET_ROUTE_PARAMS,[{pools:[s.aeroIaeroClPool],tokenIn:boot.registry.aero.token,amountIn:{mode:1,value:1000000n},payerIsUser:false,minAmountOut:minimum,recipient:user}])
  ]};
 }
+
+// The compound flow receives new AERO directly from RewardSwapper. Its final
+// [VERIFIED: deployed-aero-audit/inputs/deployed-tree/V3/src/metarouter/libraries/Commands.sol]
+// conversion uses only the verified AERO/iAERO CL pool (CL_SWAP_EXACT_IN=0x00).
+export async function quoteAeroIaeroRoute(client:BaseClient,boot:Bootstrap,amount:bigint){
+ if(!boot.aeroCompoundReady||amount<=0n||amount>=2n**256n)throw Error('A positive AERO input and verified compound route are required.');
+ const {sweep,legacy,aero}=boot.registry,block=await client.getBlock(),read=(functionName:'token0'|'token1'|'slot0')=>client.readContract({address:sweep.aeroIaeroClPool,abi:PAIR_ABI,functionName,blockNumber:block.number});
+ const [token0,token1,slot]=await Promise.all([read('token0'),read('token1'),read('slot0')]);
+ if([String(token0),String(token1)].map(a=>a.toLowerCase()).sort().join()!==[aero.token,legacy.iAERO].map(a=>a.toLowerCase()).sort().join()||!Array.isArray(slot))throw Error('The Aero market tokens do not match this route.');
+ const sqrt=BigInt(slot[0]);if(sqrt<=0n||sqrt>=2n**160n)throw Error('The Aero market price is unavailable.');
+ const ratio=sqrt*sqrt,mid=same(String(token0),aero.token)?amount*ratio/(2n**192n):amount*(2n**192n)/ratio;
+ if(mid<=0n||mid>=2n**256n)throw Error('The Aero market output is unavailable.');
+ const quote=await client.simulateContract({address:sweep.metaquoter,abi:METAQUOTER_ABI,functionName:'quoteExactInput',args:[[sweep.aeroIaeroClPool],aero.token,amount],blockNumber:block.number}),output=quote.result[0],costMinimum=mid*(10000n-IAERO_ROUTE_COST_BPS)/10000n;
+ if(output<=0n||costMinimum<=0n||output<costMinimum)throw Error('The iAERO conversion exceeds the 2% pool-fee and price-impact limit. Keep AERO or try a smaller amount.');
+ return {output,mid,costMinimum,block};
+}
+export function encodeAeroIaeroRoute(boot:Bootstrap,user:Address,amount:bigint,minimum:bigint){
+ if(amount<=0n||minimum<=0n)throw Error('Positive AERO input and iAERO minimum are required.');
+ return {commands:'0x00' as const,inputs:[encodeAbiParameters(MARKET_ROUTE_PARAMS,[{pools:[boot.registry.sweep.aeroIaeroClPool],tokenIn:boot.registry.aero.token,amountIn:{mode:0,value:amount},payerIsUser:true,minAmountOut:minimum,recipient:user}])]};
+}
