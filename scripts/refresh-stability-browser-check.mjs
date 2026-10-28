@@ -6,7 +6,7 @@ const origin=process.env.PREVIEW_URL??'http://127.0.0.1:4330',out=process.env.ST
 assert(['127.0.0.1','app.iaero.finance','saero-functionality-20261027.iaero-frontend.pages.dev'].includes(new URL(origin).hostname));await mkdir(out,{recursive:true});
 const config=await fetch(origin+'/frontend-config.json').then(r=>r.json());if(process.env.RELEASE_COMMIT)assert.equal(config.sourceCommit,process.env.RELEASE_COMMIT);
 const checks=[],record=(width,name)=>checks.push({width,name});
-const refresh=page=>page.getByRole('button',{name:'Refresh live contract data',exact:true});
+const refresh=page=>({click:async()=>{await page.waitForFunction(()=>!document.querySelector('[aria-label="Refresh live contract data"]')?.disabled);await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));}});
 for(const width of [1440,390,320]){
  const f=await liveFixture({viewport:{width,height:width<500?844:1050}},origin),{page,state,registry,unit}=f;page.setDefaultTimeout(20000);
  const bad='0x00000000000000000000000000000000aa110001';state.liqTokens=[registry.legacy.USDC,registry.legacy.WETH,bad];state.liqAmounts=[1500000n,unit/100n,unit];state.liqFailTokens=new Set([bad.toLowerCase()]);state.tokenMetadata.set(bad.toLowerCase(),{symbol:'Anon',decimals:18});
