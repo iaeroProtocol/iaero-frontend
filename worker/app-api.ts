@@ -20,7 +20,7 @@ const rpcStartTimes=new Map<string,number>();
 // Fetch + injected secret bindings only: no filesystem, SQLite or signing keys.
 export function createAppReadApi(env:AppReadEnv,options:{fetchImpl?:typeof fetch;inspect?:()=>Promise<any>;now?:()=>number;bootstrapCache?:ReturnType<typeof createBootstrapCache>;waitUntil?:(task:Promise<unknown>)=>void}={}){
  const fetcher=options.fetchImpl??fetch,now=options.now??Date.now,urls=configuredBaseReads(env.BASE_READ_RPC_URLS??'');
- const rpcFetch=createReadRpcFetch({fetchImpl:fetcher,states:new Map(),startTimes:rpcStartTimes,maxQueueMs:15000}),sharedKey=options.bootstrapCache?bootstrapCacheKey({urls,registry,deployment,tokenFilter}):undefined;
+ const rpcFetch=createReadRpcFetch({alchemyBurst:true,fetchImpl:fetcher,states:new Map(),startTimes:rpcStartTimes,maxQueueMs:15000}),sharedKey=options.bootstrapCache?bootstrapCacheKey({urls,registry,deployment,tokenFilter}):undefined;
  let active=0;const queue:(()=>void)[]=[];
  async function bounded<T>(run:()=>Promise<T>){if(active>=6){if(queue.length>=100)throw Error('Read service busy');await new Promise<void>(r=>queue.push(r));}else active++;try{return await run();}finally{const next=queue.shift();if(next)next();else active--;}}
  let boot:{expiresAt:number;value:any}|undefined,pending:Promise<any>|undefined;

@@ -60,22 +60,22 @@ export async function readProtocolMarketMetrics(read:Reader,c:Config,backingAero
     if(one===a&&zero===q)return {asset:BigInt(reserves[1]),quote:BigInt(reserves[0])};
     throw Error('Unexpected token pair');
   });
-  const clPeg=c.sweep.aeroIaeroClPool?await safe('iAERO/AERO CL pool',async()=>{
+  const clPegRead=c.sweep.aeroIaeroClPool?safe('iAERO/AERO CL pool',async()=>{
     const [t0,t1,slot,liquidity]=await Promise.all([read(c.sweep.aeroIaeroClPool!,'function token0() view returns(address)'),read(c.sweep.aeroIaeroClPool!,'function token1() view returns(address)'),read(c.sweep.aeroIaeroClPool!,'function slot0() view returns(uint160,int24,uint16,uint16,uint16,bool)'),read(c.sweep.aeroIaeroClPool!,'function liquidity() view returns(uint128)')]);
     if([String(t0),String(t1)].map(a=>a.toLowerCase()).sort().join()!==[c.aero.token,c.legacy.iAERO].map(a=>a.toLowerCase()).sort().join()||!Array.isArray(slot)||slot[5]!==true||BigInt(liquidity)<=0n)throw Error('Invalid CL price state');return {sqrt:BigInt(slot[0]),assetIsToken0:String(t0).toLowerCase()===c.legacy.iAERO.toLowerCase()};
   }):null;
-  const [ad,ud,id,ld,ap,ip,lp,supply]=await Promise.all([
+  const [ad,ud,id,ld,ap,ip,lp,supply,clPeg,iaeroSupply]=await Promise.all([
     decimals(c.aero.token,'AERO'),decimals(c.legacy.USDC,'USDC'),decimals(c.legacy.iAERO,'iAERO'),decimals(c.legacy.LIQ,'LIQ'),
     pool(c.sweep.aeroUsdcPool,c.aero.token,c.legacy.USDC,'AERO/USDC pool'),
     c.sweep.aeroIaeroClPool?Promise.resolve(null):pool(c.sweep.aeroIaeroPool,c.legacy.iAERO,c.aero.token,'iAERO/AERO pool'),
     pool(c.marketData.liqUsdcPool,c.legacy.LIQ,c.legacy.USDC,'LIQ/USDC pool'),
-    safe('LIQ supply',async()=>{const s=BigInt(await read(c.legacy.LIQ,'function totalSupply() view returns(uint256)'));if(s<0n||s>=2n**256n)throw Error('Invalid supply');return s;})
+    safe('LIQ supply',async()=>{const s=BigInt(await read(c.legacy.LIQ,'function totalSupply() view returns(uint256)'));if(s<0n||s>=2n**256n)throw Error('Invalid supply');return s;}),clPegRead,
+    safe('iAERO supply',async()=>BigInt(await read(c.legacy.iAERO,'function totalSupply() view returns(uint256)')))
   ]);
   const rate=(p:Pool|null,a:number|null,q:number|null)=>p&&a!==null&&q!==null?reservePrice(p.asset,p.quote,a,q):null;
   const aero=rate(ap,ad,ud),peg=c.sweep.aeroIaeroClPool?(clPeg&&id!==null&&ad!==null?clSpotPrice(clPeg.sqrt,clPeg.assetIsToken0,id,ad):null):rate(ip,id,ad),liq=rate(lp,ld,ud);
   const tvl=aero!==null&&ad!==null&&backingAero!==undefined&&backingAero>=0n?backingAero*aero/10n**BigInt(ad):null;
   const circulation=supply!==null?await safe('LIQ circulating supply',()=>readLiqCirculation(read,c,supply,snapshot.timestamp)):null;
-  const iaeroSupply=await safe('iAERO supply',async()=>BigInt(await read(c.legacy.iAERO,'function totalSupply() view returns(uint256)')));
   const cap=liq!==null&&ld!==null&&circulation!==null?circulation.circulating*liq/10n**BigInt(ld):null;
   return {iaeroPriceUsdcWad:aero!==null&&peg!==null?(aero*peg/E18).toString():null,iaeroTotalSupply:iaeroSupply?.toString()??null,iaeroDecimals:id,backingPerIaeroWad:iaeroSupply!==null&&iaeroSupply>0n&&ad!==null&&id!==null&&backingAero!==undefined?(backingAero*10n**BigInt(id)*E18/(iaeroSupply*10n**BigInt(ad))).toString():null,aeroPriceUsdcWad:aero?.toString()??null,iaeroPegWad:peg?.toString()??null,tvlUsdcWad:tvl?.toString()??null,liqPriceUsdcWad:liq?.toString()??null,liqMarketCapUsdcWad:cap?.toString()??null,liqTotalSupply:supply?.toString()??null,liqCirculatingSupply:circulation?.circulating.toString()??null,liqUnvested:circulation?.unvested.toString()??null,liqTreasuryBalance:circulation?.treasuryBalance.toString()??null,liqTreasuryAddress:circulation?.treasury??null,liqVestingAddress:circulation?.vesting??null,liqDecimals:ld,asOfBlock:snapshot.block,blockTimestamp:snapshot.timestamp,readAtMs:Date.now(),readProviders:snapshot.independentProviders,errors};
 }

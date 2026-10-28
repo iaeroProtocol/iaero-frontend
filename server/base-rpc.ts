@@ -1,4 +1,6 @@
-import {readRpcFetch} from './read-rpc-fetch.ts';
+import {createReadRpcFetch} from './read-rpc-fetch.ts';
+// Node-only app queue; the scheduled recorder retains its separate policy.
+const readRpcFetch=createReadRpcFetch({alchemyBurst:true,states:new Map()});
 import {allowApiRequest,configuredBaseReads,clientAddressResolver} from './access-policy.ts';
 import {liqYield} from './liq-yield.ts';
 import {readFile} from 'node:fs/promises';
