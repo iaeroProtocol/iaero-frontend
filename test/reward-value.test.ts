@@ -24,6 +24,23 @@ describe('read-only reward estimates',()=>{
   it.each(['token=x&amount=1','token='+token+'&amount=0','token='+token+'&amount=1&decimals=37','token='+token+'&amount=-1'])('refuses an invalid value request %s',query=>expect(()=>valueInput(new URLSearchParams(query))).toThrow());
 });
 describe('reward totals and stale results',()=>{
+  const cached=(key='selection',at=Date.now()-110000)=>valuationSnapshot(key,groupRewards([row()]),{[token.toLowerCase()]:{token,amount:10n**18n,valueWad:5n*10n**18n,source:'quote',quotedAt:at}},false);
+  it('keeps an exact-selection estimate visible while still requesting a new price',async()=>{
+    const old=cached(),updates:any[]=[],fetcher=vi.fn(async()=>({ok:true,json:async()=>({token,amount:(10n**18n).toString(),valueWad:'6000000000000000000',source:'quote',quotedAt:Date.now()})})) as any;
+    await priceRewards('selection',[row()],usdc,v=>updates.push(v),new AbortController().signal,fetcher,old);
+    expect(updates[0].totalWad).toBe(5n*10n**18n);expect(updates[0].asOf).toBe(old.asOf);expect(updates.at(-1).totalWad).toBe(6n*10n**18n);expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it('retains a fresh value after a transient failure without extending its original expiry',async()=>{
+    const old=cached(),updates:any[]=[];await priceRewards('selection',[row()],usdc,v=>updates.push(v),new AbortController().signal,vi.fn(async()=>({ok:false,status:503})) as any,old);
+    const last=updates.at(-1);expect(last.totalWad).toBe(old.totalWad);expect(last.asOf).toBe(old.asOf);expect(last.values[token.toLowerCase()].quotedAt).toBe(old.asOf);expect(last.refreshErrors).toBe(1);
+    const expired=cached('selection',Date.now()-120001),later:any[]=[];await priceRewards('selection',[row()],usdc,v=>later.push(v),new AbortController().signal,vi.fn().mockRejectedValue(Error('outage')),expired);expect(later[0].totalWad).toBeNull();expect(later.at(-1).totalWad).toBeNull();
+  });
+  it.each(['account','amount'])('never carries a cached price into a changed %s',async changed=>{
+    const updates:any[]=[],old=cached(),rows=[row(token,changed==='amount'?2n*10n**18n:10n**18n)];await priceRewards(changed==='account'?'another-account':'selection',rows,usdc,v=>updates.push(v),new AbortController().signal,vi.fn().mockRejectedValue(Error('outage')),old);expect(updates[0].totalWad).toBeNull();expect(updates.at(-1).totalWad).toBeNull();
+  });
+  it('invalidates a cached estimate when a successful response has the wrong identity',async()=>{
+    const old=cached(),updates:any[]=[];await priceRewards('selection',[row()],usdc,v=>updates.push(v),new AbortController().signal,vi.fn(async()=>({ok:true,json:async()=>({token:usdc,amount:(10n**18n).toString(),valueWad:'999',source:'quote',quotedAt:Date.now()})})) as any,old);expect(updates[0].totalWad).toBe(old.totalWad);expect(updates.at(-1).totalWad).toBeNull();
+  });
   it('sums each token only once across its weeks using integer USDC precision',async()=>{
     const rows=[row(usdc,1000000n,6),{...row(usdc,2000000n,6),epoch:epoch-604800n},row(token,2n)],updates:any[]=[];
     const fetcher=vi.fn(async()=>({ok:true,json:async()=>({token,amount:'2',valueWad:'4000000000000000000',source:'quote',quotedAt:Date.now()})})) as any;

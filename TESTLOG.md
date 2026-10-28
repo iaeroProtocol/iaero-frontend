@@ -367,3 +367,12 @@ Author checks: 556 application tests and typecheck passed, including bounded ret
 Retry browser follow-up: all 120 compiled browser checks passed (18 new retries, 18 existing sweeps, 20 live flows, 40 responsive, 24 LIQ/reward access). The new retry preference is checked separately from token reselection after an error. The retry harness now verifies exact source identity and can use the two approved hosted origins with entirely mocked wallet/chain transport; live quote-cap checks stay separate. Receipt rereads use the configured provider; independent-provider acceptance is not claimed.
 
 Review copy clarifies that the final retry round may split a failed batch into separate token transactions, each requiring a wallet confirmation. Per-token attempts remain bounded at three; no completed token is replayed. This is a disclosure change only.
+
+
+## 2026-10-28 — Stable account, LIQ and quote refreshes
+
+Owner reported LIQ reward data disappearing during refresh. LIQ position and claim reads now retain their last same-account observation while refreshing, serialize overlapping requests, and keep existing token-failure isolation and 50-token batches. Identity/network/contract/input changes clear incompatible observations immediately. Failed reads show an explicit notice and block writes; stale observations and claim simulations retain their original two-minute deadlines.
+
+The same review found destructive refreshes in deposit and collateral quotes, personal reward valuations, and LIQ yield. Background refreshes preserve compatible display data while quotes remain gated; successful malformed analytics responses invalidate the estimate. A transient account-read outage retains prior balances with a notice and disables every transaction route until a successful refresh. Changed token amounts or valuation/account keys never borrow cached estimates. The scheduled collector, shared history, six protected SDK files and restored Rift files are unchanged.
+
+Stage author checks: 567 application tests and typecheck passed. Exact committed-artifact, delayed-response browser, phone, expiry and hosted verification follow under artifacts/liq-stability-20261028. No independent acceptance or READY (3/3), real wallet pairing, signing or mainnet transaction is claimed.

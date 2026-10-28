@@ -46,6 +46,7 @@ describe('read-only local RPC boundary',()=>{
   it('re-encodes JSON reads and accepts gas simulation',()=>expect(JSON.parse(canonicalReadRequest({method:'eth_estimateGas',params:[{to:user}]})).method).toBe('eth_estimateGas'));
 });
 describe('actual routes and write guard',()=>{
+  it.each(['legacyClaimMany','legacyWithdraw','oldAutoClaim','oldAutoWithdraw','liqClaimMany','liqWithdraw'] as const)('blocks %s while showing a retained observation during an RPC outage',kind=>{const s=state();s.error='Base refresh unavailable';expect(liveReason(kind,s,true)).toMatch(/Refresh Base contract data successfully/);});
   it('does not alias missing new contracts to deployed legacy contracts',()=>{
     const c=legacyConfig(boot);expect(c.streamingDistributor).toBeUndefined();expect(c.svault).toBeUndefined();expect(c.streamAutoVault).toBeUndefined();
     for(const kind of ['stake','unstake','claim','autoStake','autoUnstake','autoClaim','mint','nft'] as const)expect(liveReason(kind,state(),true)).toMatch(/not deployed/);

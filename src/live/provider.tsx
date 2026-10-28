@@ -40,10 +40,10 @@ export function LiveProvider({children}:{children:ReactNode}){
     // refresh before it commits. Automatic polling never replaces an active read.
     const selection={date:date??previous?.date??old.selectedDate,customToken:customToken??previous?.customToken??old.customToken,scope:historyMode??previous?.scope??old.historyMode??'recent'};
     requestedSelection.current=selection;activeRead.current=ticket;
-    setLive(s=>({...s,loading:true,error:undefined}));
+    setLive(s=>({...s,loading:true}));
     try{
       const boot=await fetchBootstrap();if(ticket!==readTicket.current)return;
-      setLive(s=>({...s,boot,error:undefined}));
+      setLive(s=>({...s,boot,...(!old.address?{error:undefined}:{})}));
       if(!old.address)return;
       const pinned=await accountReadScope(client,boot);
       const liqRead=boot.liqStakingReady?readLiq(pinned,boot,old.address,{rewards:false,stakeSummaryOnly:true}).catch(()=>undefined):Promise.resolve(undefined);
@@ -57,9 +57,10 @@ export function LiveProvider({children}:{children:ReactNode}){
       setWallet(result.wallet);
       setLive(s=>({...s,...result,historyMode:scope,legacyDiscovery:scope==='all'?(result as any).legacyDiscovery:undefined,selectedDate:selection.date,customToken:selection.customToken,error:undefined}));
     }catch(error){if(ticket===readTicket.current){
-      // Failed reads invalidate displayed balances and the write gates. Never replace
-      // a failed balance read with a successful-looking zero or demo fallback.
-      setWallet(emptyWallet());setLive(s=>({...s,known:{},legacyReceipts:undefined,legacyPaused:undefined,oldAutoShares:undefined,oldAutoEarned:undefined,rewards:[],newPosition:undefined,liqPosition:undefined,legacyDiscovery:undefined,rewardValuation:undefined,ethBalance:undefined,readAt:undefined,error:publicError(error)}));
+      // Keep the same account's last observation visible through a transient
+      // outage. The error blocks every write; account/network changes still
+      // clear all observations synchronously through clearAccount.
+      setLive(s=>({...s,error:publicError(error)}));
     }}finally{if(activeRead.current===ticket)activeRead.current=null;if(ticket===readTicket.current)setLive(s=>({...s,loading:false}));}
   },[client]);
 
@@ -72,12 +73,13 @@ export function LiveProvider({children}:{children:ReactNode}){
   },[refresh]);
   useEffect(()=>{
     const snapshot=current.current.live;
-    if(!snapshot.address||!snapshot.boot||!snapshot.readAt||snapshot.error){update({rewardValuation:undefined});return;}
+    if(!snapshot.address||!snapshot.boot||!snapshot.readAt){update({rewardValuation:undefined});return;}
+    if(snapshot.error)return;
     const controller=new AbortController();let timer:ReturnType<typeof setTimeout>|undefined;
     const run=async()=>{
       await priceRewards(valueKey,snapshot.rewards,snapshot.boot!.registry.legacy.USDC,value=>{
         if(!controller.signal.aborted&&liveValueKey(current.current.live)===valueKey)update({rewardValuation:value});
-      },controller.signal);
+      },controller.signal,fetch,current.current.live.rewardValuation);
       if(!controller.signal.aborted)timer=setTimeout(()=>void run(),60000);
     };
     void run();return()=>{controller.abort();clearTimeout(timer);};
@@ -152,6 +154,7 @@ export function LiveProvider({children}:{children:ReactNode}){
     const snapshot=current.current,ticket=generation.current;
     if(!snapshot.provider||!snapshot.live.address)throw Error('Connect a wallet first.');
     if(snapshot.live.chainId!==8453||snapshot.live.pending)throw Error('Switch to Base and resolve any pending request first.');
+    if(snapshot.live.error)throw Error('Refresh Base contract data successfully before starting a transaction.');
     sending.current=true;update({lastHash:undefined,progress:undefined,confirmedHashes:[]});
     const onConfirmed=(activity:Activity)=>{
       const address=snapshot.live.address!,records=[activity,...history(address).filter(a=>a.hash!==activity.hash)].slice(0,30);

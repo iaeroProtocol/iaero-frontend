@@ -35,6 +35,7 @@ export function liveReason(kind:ActionKind,state:LiveState,connected:boolean):st
   if(['stake','unstake','claim','autoStake','autoUnstake','autoClaim','mint','nft','collateralWrap','collateralRedeem','collateralClaim'].includes(kind)&&!state.boot.newStackReady)return state.boot.newStackReason;
   if(!connected||!state.address)return 'Connect your wallet first.';
   if(state.chainId!==8453)return 'Switch your wallet to Base before continuing.';
+  if(state.error)return 'Refresh Base contract data successfully before starting a transaction.';
   if(state.pending)return 'Resolve the pending wallet request before starting another.';
   if(kind==='legacyWithdraw'&&(!state.boot.legacyReady||state.legacyPaused!==false||!state.known.legacyStake||state.legacyReceipts===undefined))return 'The legacy principal or receipt checks are not available.';
   if((kind==='legacyClaim'||kind==='legacyClaimMany')&&(!state.boot.legacyReady||state.legacyPaused!==false))return 'The legacy reward contract is not available for claims.';
