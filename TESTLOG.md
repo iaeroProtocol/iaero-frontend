@@ -330,3 +330,6 @@ The recorder now batches only contract getters after every configured provider m
 
 
 The real four-chain rehearsal caught the exact Arbitrum ticker difference: 0xfd086b…fcbb9 reports USD₮0 on-chain and USDT0 in its direct address feed. The explicit asset/price identities now preserve both names. Added a regression refusing a lookalike symbol, wrong decimals and another address. The first incomplete rehearsal is retained; final checks use the corrected policy.
+
+
+Final recorder edge-case review: an aggregate can exceed a provider gas cap even though its individual getters fit. Added one exact-block direct retry for the same observer after any failed batch getter. Real reverts and unavailable providers still fail, and all observer results remain compared. A gas-cap regression checks both observers, original block and successful balances. Browser assets and execution paths are unchanged. Final source verification follows with 492 tests.

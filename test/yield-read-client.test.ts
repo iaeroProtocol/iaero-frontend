@@ -3,7 +3,7 @@ import {createPublicClient,custom,parseAbi,decodeFunctionData,encodeFunctionResu
 import {yieldContractReader} from '../server/yield-read-client';
 const address='0x1111111111111111111111111111111111111111',multicall='0xcA11bde05977b3631167028862bE2a173976CA11',code='0x6000',abi=parseAbi(['function value(uint256 n) view returns(uint256)']);
 const policy={address:multicall,runtimeHash:keccak256(code),batchSize:16384};
-function observer(options:{runtime?:(block:string)=>string;codeFails?:boolean;delta?:bigint;revert?:bigint}={}){
+function observer(options:{runtime?:(block:string)=>string;codeFails?:boolean;delta?:bigint;revert?:bigint;aggregateFails?:boolean}={}){
  const calls:any[]=[];
  const value=(data:`0x${string}`)=>{const n=decodeFunctionData({abi,data}).args![0];if(n===options.revert)throw Error('contract_reverted');return encodeFunctionResult({abi,functionName:'value',result:n+(options.delta??0n)});};
  const client=createPublicClient({transport:custom({request:async({method,params}:any)=>{
@@ -12,6 +12,7 @@ function observer(options:{runtime?:(block:string)=>string;codeFails?:boolean;de
   if(method==='eth_call'){
    const [{to,data}]=params;
    if(to.toLowerCase()===multicall.toLowerCase()){
+    if(options.aggregateFails)throw Error('gas required exceeds: 16777216');
     const decoded=decodeFunctionData({abi:multicall3Abi,data});
     if(decoded.functionName!=='aggregate3')throw Error('unexpected_multicall');
     return encodeFunctionResult({abi:multicall3Abi,functionName:'aggregate3',result:decoded.args[0].map(call=>{try{return {success:true,returnData:value(call.callData)};}catch{return {success:false,returnData:'0x' as const};}})});
@@ -47,6 +48,11 @@ it('requires a new exact-block proof for every historical boundary and collectio
 it('rejects disagreement even after both provider runtimes pass',async()=>{
  const a=observer(),b=observer({delta:1n}),read=yieldContractReader([a.client,b.client],8453,policy);
  await expect(read(request(9n))).rejects.toThrow('yield_read_disagreement');
+});
+it('recovers an aggregate gas failure with exact-block direct reads from the same observer',async()=>{
+ const a=observer({aggregateFails:true}),b=observer(),read=yieldContractReader([a.client,b.client],8453,policy);
+ expect(await Promise.all([read(request(1n)),read(request(2n))])).toEqual([1n,2n]);
+ expect(a.calls.filter(c=>c.method==='eth_call'&&c.params[0].to===address)).toHaveLength(2);expect(b.calls.filter(c=>c.method==='eth_call'&&c.params[0].to===address)).toHaveLength(0);expect([...a.calls,...b.calls].every(c=>c.params[1]==='0x64')).toBe(true);
 });
 it('keeps a reverted leg unavailable while preserving successful sibling results',async()=>{
  const a=observer({revert:2n}),read=yieldContractReader([a.client],4663,policy),out=await Promise.allSettled([read(request(1n)),read(request(2n)),read(request(3n))]);

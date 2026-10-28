@@ -27,7 +27,16 @@ export function yieldContractReader(clients:Client[],chainId:number,policy:Batch
  };
  return async(parameters:any)=>{
   if(typeof parameters.blockNumber!=='bigint')throw Error('yield_read_block_required');
-  const verified=await readers(parameters.blockNumber),values=await Promise.all(verified.map(c=>c.readContract(parameters)));
+  const verified=await readers(parameters.blockNumber),values=await Promise.all(verified.map(async(c,index)=>{
+   try{return await c.readContract(parameters);}
+   catch(error){
+    // A provider may cap the aggregate although each original getter fits.
+    // Retry that observer directly once, at the same block. Real reverts and
+    // unavailable providers still fail; no observer or reward is omitted.
+    if(c===clients[index])throw error;
+    return clients[index].readContract(parameters);
+   }
+  }));
   if(values.some(value=>canonical(value)!==canonical(values[0])))throw Error('yield_read_disagreement');
   return values[0];
  };
