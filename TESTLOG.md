@@ -354,3 +354,12 @@ Author verification: reproduced the reported public wallet’s claimMany revert 
 Overview, Portfolio and Earn expose Claim LIQ rewards, Compound to iAERO and Sweep to USDC directly. LIQ controls link to conversion after claiming. These reuse the existing wallet sweep, exact approvals, simulation, batch splitting and iAERO market route. The user can choose liquid iAERO or previous staking; the undeployed replacement stream stays gated.
 
 523 application tests, typecheck and Pages build passed. 102 compiled browser checks passed (24 reward access, 20 existing live flows, 18 sweep, 40 responsive). The reported public wallet was checked in the compiled UI using actual read-only Base calls: 33 rewards in review, Anon excluded, zero actual wallet pairing/signatures/transactions. Exact committed-artifact verification and hosted publication checks are recorded in the new reward-access evidence. This is author verification only; independent acceptance and READY (3/3) are not claimed.
+
+
+## 2026-10-28 — Bounded automatic gas and slippage retries
+
+User authorized automatic gas boosts and increased slippage. Sweep review now explicitly authorizes up to two retries per swap/conversion/staking step, 50% gas-limit and slippage increases per retry, a 16-million gas limit and a 10% slippage cap. Users can disable retries. Original quotes anchor the displayed minimum-output schedule; token amounts, recipient and approvals stay exact. Compound conversion retains its 2% fees/impact cap and stakes only receipt-derived new iAERO.
+
+A retry after submission requires the SDK's exact reverted-receipt result, a cleared pending journal and an independent receipt re-read matching hash, sender, destination and reverted status. Pending, replaced, ambiguous and successful submissions stop. Failed transaction links are shown. The last retry can isolate tokens individually without replaying successful steps. Preview and execution simulations use fresh quotes at the permitted retry slippage. The quote API now accepts at most 1,000 bps.
+
+Author checks: 556 application tests and typecheck passed, including bounded retry exhaustion, receipt/identity mismatch, rejection, uncertain confirmation, output reconciliation, direct conversion and exact staking. Browser and hosted checks are pending for this candidate and recorded in the forward sweep-retries evidence. Author verification only; no independent acceptance, READY (3/3), real signatures or mainnet transactions.

@@ -63,7 +63,7 @@ export function createAppReadApi(env:AppReadEnv,options:{fetchImpl?:typeof fetch
     return appJson(await cached.pending);
    }
    const params=url.searchParams,sellToken=params.get('sellToken')??'',sellAmount=params.get('sellAmount')??'',slippage=Number(params.get('slippageBps'));
-   if(!isAddress(sellToken)||BigInt(sellToken)===0n||[registry.legacy.iAERO,registry.legacy.stiAERO,registry.legacy.USDC].some(a=>a.toLowerCase()===sellToken.toLowerCase())||!/^\d{1,78}$/.test(sellAmount)||BigInt(sellAmount)<=0n||BigInt(sellAmount)>=2n**256n||!Number.isInteger(slippage)||slippage<10||slippage>500)return appJson({error:'Invalid token, amount or slippage.'},400);
+   if(!isAddress(sellToken)||BigInt(sellToken)===0n||[registry.legacy.iAERO,registry.legacy.stiAERO,registry.legacy.USDC].some(a=>a.toLowerCase()===sellToken.toLowerCase())||!/^\d{1,78}$/.test(sellAmount)||BigInt(sellAmount)<=0n||BigInt(sellAmount)>=2n**256n||!Number.isInteger(slippage)||slippage<10||slippage>1000)return appJson({error:'Invalid token, amount or slippage.'},400);
    const boot=await bootstrap();if(!boot.sweepReady)return appJson({error:'The deployed reward swapper is not verified.'},503);
    const data=await quote(sellToken,BigInt(sellAmount),slippage);
    if(data.liquidityAvailable===false||!data.transaction?.data||!isAddress(data.transaction.to)||String(data.sellAmount)!==sellAmount||!/^\d{1,78}$/.test(String(data.buyAmount))||BigInt(data.buyAmount)<=0n||BigInt(data.buyAmount)>=2n**256n||BigInt(data.transaction.value??'0')!==0n)return appJson({code:'INVALID_EXECUTABLE_QUOTE',error:'The service did not return a valid executable USDC quote.'},422);

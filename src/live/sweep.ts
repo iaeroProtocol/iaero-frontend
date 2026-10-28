@@ -8,6 +8,8 @@ import {spamReason} from './token-filter';
 import type {RewardTokenValue} from './reward-value';
 import {mapReadBatches} from './read-concurrency';
 import {accountReadClient} from './account-read-client';
+import {SWEEP_GAS_LIMIT,SWEEP_MAX_RETRIES,retrySlippage,retryGas,contractReverted,retryReadClient,verifiedRevertedAttempt,SweepPreflightRevert,type SweepRetryPolicy,type SweepRetryEvent} from './sweep-retries';
+export {SWEEP_GAS_LIMIT} from './sweep-retries';
 
 // [VERIFIED: integration/legacy/RewardSwapper.sol, PullStep and ExecOpts]
 export const SWEEP_ABI=parseAbi([
@@ -23,7 +25,6 @@ export const ROUTE_PARAMS=[{type:'tuple',components:[{name:'pools',type:'address
 export type SweepMode='USDC'|'iAERO'|'stake';
 export type SweepToken={token:Address;symbol:string;decimals:number|null;balance:bigint};
 export const SWEEP_BATCH_LIMIT=10; // [VERIFIED: existing RewardsSection execution batch; swapper MAX_STEPS=32]
-export const SWEEP_GAS_LIMIT=16_000_000n;
 export function orderSweepTokens(tokens:readonly SweepToken[],values:Record<string,RewardTokenValue>={}){
   const value=(t:SweepToken)=>{const q=values[t.token.toLowerCase()];return q?.amount===t.balance?q.valueWad:null;};
   return [...tokens].sort((a,b)=>{
@@ -34,12 +35,12 @@ export function orderSweepTokens(tokens:readonly SweepToken[],values:Record<stri
   });
 }
 export type SweepInput=Omit<SweepToken,'balance'>&{amount:bigint};
-export type SweepQuote={input:SweepInput;buyAmount:bigint;minimum:bigint;to:Address;data:`0x${string}`;quotedAt:number};
+export type SweepQuote={input:SweepInput;buyAmount:bigint;minimum:bigint;to:Address;data:`0x${string}`;quotedAt:number;retryLevel?:number};
 export type SweepSkipped={input:SweepInput;stage:'filter'|'quote'|'simulation'|'batch';reason:string};
 export type HiddenSweepToken=SweepToken&{reason:string};
-export type SweepPreview={user:Address;mode:SweepMode;slippageBps:number;inputs:SweepInput[];quotes:SweepQuote[];skipped:SweepSkipped[];existingUsdc:bigint;expectedUsdc:bigint;minimumUsdc:bigint;expectedIaero?:bigint;minimumIaero?:bigint;quotedAt:number};
-export type SweepResult={hashes:Hash[];usdc:bigint;iaero:bigint;staked:bigint;swapped:number;batches:number;skipped:SweepSkipped[];conversionDeferred?:string};
-export type SweepHooks={onProgress?:(text:string)=>void;onConfirmed?:(activity:Activity)=>void;shouldStop?:()=>boolean};
+export type SweepPreview={user:Address;mode:SweepMode;slippageBps:number;inputs:SweepInput[];quotes:SweepQuote[];skipped:SweepSkipped[];existingUsdc:bigint;expectedUsdc:bigint;minimumUsdc:bigint;expectedIaero?:bigint;minimumIaero?:bigint;quotedAt:number;retry?:SweepRetryPolicy};
+export type SweepResult={hashes:Hash[];usdc:bigint;iaero:bigint;staked:bigint;swapped:number;batches:number;skipped:SweepSkipped[];conversionDeferred?:string;stakingDeferred?:string};
+export type SweepHooks={onProgress?:(text:string)=>void;onConfirmed?:(activity:Activity)=>void;onRetry?:(event:SweepRetryEvent)=>void;shouldStop?:()=>boolean};
 const equal=(a:string,b:string)=>a.toLowerCase()===b.toLowerCase();
 const minimum=(amount:bigint,bps:number)=>amount*BigInt(10000-bps)/10000n;
 const validAmount=(amount:bigint)=>amount>0n&&amount<2n**256n;
@@ -127,7 +128,9 @@ export async function simulateSweepBatch(client:BaseClient,boot:Bootstrap,user:A
   // balance, code or storage override is fabricated, and no transaction is sent.
   const blocks=await client.simulateBlocks({blocks:[{calls}],validation:false,blockTag:'latest'});
   const results=blocks[0]?.calls;
-  if(blocks.length!==1||!results||results.length!==calls.length||results.some(r=>r.status!=='success'))throw Error('Swap simulation failed. This token will stay in your wallet.');
+  if(blocks.length!==1||!results||results.length!==calls.length)throw Error('The swap simulation response is unavailable.');
+  if(results.slice(0,-1).some(r=>r.status!=='success'))throw Error('Token approval simulation failed. This token will stay in your wallet.');
+  if(results.at(-1)?.status!=='success')throw new SweepPreflightRevert('Swap simulation failed. This token will stay in your wallet.');
   for(const result of results.slice(0,-1))if(result.data!=='0x'&&decodeFunctionResult({abi:STAKING_ERC20_ABI,functionName:'approve',data:result.data})!==true)throw Error('Token approval simulation failed. This token will stay in your wallet.');
   const trade=results[results.length-1],output=decodeFunctionResult({abi:SWEEP_ABI,functionName:'executePlanFromCallerAdvanced',data:trade.data});
   if(output<floor)throw Error('The simulated swap is below your minimum USDC output.');
@@ -139,7 +142,7 @@ export async function simulateSweepQuote(client:BaseClient,boot:Bootstrap,user:A
 export async function quoteIaero(client:BaseClient,boot:Bootstrap,usdc:bigint){
  return (await quoteIaeroRoute(client,boot,usdc)).output;
 }
-export async function buildSweepPreview(client:BaseClient,boot:Bootstrap,user:Address,inputs:SweepInput[],mode:SweepMode,slippageBps:number,fetcher:typeof fetch=fetch,onProgress?:(checked:number,total:number)=>void):Promise<SweepPreview>{
+export async function buildSweepPreview(client:BaseClient,boot:Bootstrap,user:Address,inputs:SweepInput[],mode:SweepMode,slippageBps:number,fetcher:typeof fetch=fetch,onProgress?:(checked:number,total:number)=>void,automaticRetries=false):Promise<SweepPreview>{
   validateSweepInputs(boot,inputs,mode);
   if(!boot.tokenFilter)throw Error('The token filter is unavailable. Refresh before sweeping.');
   if(!Number.isInteger(slippageBps)||slippageBps<10||slippageBps>500)throw Error('Choose slippage from 0.1% to 5%.');
@@ -156,8 +159,13 @@ export async function buildSweepPreview(client:BaseClient,boot:Bootstrap,user:Ad
           if(input.amount>balance)throw Error('USDC balance changed. Choose an amount within your wallet balance.');
           checks[index]={input};
         }else{
-          stage='quote';const quote=await fetchSweepQuote(client,boot,input,slippageBps,fetcher);
-          stage='simulation';await simulateSweepQuote(client,boot,user,quote,slippageBps);
+          let quote:SweepQuote|undefined;
+          for(let attempt=0;attempt<=(automaticRetries?SWEEP_MAX_RETRIES:0);attempt++){
+            const bps=retrySlippage(slippageBps,attempt);stage='quote';quote=await fetchSweepQuote(client,boot,input,bps,fetcher);
+            stage='simulation';try{await simulateSweepQuote(client,boot,user,quote,bps);quote={...quote,...(attempt?{retryLevel:attempt}:{})};break;}
+            catch(error){if(!(error instanceof SweepPreflightRevert)||!automaticRetries||attempt===SWEEP_MAX_RETRIES)throw error;}
+          }
+          if(!quote)throw Error('No executable reward quote.');
           checks[index]={input,quote};
         }
       }catch(error){checks[index]={input,skipped:{input,stage,reason:stage==='simulation'?'Swap simulation did not pass. This token stays in your wallet.':publicError(error)}};}
@@ -169,16 +177,19 @@ export async function buildSweepPreview(client:BaseClient,boot:Bootstrap,user:Ad
   const expectedUsdc=quotes.reduce((sum,q)=>sum+q.buyAmount,existingUsdc),minimumUsdc=quotes.reduce((sum,q)=>sum+q.minimum,existingUsdc);
   if(expectedUsdc>=2n**256n||minimumUsdc>=2n**256n)throw Error('The quote total exceeds the supported amount.');
   const preview:SweepPreview={user,mode,slippageBps,inputs:accepted.map(c=>c.input),quotes,skipped,existingUsdc,expectedUsdc,minimumUsdc,quotedAt:Date.now()};
+  if(automaticRetries){const maxSlippageBps=retrySlippage(slippageBps,SWEEP_MAX_RETRIES);preview.retry={maxRetries:SWEEP_MAX_RETRIES,maxSlippageBps,minimumUsdcByAttempt:Array.from({length:SWEEP_MAX_RETRIES+1},(_,attempt)=>quotes.reduce((sum,q)=>sum+minimum(q.buyAmount,retrySlippage(slippageBps,Math.max(attempt,q.retryLevel??0))),existingUsdc))};}
   if(mode!=='USDC'&&minimumUsdc>0n){
     preview.expectedIaero=await quoteIaero(client,boot,expectedUsdc);
     const bounded=await quoteIaeroRoute(client,boot,minimumUsdc),slippageFloor=minimum(bounded.output,slippageBps);
     preview.minimumIaero=slippageFloor>bounded.costMinimum?slippageFloor:bounded.costMinimum;
     if(preview.minimumIaero<=0n)throw Error('The route has no positive minimum iAERO output.');
+    if(preview.retry){const floors=[preview.minimumIaero];for(let attempt=1;attempt<=SWEEP_MAX_RETRIES;attempt++){const last=await quoteIaeroRoute(client,boot,preview.retry.minimumUsdcByAttempt[attempt]),floor=minimum(last.output,retrySlippage(slippageBps,attempt)),protectedFloor=floor>last.costMinimum?floor:last.costMinimum;floors.push(protectedFloor>floors.at(-1)!?floors.at(-1)!:protectedFloor);}preview.retry.minimumIaeroByAttempt=floors;}
   }
   return preview;
 }
 export function swapStep(quote:SweepQuote,review:SweepQuote,boot:Bootstrap,slippageBps:number){
-  if(!equal(quote.input.token,review.input.token)||quote.input.amount!==review.input.amount||quote.buyAmount<review.minimum)throw Error('The quote moved beyond your reviewed minimum. Refresh the preview.');
+  if(!equal(quote.input.token,review.input.token)||quote.input.amount!==review.input.amount)throw Error('The quote does not match the reviewed input.');
+  if(quote.buyAmount<review.minimum)throw new SweepPreflightRevert('The quote moved beyond your reviewed minimum. Refresh the preview.');
   return {kind:2,tokenIn:review.input.token,outToken:boot.registry.legacy.USDC,useAll:false,amountIn:review.input.amount,quotedIn:review.input.amount,quotedOut:review.buyAmount,slippageBps,data:encodeAbiParameters([{type:'address'},{type:'bytes'}],[quote.to,quote.data]),viaPermit2:false,permitSig:'0x' as const,permitAmount:0n,permitDeadline:0n,permitNonce:0n};
 }
 export function receiptUsdc(logs:readonly any[],boot:Bootstrap,expected:readonly SweepQuote[]){
@@ -201,17 +212,20 @@ export async function runSweep(context:ExecutionContext,preview:SweepPreview,hoo
   for(const input of preview.inputs)if(spamReason(boot.tokenFilter,input.token,input.symbol))throw Error('A filtered token is not eligible for this sweep. Refresh your selection.');
   if(!Number.isInteger(preview.slippageBps)||preview.slippageBps<10||preview.slippageBps>500)throw Error('The reviewed slippage is invalid.');
   const expectedInputs=preview.inputs.filter(i=>!equal(i.token,boot.registry.legacy.USDC));
-  if(expectedInputs.length!==preview.quotes.length||expectedInputs.some(input=>preview.quotes.filter(q=>equal(q.input.token,input.token)&&q.input.amount===input.amount&&q.minimum===minimum(q.buyAmount,preview.slippageBps)&&q.minimum>0n).length!==1))throw Error('The sweep quotes do not match the reviewed selection.');
+  const maxAttempt=preview.retry?SWEEP_MAX_RETRIES:0;
+  if(preview.quotes.some(q=>!Number.isInteger(q.retryLevel??0)||(q.retryLevel??0)<0||(q.retryLevel??0)>maxAttempt))throw Error('The reviewed retry level is invalid.');
+  if(expectedInputs.length!==preview.quotes.length||expectedInputs.some(input=>preview.quotes.filter(q=>equal(q.input.token,input.token)&&q.input.amount===input.amount&&q.minimum===minimum(q.buyAmount,retrySlippage(preview.slippageBps,q.retryLevel??0))&&q.minimum>0n).length!==1))throw Error('The sweep quotes do not match the reviewed selection.');
   const selectedUsdc=preview.inputs.filter(i=>equal(i.token,boot.registry.legacy.USDC)).reduce((sum,i)=>sum+i.amount,0n);
   if(preview.existingUsdc!==selectedUsdc||preview.minimumUsdc!==preview.quotes.reduce((sum,q)=>sum+q.minimum,selectedUsdc)||preview.expectedUsdc!==preview.quotes.reduce((sum,q)=>sum+q.buyAmount,selectedUsdc))throw Error('The reviewed output totals changed. Refresh the preview.');
   if(!validAmount(preview.expectedUsdc)||!validAmount(preview.minimumUsdc)||preview.mode!=='USDC'&&(!preview.expectedIaero||!preview.minimumIaero||!validAmount(preview.expectedIaero)||!validAmount(preview.minimumIaero)||preview.minimumIaero>preview.expectedIaero))throw Error('The reviewed minimum output is invalid.');
+  if(preview.retry){const p=preview.retry;if(p.maxRetries!==SWEEP_MAX_RETRIES||p.maxSlippageBps!==retrySlippage(preview.slippageBps,SWEEP_MAX_RETRIES)||p.minimumUsdcByAttempt.length!==SWEEP_MAX_RETRIES+1||p.minimumUsdcByAttempt.some((v,n)=>v!==preview.quotes.reduce((sum,q)=>sum+minimum(q.buyAmount,retrySlippage(preview.slippageBps,Math.max(n,q.retryLevel??0))),selectedUsdc))||preview.mode!=='USDC'&&(!p.minimumIaeroByAttempt||p.minimumIaeroByAttempt.length!==SWEEP_MAX_RETRIES+1||p.minimumIaeroByAttempt[0]!==preview.minimumIaero||p.minimumIaeroByAttempt.some((v,n)=>!validAmount(v)||n>0&&v>p.minimumIaeroByAttempt![n-1])))throw Error('The reviewed retry limits changed. Refresh the preview.');}
   if(!equal(preview.user,user)||state.chainId!==8453||!Number.isSafeInteger(preview.quotedAt)||Date.now()-preview.quotedAt>120000||preview.quotedAt>Date.now()+5000)throw Error('Wallet or quote changed. Refresh the sweep preview.');
   const stop=()=>{if(hooks.shouldStop?.())throw Error('Stopped before the next transaction. Confirmed steps remain in your wallet history.');};
-  let batchGas:bigint|undefined;
-  stop();const rawSend=await createGuardedSender(context,()=>!hooks.shouldStop?.(),request=>request.functionName==='executePlanFromCallerAdvanced'&&equal(request.address,boot.registry.sweep.swapper)?batchGas:undefined),hashes:Hash[]=[];
+  let batchGas:bigint|undefined,lastBroadcast:Hash|undefined,highestRetry=Math.max(0,...preview.quotes.map(q=>q.retryLevel??0));
+  stop();const rawSend=await createGuardedSender({...context,client:retryReadClient(client),onBroadcast:hash=>{lastBroadcast=hash;context.onBroadcast(hash);}},()=>!hooks.shouldStop?.(),request=>['executePlanFromCallerAdvanced','execute','stake'].includes(request.functionName)?batchGas:undefined),hashes:Hash[]=[];
   const progress=(text:string)=>{context.onProgress?.(text);hooks.onProgress?.(text);};
   const send=async(address:Address,abi:readonly unknown[],name:string,args:readonly unknown[],title:string,token:string,amount:bigint,decimals:number|null=18)=>{
-    stop();progress(title);const hash=await rawSend(address,abi,name,args);hashes.push(hash);
+    stop();progress(title);lastBroadcast=undefined;const hash=await rawSend(address,abi,name,args);hashes.push(hash);
     const activity:Activity={id:hash,hash,title,token:name==='approve'?'':token,amount:name==='approve'?'Allowance only':decimals===null?amount.toString()+' raw units':formatUnits(amount,decimals),direction:name==='approve'?'out':'in',time:Date.now()};context.onConfirmed?.(activity);hooks.onConfirmed?.(activity);return hash;
   };
   const balance=async(token:Address)=>client.readContract({address:token,abi:STAKING_ERC20_ABI,functionName:'balanceOf',args:[user]});
@@ -224,46 +238,55 @@ export async function runSweep(context:ExecutionContext,preview:SweepPreview,hoo
   };
   let usdc=preview.existingUsdc,iaero=0n,staked=0n,swapped=0,batches=0,runtimeSkipped=0;
   const skipped=preview.skipped.slice();
+  const retrying=(stage:SweepRetryEvent['stage'],attempt:number,hash?:Hash)=>{stop();highestRetry=Math.max(highestRetry,attempt);const slippageBps=retrySlippage(preview.slippageBps,stage==='conversion'?highestRetry:attempt);hooks.onRetry?.({stage,attempt,slippageBps,hash});progress('Retry '+attempt+' of '+maxAttempt+' · '+stage+' · boosted gas'+(stage==='stake'?'':' · '+slippageBps/100+'% slippage')+'…');};
+  const exhausted=(stage:SweepRetryEvent['stage'],attempt:number)=>hooks.onRetry?.({stage,attempt,slippageBps:retrySlippage(preview.slippageBps,attempt),hash:lastBroadcast,exhausted:true});
   const skip=(input:SweepInput,stage:SweepSkipped['stage'],error:unknown)=>{runtimeSkipped++;skipped.push({input,stage,reason:stage==='simulation'?'Swap simulation did not pass. This token stays in your wallet.':publicError(error)});progress('Skipped '+input.symbol+'; continuing with eligible tokens…');};
   const receiptFor=async(hash:Hash)=>{const receipt=await client.getTransactionReceipt({hash});if(receipt.transactionHash.toLowerCase()!==hash.toLowerCase()||receipt.status!=='success')throw Error('The confirmed receipt changed. Review it before continuing.');return receipt;};
-  const refreshPassing=async(reviews:SweepQuote[],withApprovals:boolean)=>{
-    const passing:{review:SweepQuote;fresh:SweepQuote}[]=[];
+  const refreshPassing=async(reviews:SweepQuote[],withApprovals:boolean,requestedAttempt=0)=>{
+    const passing:{review:SweepQuote;fresh:SweepQuote;attempt:number}[]=[];
     for(const review of reviews){
       stop();progress('Checking '+review.input.symbol+(withApprovals?' before approval…':' for the next batch…'));
-      let stage:SweepSkipped['stage']='quote';
-      try{
-        const fresh=await fetchSweepQuote(client,boot,review.input,preview.slippageBps);swapStep(fresh,review,boot,preview.slippageBps);
-        stage='simulation';await simulateSweepQuote(client,boot,user,fresh,preview.slippageBps,review,withApprovals);
-        passing.push({review,fresh});
-      }catch(error){stop();skip(review.input,stage,error);}
+      for(let attempt=Math.max(requestedAttempt,review.retryLevel??0);attempt<=maxAttempt;attempt++){
+        let stage:SweepSkipped['stage']='quote';const bps=retrySlippage(preview.slippageBps,attempt),bound={...review,minimum:minimum(review.buyAmount,bps)};
+        try{const fresh=await fetchSweepQuote(client,boot,review.input,bps);swapStep(fresh,bound,boot,bps);
+          stage='simulation';await simulateSweepQuote(client,boot,user,fresh,bps,bound,withApprovals);passing.push({review,fresh,attempt});break;
+        }catch(error){stop();if(error instanceof SweepPreflightRevert&&attempt<maxAttempt){retrying('swap',attempt+1);continue;}skip(review.input,stage,error);break;}
+      }
     }
     return passing;
   };
-  const executeBatch=async(reviews:SweepQuote[]):Promise<void>=>{
-    stop();const passing=await refreshPassing(reviews,false);if(!passing.length)return;
-    const current=passing.map(q=>q.fresh),reviewed=passing.map(q=>q.review);
-    const plan=current.map((q,i)=>swapStep(q,reviewed[i],boot,preview.slippageBps)),floor=reviewed.reduce((sum,q)=>sum+q.minimum,0n);
+  const executeBatch=async(reviews:SweepQuote[],requestedAttempt=0,previousGas=0n):Promise<void>=>{
+    stop();const passing=await refreshPassing(reviews,false,requestedAttempt);if(!passing.length)return;
+    const attempt=Math.max(requestedAttempt,...passing.map(p=>p.attempt)),bps=retrySlippage(preview.slippageBps,attempt);
+    if(passing.some(p=>p.attempt!==attempt))return executeBatch(passing.map(p=>p.review),attempt,previousGas);
+    highestRetry=Math.max(highestRetry,attempt);
+    const current=passing.map(q=>q.fresh),original=passing.map(q=>q.review),reviewed=original.map(q=>({...q,minimum:minimum(q.buyAmount,bps)}));
+    const plan=current.map((q,i)=>swapStep(q,reviewed[i],boot,bps)),floor=reviewed.reduce((sum,q)=>sum+q.minimum,0n);
     let gas:bigint;
     try{
       progress('Validating a batch of '+plan.length+' swaps…');
-      await simulateSweepBatch(client,boot,user,current,preview.slippageBps,reviewed);
+      await simulateSweepBatch(client,boot,user,current,bps,reviewed);
       const estimate=await client.estimateContractGas({address:boot.registry.sweep.swapper,abi:SWEEP_ABI,functionName:'executePlanFromCallerAdvanced',args:[plan,user,{minTotalOut:floor,allowPartial:false}],account:user,gas:SWEEP_GAS_LIMIT});
-      gas=(estimate*130n+99n)/100n;
-      if(estimate<=0n||gas>SWEEP_GAS_LIMIT)throw Error('The batch exceeds the supported gas budget.');
-    }catch{
+      gas=retryGas(estimate,attempt,previousGas);
+    }catch(error){
       stop();
+      if((error instanceof SweepPreflightRevert||contractReverted(error))&&attempt<maxAttempt){retrying('swap',attempt+1);return executeBatch(original,attempt+1,previousGas);}
       if(reviewed.length===1){skip(reviewed[0].input,'batch',Error('Batch simulation or gas estimation did not pass. This token stays in your wallet.'));return;}
       // [DECISION: adaptive batches] Split only before submission. Each child
       // obtains fresh quotes and independent combined simulation/gas checks.
       // Never split/retry a sent transaction or weaken its reviewed minimums.
       progress('Splitting this batch into smaller groups…');const middle=Math.ceil(reviewed.length/2);
-      await executeBatch(reviewed.slice(0,middle));await executeBatch(reviewed.slice(middle));return;
+      await executeBatch(original.slice(0,middle),attempt);await executeBatch(original.slice(middle),attempt);return;
     }
     stop();batchGas=gas;
-    try{
-      const hash=await send(boot.registry.sweep.swapper,SWEEP_ABI,'executePlanFromCallerAdvanced',[plan,user,{minTotalOut:floor,allowPartial:false}],'Sweep batch '+(batches+1)+' · '+plan.length+' token'+(plan.length===1?'':'s')+' to USDC','USDC',floor,6);
-      const receipt=await receiptFor(hash);usdc+=receiptUsdc(receipt.logs,boot,reviewed);swapped+=reviewed.length;batches++;
+    let hash:Hash;
+    try{hash=await send(boot.registry.sweep.swapper,SWEEP_ABI,'executePlanFromCallerAdvanced',[plan,user,{minTotalOut:floor,allowPartial:false}],'Sweep batch '+(batches+1)+' · '+plan.length+' token'+(plan.length===1?'':'s')+' to USDC'+(attempt?' · retry '+attempt:''),'USDC',floor,6);}
+    catch(error){if(!preview.retry||!await verifiedRevertedAttempt(client,user,boot.registry.sweep.swapper,lastBroadcast,error))throw error;
+      if(attempt<maxAttempt){retrying('swap',attempt+1,lastBroadcast);batchGas=undefined;if(attempt+1===maxAttempt&&original.length>1){for(const row of original)await executeBatch([row],attempt+1);}else await executeBatch(original,attempt+1,gas);return;}
+      exhausted('swap',attempt);for(const row of original)skip(row.input,'batch',Error('Retry limit reached after a confirmed failed attempt. This token remains in your wallet.'));return;
     }finally{batchGas=undefined;}
+    // Successful or uncertain receipts are never caught by the retry handler.
+    const receipt=await receiptFor(hash);usdc+=receiptUsdc(receipt.logs,boot,reviewed);swapped+=reviewed.length;batches++;
   };
   // [VERIFIED: existing RewardsSection.tsx EXECUTION_BATCH_SIZE=10]
   // Exact approvals remain separate; only eligible swaps share a transaction.
@@ -278,22 +301,37 @@ export async function runSweep(context:ExecutionContext,preview:SweepPreview,hoo
     return {hashes,usdc,iaero,staked,swapped,batches,skipped,conversionDeferred:'Some swaps were skipped after review. Your USDC remains liquid; review a fresh conversion for this smaller amount.'};
   }
   if(preview.mode!=='USDC'){
-    stop();if(usdc<preview.minimumUsdc||!preview.minimumIaero)throw Error('The confirmed USDC output is below the reviewed minimum.');
-    let protectedMinimum=preview.minimumIaero;
-    const protect=async()=>{const route=await quoteIaeroRoute(client,boot,usdc);if(route.output<protectedMinimum)throw Error('The Aero route moved beyond your reviewed minimum. Your USDC remains in your wallet.');protectedMinimum=route.costMinimum>protectedMinimum?route.costMinimum:protectedMinimum;return route.block;};
-    let block;try{block=await protect();}catch(error){return {hashes,usdc,iaero,staked,swapped,batches,skipped,conversionDeferred:publicError(error)};}
-    await approve({token:boot.registry.legacy.USDC,symbol:'USDC',decimals:6,amount:usdc},boot.registry.sweep.metarouter);
-    // An approval may take minutes. Recheck the exact conversion and hard cap
-    // afterwards, without reducing either the reviewed or current market floor.
-    try{block=await protect();}catch(error){return {hashes,usdc,iaero,staked,swapped,batches,skipped,conversionDeferred:publicError(error)};}
-    const route=encodeIaeroRoute(boot,user,usdc,protectedMinimum);
-    const hash=await send(boot.registry.sweep.metarouter,METAROUTER_ABI,'execute',[route.commands,route.inputs,block.timestamp+300n],'Convert sweep USDC to iAERO','iAERO',protectedMinimum);
-    const receipt=await receiptFor(hash);iaero=receiptIaero(receipt.logs,boot.registry.legacy.iAERO,user);
-    if(iaero<protectedMinimum)throw Error('The confirmed output is below the reviewed minimum. Review the receipt before staking.');
+    stop();if(usdc<(preview.retry?.minimumUsdcByAttempt[highestRetry]??preview.minimumUsdc)||!preview.minimumIaero)throw Error('The confirmed USDC output is below the reviewed minimum.');
+    let previousGas=0n;
+    for(let attempt=0;attempt<=maxAttempt;attempt++){
+      const level=Math.max(highestRetry,attempt);let protectedMinimum=preview.retry?.minimumIaeroByAttempt?.[level]??preview.minimumIaero;
+      const protect=async()=>{const route=await quoteIaeroRoute(client,boot,usdc);if(route.output<protectedMinimum)throw new SweepPreflightRevert('The Aero route moved beyond your reviewed minimum. Your USDC remains in your wallet.');protectedMinimum=route.costMinimum>protectedMinimum?route.costMinimum:protectedMinimum;return route.block;};
+      let block;
+      try{block=await protect();}catch(error){if(error instanceof SweepPreflightRevert&&attempt<maxAttempt){retrying('conversion',attempt+1);continue;}return {hashes,usdc,iaero,staked,swapped,batches,skipped,conversionDeferred:publicError(error)};}
+      await approve({token:boot.registry.legacy.USDC,symbol:'USDC',decimals:6,amount:usdc},boot.registry.sweep.metarouter);
+      // Recheck both price and the unchanged 2% conversion-cost cap after any
+      // approval. Retry floors were explicitly included in the user's review.
+      try{block=await protect();}catch(error){if(error instanceof SweepPreflightRevert&&attempt<maxAttempt){retrying('conversion',attempt+1);continue;}return {hashes,usdc,iaero,staked,swapped,batches,skipped,conversionDeferred:publicError(error)};}
+      const route=encodeIaeroRoute(boot,user,usdc,protectedMinimum),args=[route.commands,route.inputs,block.timestamp+300n] as const;
+      if(preview.retry){try{batchGas=retryGas(await client.estimateContractGas({address:boot.registry.sweep.metarouter,abi:METAROUTER_ABI,functionName:'execute',args,account:user,gas:SWEEP_GAS_LIMIT}),attempt,previousGas);}catch(error){if(contractReverted(error)&&attempt<maxAttempt){retrying('conversion',attempt+1);continue;}return {hashes,usdc,iaero,staked,swapped,batches,skipped,conversionDeferred:publicError(error)};}}
+      let hash:Hash;
+      try{hash=await send(boot.registry.sweep.metarouter,METAROUTER_ABI,'execute',args,'Convert sweep USDC to iAERO'+(attempt?' · retry '+attempt:''),'iAERO',protectedMinimum);}
+      catch(error){if(!preview.retry||!await verifiedRevertedAttempt(client,user,boot.registry.sweep.metarouter,lastBroadcast,error))throw error;if(attempt<maxAttempt){previousGas=batchGas??0n;retrying('conversion',attempt+1,lastBroadcast);continue;}exhausted('conversion',attempt);return {hashes,usdc,iaero,staked,swapped,batches,skipped,conversionDeferred:'Conversion retry limit reached. Your USDC remains in your wallet.'};}
+      finally{batchGas=undefined;}
+      const receipt=await receiptFor(hash);iaero=receiptIaero(receipt.logs,boot.registry.legacy.iAERO,user);
+      if(iaero<protectedMinimum)throw Error('The confirmed output is below the reviewed minimum. Review the receipt before staking.');
+      break;
+    }
     if(preview.mode==='stake'){
-      stop();if(!boot.legacyReady||await client.readContract({address:boot.registry.legacy.epochDistributor,abi:LEGACY_DEPOSIT_ABI,functionName:'paused'}))throw Error('Previous staking is unavailable. Your converted iAERO remains liquid in your wallet.');
-      await approve({token:boot.registry.legacy.iAERO,symbol:'iAERO',decimals:18,amount:iaero},boot.registry.legacy.epochDistributor);
-      await send(boot.registry.legacy.epochDistributor,LEGACY_DEPOSIT_ABI,'stake',[iaero],'Stake sweep output in previous staking','iAERO',iaero);staked=iaero;
+      previousGas=0n;
+      for(let attempt=0;attempt<=maxAttempt;attempt++){
+        stop();if(!boot.legacyReady||await client.readContract({address:boot.registry.legacy.epochDistributor,abi:LEGACY_DEPOSIT_ABI,functionName:'paused'}))throw Error('Previous staking is unavailable. Your converted iAERO remains liquid in your wallet.');
+        await approve({token:boot.registry.legacy.iAERO,symbol:'iAERO',decimals:18,amount:iaero},boot.registry.legacy.epochDistributor);
+        if(preview.retry)batchGas=retryGas(await client.estimateContractGas({address:boot.registry.legacy.epochDistributor,abi:LEGACY_DEPOSIT_ABI,functionName:'stake',args:[iaero],account:user,gas:SWEEP_GAS_LIMIT}),attempt,previousGas);
+        try{await send(boot.registry.legacy.epochDistributor,LEGACY_DEPOSIT_ABI,'stake',[iaero],'Stake sweep output in previous staking'+(attempt?' · retry '+attempt:''),'iAERO',iaero);staked=iaero;break;}
+        catch(error){if(!preview.retry||!await verifiedRevertedAttempt(client,user,boot.registry.legacy.epochDistributor,lastBroadcast,error))throw error;if(attempt<maxAttempt){previousGas=batchGas??0n;retrying('stake',attempt+1,lastBroadcast);continue;}exhausted('stake',attempt);return {hashes,usdc,iaero,staked,swapped,batches,skipped,stakingDeferred:'Staking retry limit reached. The converted iAERO remains liquid in your wallet.'};}
+        finally{batchGas=undefined;}
+      }
     }
   }
   progress('Sweep complete');return {hashes,usdc,iaero,staked,swapped,batches,skipped};

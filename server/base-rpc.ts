@@ -99,7 +99,7 @@ export function baseApiMiddleware(options:{publicOrigin?:string;collect?:boolean
       if(path==='/api/sweep/quote'){
         if(req.method!=='GET')return respond(405,{error:'GET only.'});
         const input=new URL(req.url!,'http://'+host).searchParams,sellToken=input.get('sellToken')??'',sellAmount=input.get('sellAmount')??'',slippage=Number(input.get('slippageBps'));
-        if(!isAddress(sellToken)||BigInt(sellToken)===0n||[registry.legacy.iAERO,registry.legacy.stiAERO,registry.legacy.USDC].some(a=>a.toLowerCase()===sellToken.toLowerCase())||!/^\d{1,78}$/.test(sellAmount)||BigInt(sellAmount)<=0n||BigInt(sellAmount)>=2n**256n||!Number.isInteger(slippage)||slippage<10||slippage>500)return respond(400,{error:'Invalid token, amount or slippage.'});
+        if(!isAddress(sellToken)||BigInt(sellToken)===0n||[registry.legacy.iAERO,registry.legacy.stiAERO,registry.legacy.USDC].some(a=>a.toLowerCase()===sellToken.toLowerCase())||!/^\d{1,78}$/.test(sellAmount)||BigInt(sellAmount)<=0n||BigInt(sellAmount)>=2n**256n||!Number.isInteger(slippage)||slippage<10||slippage>1000)return respond(400,{error:'Invalid token, amount or slippage.'});
         const boot=await publicBootstrap();if(!boot.sweepReady)return respond(503,{error:'The deployed reward swapper is not verified.'});
         // Existing public app proxy retains its own 0x credential. The local
         // browser never receives it, and cannot choose an arbitrary upstream.
