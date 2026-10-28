@@ -11,7 +11,8 @@
     "V3/src/voter/LeafVoter.sol",
     "aero-rewards-harvester/keeper/config/mainnet.json (Arbitrum intake/token metadata)",
     "sAERO/frontend-staging/artifacts/rpc-performance-20261028/ARBITRUM_PROBE.json (finalized gauge links and creation-state history origin)",
-    "sAERO/frontend-staging/artifacts/rpc-performance-20261028/YIELD_MULTICALL_PROBE.json (current and historical runtimes)"
+    "sAERO/frontend-staging/artifacts/rpc-performance-20261028/YIELD_MULTICALL_PROBE.json (current and historical runtimes)",
+    "sAERO/frontend-staging/artifacts/rpc-performance-20261028/ARBITRUM_USDT_PRICE_PROBE.json (same contract: on-chain USD₮0, feed USDT0)"
   ],
   "maxCheckpoints": 1000,
   "maxProgramsPerManager": 20,
@@ -324,7 +325,7 @@
         "chainId": 42161,
         "token": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
         "decimals": 6,
-        "symbol": "USDT0",
+        "symbol": "USD₮0",
         "sources": [
           {
             "id": "arbitrum:0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
