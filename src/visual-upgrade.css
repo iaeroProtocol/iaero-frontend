@@ -1,6 +1,18 @@
 /* Visual audit follow-up. Reading size, natural card heights and clear actions.
    Contract guards, exact transaction amounts and unknown states remain explicit. */
 :root{--reading-size:1rem;--support-size:.875rem;--metadata-size:.8125rem}
+.reward-tools{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:20px 0}
+.reward-tool{display:flex;align-items:center;gap:12px;min-width:0;text-align:left;padding:17px;border:1px solid var(--line);border-radius:16px;background:var(--surface);color:var(--ink);cursor:pointer;transition:border-color .15s,background .15s}
+.reward-tool:hover{border-color:var(--blue);background:var(--surface-soft)}
+.reward-tool:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+.reward-tool:disabled{cursor:default;opacity:.6}
+.reward-tool-icon{display:grid;place-items:center;width:38px;height:38px;flex:none;border-radius:12px;background:var(--surface-soft);color:var(--blue)}
+.reward-tool>span:nth-child(2){flex:1;min-width:0}.reward-tool>svg{flex:none}
+.reward-tool strong{display:block;font-size:.9375rem;line-height:1.5}.reward-tool small{display:block;font-size:.8125rem;color:var(--muted);line-height:1.5;margin-top:3px}
+.liq-convert-tools{padding:16px;margin:18px 0;border:1px solid var(--line);border-radius:14px;background:var(--surface-soft)}
+.liq-convert-tools p{font-size:.875rem;line-height:1.6;margin-bottom:12px;color:var(--muted)}.liq-convert-tools>div{display:flex;flex-wrap:wrap;gap:10px}.liq-convert-tools .button{flex:1;min-width:180px}
+.liq-claim-failure{color:var(--amber);max-width:42ch;line-height:1.5}
+@media(max-width:760px){.reward-tools{grid-template-columns:1fr;gap:9px;margin:16px 0}.reward-tool{padding:13px 14px;min-height:68px}.reward-tool small{font-size:.8125rem}.liq-convert-tools .button{min-width:0;flex-basis:100%}}
 :root[data-theme=dark]{--bg:#0a1220;--surface:#111e31;--surface-soft:#18273d;--line:#2c3d55;--muted:#b4c2d7;--muted-dark:#c0cde0}
 .small,.info-box,.sample-caption{font-size:var(--support-size)}
 .page-title p,.product-card p,.hero-copy>p,.dialog-body-copy{font-size:var(--reading-size)}

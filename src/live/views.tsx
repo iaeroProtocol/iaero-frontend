@@ -86,13 +86,19 @@ export function LiveTransactionDialog({action,onDone}:{action:Action;onDone:()=>
   </Dialog>;
 }
 
+export function LiveSweepDialog({intent,onClose}:{intent:SweepIntent;onClose:()=>void}){
+ const s=usePreview(),l=s.live!;
+ if(!s.connected)return <Dialog title="Convert your reward tokens." onClose={onClose}><EmptyWallet/></Dialog>;
+ if(!l.boot?.sweepReady||intent.mode!=='USDC'&&!l.boot.marketRouteReady)return <Dialog title="Conversion route unavailable." onClose={onClose}><p role="status">Refresh the connection to verify the swap contracts before converting.</p></Dialog>;
+ return <SweepViewBoundary onClose={onClose}><Suspense fallback={<Dialog title="Opening your sweep" onClose={onClose}><div className="sweep-loading" role="status"><span className="spinner"/>Loading token controls…</div></Dialog>}><SweepWizard key={l.address??'disconnected'} intent={intent} onClose={onClose}/></Suspense></SweepViewBoundary>;
+}
 export function LiveLegacyDialog({onClose}:{onClose:()=>void}){
   const s=usePreview(),l=s.live!,[date,setDate]=useState(l.selectedDate),[token,setToken]=useState(l.customToken),[sweep,setSweep]=useState<SweepIntent|null>(null),[withdrawText,setWithdrawText]=useState(''),[autoText,setAutoText]=useState('');
   const principalMax=l.legacyReceipts===undefined?undefined:l.legacyReceipts<s.wallet.legacyStake?l.legacyReceipts:s.wallet.legacyStake,withdrawal=chosenAmount(withdrawText,principalMax),autoWithdrawal=chosenAmount(autoText,l.oldAutoShares);
   const withdrawReason=s.disabledReason('legacyWithdraw'),claimReason=s.disabledReason('legacyClaim'),autoReason=s.disabledReason('oldAutoWithdraw');
   const setAction=(action:Action)=>s.setAction(action);
   if(!l.boot)return <Dialog title="Your legacy position." subtitle="Waiting for verified Base contract data." onClose={onClose}><Info>{l.error??'Checking the deployed addresses and token links.'}</Info><Button className="full-width" variant="secondary" onClick={()=>void s.liveControls!.refresh()}>Retry contract reads</Button></Dialog>;
-  if(sweep)return <SweepViewBoundary onClose={()=>setSweep(null)}><Suspense fallback={<Dialog title="Opening your sweep" onClose={()=>setSweep(null)}><div className="sweep-loading" role="status"><span className="spinner"/>Loading token controls…</div></Dialog>}><SweepWizard key={l.address??'disconnected'} intent={sweep} onClose={()=>setSweep(null)}/></Suspense></SweepViewBoundary>;
+  if(sweep)return <LiveSweepDialog intent={sweep} onClose={()=>setSweep(null)}/>;
   return <Dialog title="Previous rewards." subtitle="Claim tokens. Manage principal separately." onClose={onClose} className="legacy-dialog live-legacy-dialog">
     {!s.connected?<><p className="dialog-body-copy">Read your old staking position and rewards. You can claim without withdrawing, or withdraw principal separately. The new staking stream is awaiting deployment.</p><Button className="full-width" onClick={()=>{onClose();s.setWalletDialog(true);}} icon="arrow">Connect your wallet</Button></>:<>
       <p className="claim-coverage-note">{l.historyMode==='all'&&l.legacyDiscovery?.complete?'All indexed funded weeks checked.':'Claim all covers the selected reward weeks. Check funded history below to look further back.'}</p>

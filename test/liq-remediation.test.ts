@@ -1,7 +1,7 @@
 import {describe,it,expect,vi} from 'vitest';
-import {getAddress,type Address} from 'viem';
+import {ContractFunctionRevertedError,encodeErrorResult,getAddress,type Address} from 'viem';
 import raw from '../config/base.registry.json';
-import {readLiq,executeLiq} from '../src/live/liq';
+import {readLiq,executeLiq,previewLiqClaims,LIQ_STAKING_ABI} from '../src/live/liq';
 import type {Bootstrap} from '../src/live/types';
 const E=10n**18n,user=getAddress('0x'+'11'.repeat(20)),token=(n:number)=>getAddress('0x'+n.toString(16).padStart(40,'0')),boot={registry:raw,liqStakingReady:true} as unknown as Bootstrap;
 function fixture(count=196){
@@ -12,8 +12,9 @@ function fixture(count=196){
   if(fn==='creditOf')return credits.get(args[1])??0n;
   if(fn==='decimals'||fn==='symbol'){inFlight++;maximum=Math.max(maximum,inFlight);await new Promise(r=>setTimeout(r,0));inFlight--;if(address===tokens[1]&&fn==='symbol')throw Error('metadata unavailable');return fn==='decimals'?18:'REWARD';}
   throw Error(fn);
- });return {tokens,values,credits,read,maximum:()=>maximum,client:{getBlock:async()=>({number:1n,timestamp:1000n}),readContract:read} as any};
+ });return {tokens,values,credits,read,maximum:()=>maximum,client:{getBlock:async()=>({number:1n,timestamp:1000n}),readContract:read,simulateContract:vi.fn(async()=>({}))} as any};
 }
+const revert=()=>new ContractFunctionRevertedError({abi:LIQ_STAKING_ABI,functionName:'claimMany',data:encodeErrorResult({abi:LIQ_STAKING_ABI,errorName:'ERC20InsufficientBalance',args:[raw.liqStaking.distributor as Address,1n,2n]})});
 describe('LIQ live-sized rewards and retired-token recovery',()=>{
  it('reads all 196 tokens with bounded metadata work and retains unsupported metadata',async()=>{const f=fixture(),result=await readLiq(f.client,boot,user);expect(result.enumeratedTokens).toBe(196);expect(result.rewards).toHaveLength(196);expect(f.maximum()).toBeLessThanOrEqual(8);expect(result.rewards[1].symbol).toContain('0x');expect(result.errors).toEqual([]);});
  it('keeps healthy token rows when another credit preview fails',async()=>{const f=fixture(3),original=f.read.getMockImplementation()!;f.read.mockImplementation(async r=>{if(r.functionName==='creditOf'&&r.args[1]===f.tokens[1])throw Error('one credit read failed');return original(r);});const result=await readLiq(f.client,boot,user);expect(result.rewards).toHaveLength(3);expect(result.rewards[1].credit).toBeUndefined();expect(result.errors).toHaveLength(1);});
@@ -25,5 +26,13 @@ describe('LIQ live-sized rewards and retired-token recovery',()=>{
  it('refuses a stake change if a manually listed retired token becomes unreadable',async()=>{const f=fixture(0),original=f.read.getMockImplementation()!,send=vi.fn(async()=>('0x'+'ab'.repeat(32)) as `0x${string}`);f.read.mockImplementation(async r=>{if(r.functionName==='accRewardPerShare')throw Error('outage');return original(r);});await expect(executeLiq({client:f.client,state:{boot,address:user}} as any,{kind:'liqWithdraw',amount:E,rewardLegs:[{token:token(999)}]} as any,send)).rejects.toThrow('retired-token reward could not be checked');expect(send).not.toHaveBeenCalled();});
 
  it('loads a Portfolio stake summary without registry, reward, wallet or stake-cap reads',async()=>{const f=fixture(196),result=await readLiq(f.client,boot,user,{rewards:false,stakeSummaryOnly:true});expect(result.balance).toBe(20n*E);expect(result.unlockTime).toBe(0);expect(f.read.mock.calls.map(([r])=>r.functionName).sort()).toEqual(['balanceOf','paused','unlockTime']);});
+
+ it('isolates one underfunded token before signatures and retains every healthy reward',async()=>{const f=fixture(34),rows=(await readLiq(f.client,boot,user)).rewards,bad=f.tokens[9];f.client.simulateContract.mockImplementation(async(r:any)=>{if(r.args[0].includes(bad))throw revert();return {};});const p=await previewLiqClaims(f.client,boot,user,rows);expect(p.eligible).toHaveLength(33);expect(p.blocked).toEqual([{token:bad,reason:expect.stringContaining('insufficient balance')}]);expect(p.groups.flat()).toEqual(f.tokens.filter(t=>t!==bad));expect(p.groups.every(g=>g.length<=50)).toBe(true);});
+ it.each([401,429,503])('does not classify HTTP %s as an unclaimable reward',async status=>{const f=fixture(3),rows=(await readLiq(f.client,boot,user)).rewards;f.client.simulateContract.mockRejectedValue(Object.assign(Error('Unauthorized or service unavailable'),{status}));await expect(previewLiqClaims(f.client,boot,user,rows)).rejects.toThrow('no reward is marked unclaimable');expect(f.client.simulateContract).toHaveBeenCalledTimes(1);});
+ it('refuses a newly failing selection before sending any reviewed claim',async()=>{const f=fixture(3),send=vi.fn(),bad=f.tokens[1];f.client.simulateContract.mockImplementation(async(r:any)=>{if(r.args[0].includes(bad))throw revert();return {};});await expect(executeLiq({client:f.client,state:{boot,address:user}} as any,{kind:'liqClaimMany',rewardLegs:f.tokens.map(t=>({token:t}))} as any,send)).rejects.toThrow('Refresh and review');expect(send).not.toHaveBeenCalled();});
+ it('never retries or splits after a wallet submission fails',async()=>{const f=fixture(51),send=vi.fn().mockResolvedValueOnce('0x'+'ab'.repeat(32)).mockRejectedValueOnce(Error('Ambiguous wallet receipt'));await expect(executeLiq({client:f.client,state:{boot,address:user}} as any,{kind:'liqClaimMany',rewardLegs:f.tokens.map(t=>({token:t}))} as any,send)).rejects.toThrow('Ambiguous wallet receipt');expect(send).toHaveBeenCalledTimes(2);});
+ it('simulates a credit-only withdrawal without a pending claim batch',async()=>{const f=fixture(1),r=f.tokens[0];f.credits.set(r,E);const p=await previewLiqClaims(f.client,boot,user,(await readLiq(f.client,boot,user)).rewards);expect(p.eligible).toHaveLength(1);expect(p.groups).toEqual([]);expect(f.client.simulateContract.mock.calls[0][0]).toMatchObject({functionName:'withdrawCredit',args:[r,E,user],account:user,blockNumber:1n});});
+ it('keeps a reverting credit separate from healthy pending tokens',async()=>{const f=fixture(2);f.credits.set(f.tokens[0],E);f.client.simulateContract.mockImplementation(async(r:any)=>{if(r.functionName==='withdrawCredit')throw revert();return {};});const p=await previewLiqClaims(f.client,boot,user,(await readLiq(f.client,boot,user)).rewards);expect(p.blocked.map(b=>b.token)).toEqual([f.tokens[0]]);expect(p.eligible.map(r=>r.token)).toEqual([f.tokens[1]]);expect(p.groups).toEqual([[f.tokens[1]]]);});
+ it('does not request token metadata, wallet balance or stake caps during claim execution',async()=>{const f=fixture(3),send=vi.fn(async()=>('0x'+'ab'.repeat(32)) as `0x${string}`);await executeLiq({client:f.client,state:{boot,address:user}} as any,{kind:'liqClaimMany',rewardLegs:f.tokens.map(t=>({token:t}))} as any,send);expect(f.read.mock.calls.some(([r])=>['symbol','decimals','maxStakePerUser','maxTotalStaked','totalLIQStaked'].includes(r.functionName))).toBe(false);});
 
 });

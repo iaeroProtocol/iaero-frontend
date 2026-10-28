@@ -1,5 +1,5 @@
 import {chromium} from 'playwright-core';
-import {decodeAbiParameters,decodeFunctionData,encodeAbiParameters,encodeEventTopics,encodeFunctionResult,parseAbi} from 'viem';
+import {decodeAbiParameters,decodeFunctionData,encodeAbiParameters,encodeErrorResult,encodeEventTopics,encodeFunctionResult,parseAbi} from 'viem';
 import {readFile} from 'node:fs/promises';
 
 export async function liveFixture(contextOptions={}){
@@ -20,6 +20,7 @@ export async function liveFixture(contextOptions={}){
   };
   const call=(to,data)=>{
     const {functionName:name,args=[]}=decodeFunctionData({abi,data}),target=to.toLowerCase(),isUser=String(args[0]).toLowerCase()===user;let result;
+    if(target===registry.liqStaking.distributor.toLowerCase()&&name==='claimMany'&&args[0].some(t=>state.liqFailTokens?.has(t.toLowerCase())))throw Object.assign(Error('execution reverted'),{data:encodeErrorResult({abi:parseAbi(['error ERC20InsufficientBalance(address,uint256,uint256)']),errorName:'ERC20InsufficientBalance',args:[registry.liqStaking.distributor,1n,2n]})});
     const next=state.newAddresses,isStream=target===next.streamingDistributor,isAuto=target===next.streamAutoVault,isWrapper=target===next.stakedCollateral;
     if(isStream&&name==='earned'&&state.streamRewardFailure)throw Error('New reward read unavailable');
     if(isStream&&['balanceOf','earned','totalStaked','lastNotifiedAt','periodFinish','rewardRate','PRECISION','paused'].includes(name)){result={balanceOf:state.streamPrincipal,earned:state.streamEarned,totalStaked:1000n*unit,lastNotifiedAt:timestamp-86400n,periodFinish:state.streamEnded?timestamp-1n:timestamp+86400n,rewardRate:unit,PRECISION:unit,paused:state.streamPaused}[name];return encodeFunctionResult({abi,functionName:name,result});}
@@ -85,13 +86,13 @@ export async function liveFixture(contextOptions={}){
       }else if(method==='eth_getTransactionReceipt')result=state.receiptsByHash.get(params[0])??null;
       else if(method==='eth_getTransactionByHash'){const tx=writes.find(w=>w.hash===params[0]);result=tx?{hash:tx.hash,blockHash,blockNumber:'0x7b',from:user,to:tx.to,nonce:'0x0',gas:'0x186a0',gasPrice:'0x1',value:'0x0',input:tx.data,type:'0x2',chainId:'0x2105',transactionIndex:'0x0',v:'0x0',r:zero,s:zero}:null;}
       else throw Error('Unexpected read '+method);
-    }catch(e){error={code:-32000,message:e.message};}return route.fulfill({json:{jsonrpc:'2.0',id:rpc.id,...(error?{error}:{result})}});
+    }catch(e){error={code:e.data?3:-32000,message:e.message,...(e.data?{data:e.data}:{})};}return route.fulfill({json:{jsonrpc:'2.0',id:rpc.id,...(error?{error}:{result})}});
   });
   const credit=(token,amount)=>state.balances.set(token.toLowerCase(),(state.balances.get(token.toLowerCase())??0n)+amount);
   await page.exposeFunction('testBroadcast',tx=>{
     const {functionName:name,args=[]}=decodeFunctionData({abi,data:tx.data}),h=hash(writes.length+1),logs=[];writes.push({...tx,name,args,hash:h});
     const settle=(token,week)=>{const amount=reward(user,token,week);if(token.toLowerCase()===registry.legacy.USDC.toLowerCase()){if(week===epoch)state.usdcReward=0n;else if(week===epoch-604800n)state.previousUsdc=0n;else if(week===epoch-40n*604800n)state.oldReward=0n;}else if(BigInt(token)===0n)state.nativeReward=0n;if(amount>0n){credit(token,amount);logs.push({address:registry.legacy.epochDistributor,topics:encodeEventTopics({abi:claimAbi,eventName:'RewardClaimed',args:{user,token,epochId:week}}),data:encodeAbiParameters([{type:'uint256'}],[amount])});}};
-    if(name==='claimMany'&&tx.to.toLowerCase()===registry.liqStaking.distributor.toLowerCase()){credit(registry.legacy.USDC,state.liqReward);state.liqReward=0n;}else if(name==='claimMany'){state.lastClaim=args[0].map((token,i)=>({token,epoch:args[1][i]}));for(const r of state.lastClaim)settle(r.token,r.epoch);}
+    if(name==='claimMany'&&tx.to.toLowerCase()===registry.liqStaking.distributor.toLowerCase()){if(state.liqTokens){state.liqAmounts=state.liqAmounts.map((amount,i)=>{if(!args[0].some(t=>t.toLowerCase()===state.liqTokens[i].toLowerCase()))return amount;credit(state.liqTokens[i],amount);return 0n;});}else{credit(registry.legacy.USDC,state.liqReward);state.liqReward=0n;}}else if(name==='claimMany'){state.lastClaim=args[0].map((token,i)=>({token,epoch:args[1][i]}));for(const r of state.lastClaim)settle(r.token,r.epoch);}
     if(name==='claim')settle(args[0],args[1]);
     if(name==='unstake'&&tx.to.toLowerCase()===registry.liqStaking.distributor.toLowerCase()){state.liqPrincipal-=args[0];credit(registry.legacy.LIQ,args[0]);}else if(name==='unstake'){state.principal-=args[0];state.receipts-=args[0];credit(registry.legacy.iAERO,args[0]);}
     if(name==='getReward'){credit(registry.legacy.USDC,state.streamEarned);state.streamEarned=0n;}
