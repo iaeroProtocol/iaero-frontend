@@ -1,4 +1,4 @@
-import {encodeAbiParameters,isAddress,parseAbi,type Address} from 'viem';
+import {encodeAbiParameters,isAddress,parseAbi,stringToHex,type Address} from 'viem';
 import type {BaseClient} from './client';
 import type {Bootstrap} from './types';
 import {accountReadClient} from './account-read-client';
@@ -7,13 +7,32 @@ import {MARKET_ROUTE_PARAMS,METAQUOTER_ABI} from './iaero-route';
 const REGISTRY_ABI=parseAbi(['function FACTORY_REGISTRY() view returns(address)','function targetFactories() view returns(address[])','function isMetaRouterApproved(address) view returns(bool)','function tickSpacings() view returns(int24[])']);
 const V2_ABI=parseAbi(['function getPool(address,address) view returns(address)']);
 const CL_ABI=parseAbi(['function getPool(address,address,int24) view returns(address)']);
-const POOL_ABI=parseAbi(['function token0() view returns(address)','function token1() view returns(address)','function factory() view returns(address)','function getReserves() view returns(uint256,uint256,uint256)','function slot0() view returns(uint160,int24,uint16,uint16,uint16,bool)']);
+const POOL_ABI=parseAbi(['function token0() view returns(address)','function token1() view returns(address)','function factory() view returns(address)','function POOL_TYPE() view returns(bytes32)','function metadata() view returns(uint256,uint256,uint256,uint256,address,address)','function getReserves() view returns(uint256,uint256,uint256)','function slot0() view returns(uint160,int24,uint16,uint16,uint16,bool)']);
 export const NATIVE_COST_BPS=500n;
-export type NativePool={address:Address;factory:Address;kind:'V2'|'CL';token0:Address;token1:Address;reserve0?:bigint;reserve1?:bigint;sqrt?:bigint};
+export type NativePool={address:Address;factory:Address;kind:'V2'|'CL';token0:Address;token1:Address;reserve0?:bigint;reserve1?:bigint;sqrt?:bigint;stable?:boolean;scale0?:bigint;scale1?:bigint};
 export type NativeRoute={pools:NativePool[];tokens:Address[];costMinimum:bigint};
 const same=(a:string,b:string)=>a.toLowerCase()===b.toLowerCase();
 const positive=(v:unknown):v is bigint=>typeof v==='bigint'&&v>0n&&v<2n**256n;
 const address=(v:unknown):v is Address=>typeof v==='string'&&isAddress(v)&&BigInt(v)!==0n;
+
+const STABLE=stringToHex('V2_STABLE',{size:32}).toLowerCase(),VOLATILE=stringToHex('V2_VOLATILE',{size:32}).toLowerCase();
+const decimalScale=(value:unknown):value is bigint=>{if(!positive(value))return false;let v=value;while(v>1n&&v%10n===0n)v/=10n;return v===1n;};
+// [VERIFIED: deployed-tree/V3/src/pools/StablePool.sol:21-33,56-61]
+// The stable invariant is x*y*(x*x+y*y) in 18-decimal reserve units.
+// Its marginal output is y*(3*x*x+y*y)/(x*(x*x+3*y*y)); y/x applies
+// only to volatile pools. Convert that derivative back into raw token units.
+export function nativePathMid(pools:readonly NativePool[],tokens:readonly Address[],amount:bigint){
+ return pools.reduce((value,pool,i)=>{
+  const forward=same(pool.token0,tokens[i]);
+  if(pool.kind==='CL'){const ratio=pool.sqrt!**2n;return forward?value*ratio/(2n**192n):value*(2n**192n)/ratio;}
+  const reserveIn=forward?pool.reserve0!:pool.reserve1!,reserveOut=forward?pool.reserve1!:pool.reserve0!;
+  if(!pool.stable)return value*reserveOut/reserveIn;
+  const scaleIn=forward?pool.scale0!:pool.scale1!,scaleOut=forward?pool.scale1!:pool.scale0!;
+  if(!decimalScale(scaleIn)||!decimalScale(scaleOut))return 0n;
+  const x=reserveIn*10n**18n/scaleIn,y=reserveOut*10n**18n/scaleOut;if(x<=0n||y<=0n)return 0n;
+  return value*scaleOut*y*(3n*x*x+y*y)/(scaleIn*x*(x*x+3n*y*y));
+ },amount);
+}
 
 // Discovery is scoped to this one quote/recheck, at one current block. The
 // registry, factories, pools and prices are never retained across submissions.
@@ -43,10 +62,17 @@ export function nativeSweepSession(client:BaseClient,boot:Bootstrap){
     let pool:Address;try{pool=await p.read(option.factory,option.kind==='CL'?CL_ABI:V2_ABI,'getPool',option.kind==='CL'?[a,b,option.spacing]:[a,b]);}catch{return undefined;}
     if(!address(pool))return undefined;
     try{
-     const [token0,token1,factory,state]=await Promise.all([p.read(pool,POOL_ABI,'token0'),p.read(pool,POOL_ABI,'token1'),p.read(pool,POOL_ABI,'factory'),p.read(pool,POOL_ABI,option.kind==='CL'?'slot0':'getReserves')]);
-     if(!address(token0)||!address(token1)||!same(factory,option.factory)||[token0,token1].map(x=>x.toLowerCase()).sort().join()!==[a,b].map(x=>x.toLowerCase()).sort().join()||!Array.isArray(state))return undefined;
-     if(option.kind==='CL'){if(!positive(state[0])||state[0]>=2n**160n)return undefined;return {address:pool,factory,kind:option.kind,token0,token1,sqrt:state[0]} as NativePool;}
-     if(!positive(state[0])||!positive(state[1]))return undefined;return {address:pool,factory,kind:option.kind,token0,token1,reserve0:state[0],reserve1:state[1]} as NativePool;
+     if(option.kind==='CL'){
+      const [token0,token1,factory,state]=await Promise.all([p.read(pool,POOL_ABI,'token0'),p.read(pool,POOL_ABI,'token1'),p.read(pool,POOL_ABI,'factory'),p.read(pool,POOL_ABI,'slot0')]);
+      if(!address(token0)||!address(token1)||!same(factory,option.factory)||[token0,token1].map(x=>x.toLowerCase()).sort().join()!==[a,b].map(x=>x.toLowerCase()).sort().join()||!Array.isArray(state)||!positive(state[0])||state[0]>=2n**160n)return undefined;
+      return {address:pool,factory,kind:option.kind,token0,token1,sqrt:state[0]} as NativePool;
+     }
+     // One metadata getter supplies both scales, reserves and token identities.
+     const [meta,factory,poolType]=await Promise.all([p.read(pool,POOL_ABI,'metadata'),p.read(pool,POOL_ABI,'factory'),p.read(pool,POOL_ABI,'POOL_TYPE')]);
+     if(!Array.isArray(meta)||meta.length!==6||!same(factory,option.factory)||typeof poolType!=='string'||![STABLE,VOLATILE].includes(poolType.toLowerCase()))return undefined;
+     const [scale0,scale1,reserve0,reserve1,token0,token1]=meta;
+     if(!address(token0)||!address(token1)||!positive(reserve0)||!positive(reserve1)||!decimalScale(scale0)||!decimalScale(scale1)||[token0,token1].map(x=>x.toLowerCase()).sort().join()!==[a,b].map(x=>x.toLowerCase()).sort().join())return undefined;
+     return {address:pool,factory,kind:option.kind,token0,token1,reserve0,reserve1,scale0,scale1,stable:poolType.toLowerCase()===STABLE} as NativePool;
     }catch{return undefined;}
    }));
    return [...new Map(found.filter((r):r is NativePool=>!!r).map(r=>[r.address.toLowerCase(),r])).values()];
@@ -56,23 +82,20 @@ export function nativeSweepSession(client:BaseClient,boot:Bootstrap){
   if(!positive(amount)||same(tokenIn,tokenOut))throw Error('Choose a positive native-swap input.');
   const p=await verified(),hubs=[...new Map([boot.registry.aero.token,boot.registry.legacy.USDC,boot.registry.legacy.WETH].map(a=>[a.toLowerCase(),a])).values()].filter(a=>!same(a,tokenIn)&&!same(a,tokenOut));
   const paths:{pools:NativePool[];tokens:Address[]}[]=[];
-  const direct=await pair(tokenIn,tokenOut);for(const pool of direct)paths.push({pools:[pool],tokens:[tokenIn,tokenOut]});
-  await Promise.all(hubs.map(async hub=>{const [first,last]=await Promise.all([pair(tokenIn,hub),pair(hub,tokenOut)]);for(const a of first)for(const b of last)if(!same(a.address,b.address))paths.push({pools:[a,b],tokens:[tokenIn,hub,tokenOut]});}));
-  // Bound expensive quoter work while keeping every direct pool. Two-hop paths
-  // are ranked by their current marginal price, then checked by MetaQuoter.
-  const mid=(path:typeof paths[number])=>path.pools.reduce((value,pool,i)=>{
-   const forward=same(pool.token0,path.tokens[i]);if(pool.kind==='V2')return value*(forward?pool.reserve1!:pool.reserve0!)/(forward?pool.reserve0!:pool.reserve1!);
-   const ratio=pool.sqrt!**2n;return forward?value*ratio/(2n**192n):value*(2n**192n)/ratio;
-  },amount);
-  const viable=paths.filter(path=>positive(mid(path)));
-  const candidates=[...viable.filter(path=>path.pools.length===1),...viable.filter(path=>path.pools.length>1).sort((a,b)=>{const aa=mid(a),bb=mid(b);return aa===bb?0:aa>bb?-1:1;}).slice(0,64)];
+  const [direct,via]=await Promise.all([pair(tokenIn,tokenOut),Promise.all(hubs.map(async hub=>({hub,legs:await Promise.all([pair(tokenIn,hub),pair(hub,tokenOut)])})))]);
+  for(const pool of direct)paths.push({pools:[pool],tokens:[tokenIn,tokenOut]});
+  for(const {hub,legs:[first,last]} of via)for(const a of first)for(const b of last)if(!same(a.address,b.address))paths.push({pools:[a,b],tokens:[tokenIn,hub,tokenOut]});
+  // Compute each marginal price once. Keep every direct pool and bound the
+  // two-hop quoter work; all discovery requests above share this snapshot.
+  const viable=paths.map(path=>({...path,mid:nativePathMid(path.pools,path.tokens,amount)})).filter(path=>positive(path.mid));
+  const candidates=[...viable.filter(path=>path.pools.length===1),...viable.filter(path=>path.pools.length>1).sort((a,b)=>a.mid===b.mid?0:a.mid>b.mid?-1:1).slice(0,64)];
   if(!candidates.length)throw Error('No verified native Aero pool route is available for this token.');
   const results=await client.multicall({multicallAddress:boot.registry.sweep.multicall3,allowFailure:true,batchSize:8192,blockNumber:p.block.number,contracts:candidates.map(path=>({address:boot.registry.sweep.metaquoter,abi:METAQUOTER_ABI,functionName:'quoteExactInput',args:[path.pools.map(pool=>pool.address),tokenIn,amount]} as const))});
   if(results.length!==candidates.length)throw Error('The grouped native route quote is incomplete.');
   let best:{route:NativeRoute;buyAmount:bigint}|undefined;
-  for(let i=0;i<results.length;i++){const r=results[i];if(r.status!=='success'||!Array.isArray(r.result)||!positive(r.result[0]))continue;const costMinimum=mid(candidates[i])*(10000n-NATIVE_COST_BPS)/10000n;
+  for(let i=0;i<results.length;i++){const r=results[i];if(r.status!=='success'||!Array.isArray(r.result)||!positive(r.result[0]))continue;const costMinimum=candidates[i].mid*(10000n-NATIVE_COST_BPS)/10000n;
    if(!positive(costMinimum)||r.result[0]<costMinimum)continue;
-   if(!best||r.result[0]>best.buyAmount)best={route:{...candidates[i],costMinimum},buyAmount:r.result[0]};
+   if(!best||r.result[0]>best.buyAmount)best={route:{pools:candidates[i].pools,tokens:candidates[i].tokens,costMinimum},buyAmount:r.result[0]};
   }
   if(!best)throw Error('Native Aero routes are unavailable or exceed the 5% fee and price-impact limit. This token stays in your wallet.');
   return {...best,quotedAt:Date.now()};

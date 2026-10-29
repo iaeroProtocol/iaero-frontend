@@ -1,8 +1,8 @@
 import {afterEach,describe,expect,it,vi} from 'vitest';
-import {decodeAbiParameters,encodeAbiParameters,encodeEventTopics,parseAbi,type Address} from 'viem';
+import {decodeAbiParameters,encodeAbiParameters,encodeEventTopics,parseAbi,stringToHex,type Address} from 'viem';
 import registry from '../config/base.registry.json';
 import filter from '../config/spam-tokens.base.json';
-import {nativeSweepSession,encodeNativeSweeps,type NativePool} from '../src/live/native-sweep';
+import {nativeSweepSession,encodeNativeSweeps,nativePathMid,type NativePool} from '../src/live/native-sweep';
 import {buildSweepPreview,nativeReceiptOutput,simulateSweepBatch,TRANSFER_ABI,type SweepQuote} from '../src/live/sweep';
 import {MARKET_ROUTE_PARAMS} from '../src/live/iaero-route';
 import type {BaseClient} from '../src/live/client';
@@ -11,13 +11,13 @@ const user='0x1111111111111111111111111111111111111111' as Address,token='0x1234
 const boot={registry,tokenFilter:filter,sweepReady:true,contracts:{factoryRegistry:{deployed:true},metarouter:{deployed:true},metaquoter:{deployed:true},multicall3:{deployed:true}}} as unknown as Bootstrap;
 const nativePool:NativePool={address:pool,factory,kind:'V2',token0:token,token1:registry.legacy.USDC as Address,reserve0:100000n,reserve1:100000n};
 function fixture(){
- let approved=true,registryLink=registry.sweep.factoryRegistry,wrongPair=false,output=98n;
+ let approved=true,registryLink=registry.sweep.factoryRegistry,wrongPair=false,output=98n,stable=false,reserves=[100000n,100000n,0n],scales=[1n,1n];
  const client={getBlock:vi.fn(async()=>({number:123n,timestamp:1000n})),readContract:vi.fn(async(r:any)=>{
   if(r.functionName==='FACTORY_REGISTRY')return registryLink;if(r.functionName==='isMetaRouterApproved')return approved;if(r.functionName==='targetFactories')return [factory];if(r.functionName==='tickSpacings')throw Error('V2 factory');
   if(r.functionName==='getPool')return r.args.map((a:string)=>a.toLowerCase()).sort().join() ===[token,registry.legacy.USDC].map(a=>a.toLowerCase()).sort().join()?pool:zero;
-  if(r.functionName==='token0')return wrongPair?user:token;if(r.functionName==='token1')return registry.legacy.USDC;if(r.functionName==='factory')return factory;if(r.functionName==='getReserves')return [100000n,100000n,0n];if(r.functionName==='balanceOf')return 1000n;if(r.functionName==='allowance')return 0n;throw Error('Unexpected '+r.functionName);
+  if(r.functionName==='token0')return wrongPair?user:token;if(r.functionName==='token1')return registry.legacy.USDC;if(r.functionName==='factory')return factory;if(r.functionName==='getReserves')return reserves;if(r.functionName==='POOL_TYPE')return stringToHex(stable?'V2_STABLE':'V2_VOLATILE',{size:32});if(r.functionName==='metadata')return [...scales,...reserves.slice(0,2),wrongPair?user:token,registry.legacy.USDC];if(r.functionName==='balanceOf')return 1000n;if(r.functionName==='allowance')return 0n;throw Error('Unexpected '+r.functionName);
  }),multicall:vi.fn(async(r:any)=>r.contracts.map((c:any)=>({status:'success',result:c.functionName==='quoteExactInput'?[output,[],[]]:c.functionName==='balanceOf'?1000n:0n}))),simulateBlocks:vi.fn(async(r:any)=>[{calls:r.blocks[0].calls.map((c:any,i:number)=>i===r.blocks[0].calls.length-1?{status:'success',data:'0x',logs:[{address:token,topics:encodeEventTopics({abi:TRANSFER_ABI,eventName:'Transfer',args:{from:user,to:pool}}),data:encodeAbiParameters([{type:'uint256'}],[100n])},{address:registry.legacy.USDC,topics:encodeEventTopics({abi:TRANSFER_ABI,eventName:'Transfer',args:{from:pool,to:user}}),data:encodeAbiParameters([{type:'uint256'}],[98n])}]}:{status:'success',data:encodeAbiParameters([{type:'bool'}],[true]),logs:[]})}])} as unknown as BaseClient;
- return {client,setApproved:(value:boolean)=>{approved=value;},setRegistry:(value:string)=>{registryLink=value;},setWrongPair:()=>{wrongPair=true;},setOutput:(value:bigint)=>{output=value;}};
+ return {client,setApproved:(value:boolean)=>{approved=value;},setRegistry:(value:string)=>{registryLink=value;},setWrongPair:()=>{wrongPair=true;},setOutput:(value:bigint)=>{output=value;},setStable:(r0:bigint,r1:bigint,d0=10n**18n,d1=10n**18n)=>{stable=true;reserves=[r0,r1,0n];scales=[d0,d1];}};
 }
 afterEach(()=>vi.unstubAllGlobals());
 describe('verified native Aero fallback',()=>{
@@ -35,7 +35,34 @@ it('keeps executable direct pools even when more than 64 two-hop paths advertise
  const client={getBlock:async()=>({number:123n,timestamp:1000n}),readContract:async(r:any)=>{
   if(r.functionName==='FACTORY_REGISTRY')return registry.sweep.factoryRegistry;if(r.functionName==='isMetaRouterApproved')return true;if(r.functionName==='targetFactories')return factories;if(r.functionName==='tickSpacings')throw Error('V2');
   if(r.functionName==='getPool'){const key=r.address+':'+r.args.slice().sort().join(':'),existing=[...metadata].find(([,m])=>m.factory+':'+[m.a,m.b].sort().join(':')===key);if(existing)return existing[0];const id=('0x'+(10000+metadata.size).toString(16).padStart(40,'0')) as Address;metadata.set(id,{factory:r.address,a:r.args[0],b:r.args[1],direct:[r.args[0],r.args[1]].includes(token)&&[r.args[0],r.args[1]].includes(registry.legacy.USDC)});return id;}
-  const pool=metadata.get(r.address)!;if(r.functionName==='token0')return pool.a;if(r.functionName==='token1')return pool.b;if(r.functionName==='factory')return pool.factory;if(r.functionName==='getReserves')return [100000n,pool.direct?100000n:200000n,0n];throw Error('Unexpected read');
+  const pool=metadata.get(r.address)!;if(r.functionName==='token0')return pool.a;if(r.functionName==='token1')return pool.b;if(r.functionName==='factory')return pool.factory;if(r.functionName==='getReserves')return [100000n,pool.direct?100000n:200000n,0n];if(r.functionName==='POOL_TYPE')return stringToHex('V2_VOLATILE',{size:32});if(r.functionName==='metadata')return [1n,1n,100000n,pool.direct?100000n:200000n,pool.a,pool.b];throw Error('Unexpected read');
  },multicall:vi.fn(async(r:any)=>r.contracts.map((c:any)=>c.args[0].length===1?{status:'success',result:[98n,[],[]]}:{status:'failure'}))} as unknown as BaseClient;
  const q=await nativeSweepSession(client,boot).quote(token,registry.legacy.USDC as Address,100n);expect(q.buyAmount).toBe(98n);expect(q.route.pools).toHaveLength(1);const paths=vi.mocked(client.multicall).mock.calls[0][0].contracts as any[];expect(paths.filter(p=>p.args[0].length===1)).toHaveLength(8);expect(paths.length).toBeGreaterThan(64);
+});
+
+
+describe('stable-pool marginal-price cost protection',()=>{
+ it('rejects a loss beyond 5% which a volatile reserve ratio would incorrectly permit',async()=>{const e=fixture(),unit=10n**18n;e.setStable(100n*unit,10n*unit);e.setOutput(15n*unit/100n);await expect(nativeSweepSession(e.client,boot).quote(token,registry.legacy.USDC as Address,unit)).rejects.toThrow('5%');});
+ it('does not reject a healthy reverse stable trade using the wrong reserve ratio',async()=>{const e=fixture(),unit=10n**18n;e.setStable(100n*unit,10n*unit);e.setOutput(34n*unit/10n);const q=await nativeSweepSession(e.client,boot).quote(registry.legacy.USDC as Address,token,unit);expect(q.buyAmount).toBe(34n*unit/10n);expect(q.route.costMinimum).toBe(3250830564784053155n);});
+ it('normalizes 6/18-decimal stable reserves before applying the marginal-price bound',async()=>{const e=fixture(),unit=10n**18n;e.setStable(100000000n,10n*unit,1000000n,unit);e.setOutput(28n*unit/100n);const q=await nativeSweepSession(e.client,boot).quote(token,registry.legacy.USDC as Address,1000000n);expect(q.route.costMinimum).toBe(277621359223300970n);});
+});
+
+it('refreshes the actual native spender checks when a preview retry changes venue',async()=>{
+ const e=fixture(),router='0x0000000000001fF3684f28c67538d4D072C22734' as Address,original=vi.mocked(e.client.simulateBlocks).getMockImplementation()!;let nativeAttempts=0,quoteRequests=0;
+ vi.mocked(e.client.multicall).mockImplementation(async(r:any)=>r.contracts.map((c:any)=>({status:'success',result:c.functionName==='quoteExactInput'?[98n,[],[]]:c.functionName==='agg0x'?router:c.functionName==='allowedSelectors'?true:c.functionName==='balanceOf'?1000n:0n})) as any);
+ vi.mocked(e.client.simulateBlocks).mockImplementation(async(r:any)=>{const last=r.blocks[0].calls.at(-1);if(last.to===registry.sweep.swapper||nativeAttempts++===0)return [{calls:r.blocks[0].calls.map((_c:any,i:number)=>({status:i===r.blocks[0].calls.length-1?'failure':'success',data:encodeAbiParameters([{type:'bool'}],[true]),logs:[]}))}] as any;return original(r);});
+ const fetcher=async()=>++quoteRequests===1?{ok:true,json:async()=>({sellToken:token,sellAmount:'100',buyToken:registry.legacy.USDC,buyAmount:'98',taker:registry.sweep.swapper,recipient:registry.sweep.swapper,transaction:{to:router,data:'0x12345678',value:'0'},quotedAt:Date.now()})}:{ok:false,json:async()=>({code:'TOKEN_NOT_SUPPORTED'})};
+ const p=await buildSweepPreview(e.client,boot,user,[{token,symbol:'STOCK',decimals:6,amount:100n}],'USDC',100,fetcher as any,undefined,true);expect(p.quotes).toHaveLength(1);expect(p.quotes[0].native).toBeDefined();expect(p.quotes[0].retryLevel).toBe(1);expect(p.skipped).toEqual([]);
+});
+
+
+it('stable marginal prices agree with tiny trades solved from the deployed invariant across reserve imbalances and decimal scales',()=>{
+ const unit=10n**18n,k=(x:bigint,y:bigint)=>x*y*(x*x+y*y);let seed=97n;
+ for(let i=0;i<32;i++){
+  seed=(seed*48271n)%2147483647n;const x=(10n+seed%1000n)*unit;seed=(seed*48271n)%2147483647n;const y=(10n+seed%1000n)*unit,d0=i%2?1000000n:unit,d1=i%3?unit:100000000n,input=d0/1000n;
+  const p:NativePool={...nativePool,stable:true,scale0:d0,scale1:d1,reserve0:x*d0/unit,reserve1:y*d1/unit},nextX=x+input*unit/d0,target=k(x,y);let low=0n,high=y;
+  while(low<high){const middle=(low+high)/2n;if(k(nextX,middle)>=target)high=middle;else low=middle+1n;}
+  const actual=(y-low)*d1/unit,mid=nativePathMid([p],[token,registry.legacy.USDC as Address],input);
+  expect(actual).toBeGreaterThan(0n);expect(mid).toBeGreaterThanOrEqual(actual);expect((mid-actual)*100000n/mid).toBeLessThan(20n);
+ }
 });

@@ -26,6 +26,8 @@ export const LEGACY_DEPOSIT_ABI=parseAbi(['function stake(uint256)','function pa
 export const ROUTE_PARAMS=[{type:'tuple',components:[{name:'pools',type:'address[]'},{name:'tokenIn',type:'address'},{name:'amountIn',type:'tuple',components:[{name:'mode',type:'uint8'},{name:'value',type:'uint256'}]},{name:'payerIsUser',type:'bool'},{name:'minAmountOut',type:'uint256'},{name:'recipient',type:'address'}]}] as const;
 export type SweepMode='USDC'|'iAERO'|'stake';
 export type SweepToken={token:Address;symbol:string;decimals:number|null;balance:bigint};
+export const SWEEP_SIMULATION_DATA_LIMIT=80000; // Headroom below the read proxy's 100k JSON body limit.
+export class SweepBatchDataLimit extends Error {}
 export const SWEEP_BATCH_LIMIT=10; // [VERIFIED: existing RewardsSection execution batch; swapper MAX_STEPS=32]
 export function orderSweepTokens(tokens:readonly SweepToken[],values:Record<string,RewardTokenValue>={}){
   const value=(t:SweepToken)=>{const q=values[t.token.toLowerCase()];return q?.amount===t.balance?q.valueWad:null;};
@@ -125,10 +127,10 @@ export function sweepGroups(quotes:readonly SweepQuote[]){
 async function nativeQuote(boot:Bootstrap,input:SweepInput,outToken:Address,bps:number,user:Address,session:ReturnType<typeof nativeSweepSession>):Promise<SweepQuote>{
  const result=await session.quote(input.token,outToken,input.amount),q:SweepQuote={input,outToken,buyAmount:result.buyAmount,minimum:0n,to:boot.registry.sweep.metarouter,data:'0x',quotedAt:result.quotedAt,txOrigin:user,native:result.route};q.minimum=quoteMinimum(q,bps);return q;
 }
-async function executableQuote(client:BaseClient,boot:Bootstrap,input:SweepInput,bps:number,fetcher:typeof fetch,outToken:Address,user:Address,session:ReturnType<typeof nativeSweepSession>,nativeOnly=false){
- if(nativeOnly)return nativeQuote(boot,input,outToken,bps,user,session);
+async function executableQuote(client:BaseClient,boot:Bootstrap,input:SweepInput,bps:number,fetcher:typeof fetch,outToken:Address,user:Address,session:ReturnType<typeof nativeSweepSession>,venue:'auto'|'native'|'0x'='auto'){
+ if(venue==='native')return nativeQuote(boot,input,outToken,bps,user,session);
  try{return await fetchSweepQuote(client,boot,input,bps,fetcher,outToken,user,true);}
- catch(error){if(error instanceof SweepQuoteUnavailable&&['TOKEN_NOT_SUPPORTED','NO_ROUTE_FOR_AMOUNT'].includes(error.code)){try{return await nativeQuote(boot,input,outToken,bps,user,session);}catch{}}throw error;}
+ catch(error){if(venue==='auto'&&error instanceof SweepQuoteUnavailable&&['TOKEN_NOT_SUPPORTED','NO_ROUTE_FOR_AMOUNT'].includes(error.code)){try{return await nativeQuote(boot,input,outToken,bps,user,session);}catch{}}throw error;}
 }
 function tradeRequest(boot:Bootstrap,user:Address,quotes:SweepQuote[],reviews:SweepQuote[],bps:number,deadline:bigint){
  if(quotes.some(q=>!!q.native!==!!quotes[0].native))throw Error('Mixed swap venues require separate batches.');
@@ -155,6 +157,7 @@ export async function simulateSweepBatch(client:BaseClient,boot:Bootstrap,user:A
  add(trade.address,encodeFunctionData(trade as any));
  // Sequential simulation shares real approvals and swaps within one simulated
  // block only. It never invents balances, allowances, storage or contract code.
+ if(JSON.stringify({blocks:[{calls}]},(_,v)=>typeof v==='bigint'?'0x'+v.toString(16):v).length>SWEEP_SIMULATION_DATA_LIMIT)throw new SweepBatchDataLimit('The quote data exceeds the supported request size. Review a different route or smaller amount.');
  const blocks=await client.simulateBlocks({blocks:[{calls}],validation:false,blockNumber:block.number});
  const results=blocks[0]?.calls;
  if(blocks.length!==1||!results||results.length!==calls.length)throw Error('The swap simulation response is unavailable.');
@@ -171,7 +174,8 @@ export async function simulateSweepQuote(client:BaseClient,boot:Bootstrap,user:A
 export async function quoteIaero(client:BaseClient,boot:Bootstrap,usdc:bigint){
  return (await quoteIaeroRoute(client,boot,usdc)).output;
 }
-export async function buildSweepPreview(client:BaseClient,boot:Bootstrap,user:Address,inputs:SweepInput[],mode:SweepMode,slippageBps:number,fetcher:typeof fetch=fetch,onProgress?:(checked:number,total:number)=>void,automaticRetries=false):Promise<SweepPreview>{
+export async function buildSweepPreview(client:BaseClient,boot:Bootstrap,user:Address,inputs:SweepInput[],mode:SweepMode,slippageBps:number,fetcher:typeof fetch=fetch,onProgress?:(checked:number,total:number)=>void,automaticRetries=false,shouldStop?:()=>boolean):Promise<SweepPreview>{
+  const active=()=>{if(shouldStop?.())throw Error('Token checks stopped. No transaction was sent.');};active();
   validateSweepInputs(boot,inputs,mode);
   const output=sweepOutput(boot,mode);
   if(!boot.tokenFilter)throw Error('The token filter is unavailable. Refresh before sweeping.');
@@ -181,27 +185,28 @@ export async function buildSweepPreview(client:BaseClient,boot:Bootstrap,user:Ad
   // Quotes are independent; no wallet writes occur during this phase.
   await Promise.all(Array.from({length:Math.min(4,inputs.length)},async()=>{
     while(next<inputs.length){
-      const index=next++,input=inputs[index];
+      active();const index=next++,input=inputs[index];
       try{const reason=spamReason(boot.tokenFilter,input.token,input.symbol);if(reason){checks[index].skipped={input,stage:'filter',reason};continue;}
         if(!equal(input.token,output.token))checks[index].quote=await executableQuote(client,boot,input,slippageBps,fetcher,output.token,user,native);
       }catch(error){checks[index].skipped={input,stage:'quote',reason:publicError(error)};}
     }
   }));
-  const approvalChecks=await readApprovalChecks(client,boot,user,[...approvalRequests(boot,checks.flatMap(c=>!c.skipped&&c.quote?[c.quote]:[])),...checks.filter(c=>!c.skipped&&!c.quote).map(c=>({token:c.input.token,spender:boot.registry.sweep.metarouter}))]);
+  active();const approvalChecks=await readApprovalChecks(client,boot,user,[...approvalRequests(boot,checks.flatMap(c=>!c.skipped&&c.quote?[c.quote]:[])),...checks.filter(c=>!c.skipped&&!c.quote).map(c=>({token:c.input.token,spender:boot.registry.sweep.metarouter}))]);
   for(const c of checks){const check=approvalChecks.get(approvalKey(c.input.token,c.quote?quoteSpender(boot,c.quote):boot.registry.sweep.metarouter));if(!c.skipped&&(!check||check.error||check.balance===undefined||check.balance<c.input.amount))c.skipped={input:c.input,stage:'simulation',reason:check?.error??c.input.symbol+' balance changed. Refresh the selection.'};if(c.skipped||!c.quote)onProgress?.(++checked,inputs.length);}
   const isolate=async(rows:typeof checks):Promise<void>=>{
-    if(!rows.length)return;
+    active();if(!rows.length)return;
     try{await simulateSweepBatch(client,boot,user,rows.map(r=>r.quote!),slippageBps,rows.map(r=>r.quote!),true,approvalChecks);for(const row of rows)onProgress?.(++checked,inputs.length);return;}
     catch(error){
-      if(!(error instanceof SweepPreflightRevert))throw Error('Grouped token checks could not complete. Retry the checks; no approvals or swaps were sent.');
+      if(!(error instanceof SweepPreflightRevert)&&!(error instanceof SweepBatchDataLimit))throw Error('Grouped token checks could not complete. Retry the checks; no approvals or swaps were sent.');
       if(rows.length>1){const middle=Math.ceil(rows.length/2);await isolate(rows.slice(0,middle));await isolate(rows.slice(middle));return;}
       const row=rows[0];let failure:unknown=error;
       // A valid pool route can exist even when the aggregator's executable
       // route fails. A different spender is introduced only before review.
       if(!row.quote!.native)try{const quote=await nativeQuote(boot,row.input,output.token,slippageBps,user,native),checks=await readApprovalChecks(client,boot,user,approvalRequests(boot,[quote]));await simulateSweepBatch(client,boot,user,[quote],slippageBps,[quote],true,checks);row.quote=quote;failure=undefined;}catch{}
 
+      if(failure&&error instanceof SweepBatchDataLimit){row.skipped={input:row.input,stage:'batch',reason:error.message};onProgress?.(++checked,inputs.length);return;}
       if(failure&&automaticRetries&&error instanceof SweepPreflightRevert)for(let attempt=1;attempt<=SWEEP_MAX_RETRIES;attempt++){
-        try{const bps=retrySlippage(slippageBps,attempt),quote=await executableQuote(client,boot,row.input,bps,fetcher,output.token,user,native,!!row.quote!.native);await simulateSweepBatch(client,boot,user,[quote],bps,[quote],true,approvalChecks);row.quote={...quote,retryLevel:attempt};failure=undefined;break;}catch(error){failure=error;if(!(error instanceof SweepPreflightRevert))break;}
+        try{active();const bps=retrySlippage(slippageBps,attempt),quote=await executableQuote(client,boot,row.input,bps,fetcher,output.token,user,native,row.quote!.native?'native':'auto'),retryChecks=await readApprovalChecks(client,boot,user,approvalRequests(boot,[quote]));await simulateSweepBatch(client,boot,user,[quote],bps,[quote],true,retryChecks);row.quote={...quote,retryLevel:attempt};failure=undefined;break;}catch(error){failure=error;if(!(error instanceof SweepPreflightRevert))break;}
       }
       if(failure)row.skipped={input:row.input,stage:'simulation',reason:'Swap simulation did not pass. This token stays in your wallet.'};
       onProgress?.(++checked,inputs.length);
@@ -209,20 +214,20 @@ export async function buildSweepPreview(client:BaseClient,boot:Bootstrap,user:Ad
   };
   const candidates=checks.filter(c=>!c.skipped&&c.quote);
   for(const group of sweepGroups(candidates.map(c=>c.quote!)))await isolate(group.map(q=>candidates.find(c=>c.quote===q)!));
-  const accepted=checks.filter(c=>!c.skipped),quotes=accepted.flatMap(c=>c.quote?[c.quote]:[]),skipped=checks.flatMap(c=>c.skipped?[c.skipped]:[]);
+  active();const accepted=checks.filter(c=>!c.skipped),quotes=accepted.flatMap(c=>c.quote?[c.quote]:[]),skipped=checks.flatMap(c=>c.skipped?[c.skipped]:[]);
   const existingOutput=accepted.filter(c=>equal(c.input.token,output.token)).reduce((sum,c)=>sum+c.input.amount,0n);
   const expectedOutput=quotes.reduce((sum,q)=>sum+q.buyAmount,existingOutput),minimumOutput=quotes.reduce((sum,q)=>sum+q.minimum,existingOutput);
   if(expectedOutput>=2n**256n||minimumOutput>=2n**256n)throw Error('The quote total exceeds the supported amount.');
   const preview:SweepPreview={user,mode,outToken:output.token,slippageBps,inputs:accepted.map(c=>c.input),quotes,skipped,existingOutput,expectedOutput,minimumOutput,quotedAt:Date.now()};
   if(automaticRetries){const maxSlippageBps=retrySlippage(slippageBps,SWEEP_MAX_RETRIES);preview.retry={maxRetries:SWEEP_MAX_RETRIES,maxSlippageBps,minimumOutputByAttempt:Array.from({length:SWEEP_MAX_RETRIES+1},(_,attempt)=>quotes.reduce((sum,q)=>sum+quoteMinimum(q,retrySlippage(slippageBps,Math.max(attempt,q.retryLevel??0))),existingOutput))};}
-  if(mode!=='USDC'&&minimumOutput>0n){
+  active();if(mode!=='USDC'&&minimumOutput>0n){
     preview.expectedIaero=(await quoteAeroIaeroRoute(client,boot,expectedOutput)).output;
-    const bounded=await quoteAeroIaeroRoute(client,boot,minimumOutput),slippageFloor=minimum(bounded.output,slippageBps);
+    active();const bounded=await quoteAeroIaeroRoute(client,boot,minimumOutput),slippageFloor=minimum(bounded.output,slippageBps);
     preview.minimumIaero=slippageFloor>bounded.costMinimum?slippageFloor:bounded.costMinimum;
     if(preview.minimumIaero<=0n)throw Error('The route has no positive minimum iAERO output.');
-    if(preview.retry){const floors=[preview.minimumIaero];for(let attempt=1;attempt<=SWEEP_MAX_RETRIES;attempt++){const last=await quoteAeroIaeroRoute(client,boot,preview.retry.minimumOutputByAttempt[attempt]),floor=minimum(last.output,retrySlippage(slippageBps,attempt)),protectedFloor=floor>last.costMinimum?floor:last.costMinimum;floors.push(protectedFloor>floors.at(-1)!?floors.at(-1)!:protectedFloor);}preview.retry.minimumIaeroByAttempt=floors;}
+    if(preview.retry){const floors=[preview.minimumIaero];for(let attempt=1;attempt<=SWEEP_MAX_RETRIES;attempt++){active();const last=await quoteAeroIaeroRoute(client,boot,preview.retry.minimumOutputByAttempt[attempt]),floor=minimum(last.output,retrySlippage(slippageBps,attempt)),protectedFloor=floor>last.costMinimum?floor:last.costMinimum;floors.push(protectedFloor>floors.at(-1)!?floors.at(-1)!:protectedFloor);}preview.retry.minimumIaeroByAttempt=floors;}
   }
-  return preview;
+  active();return preview;
 }
 export function swapStep(quote:SweepQuote,review:SweepQuote,boot:Bootstrap,slippageBps:number){
   validateQuotePair(quote,review,boot);if(quote.native||review.native)throw Error('Native routes use the verified MetaRouter.');
@@ -295,7 +300,7 @@ export async function runSweep(context:ExecutionContext,preview:SweepPreview,hoo
     progress('Refreshing '+reviews.length+' quotes together…');
     await mapReadBatches(reviews,async review=>{
       stop();const attempt=Math.max(requestedAttempt,review.retryLevel??0),bps=retrySlippage(preview.slippageBps,attempt),bound={...review,minimum:quoteMinimum(review,bps)};
-      try{const fresh=await executableQuote(client,boot,review.input,bps,fetch,output.token,user,native,!!review.native);validateQuotePair(fresh,bound,boot);rows.push({review,fresh,attempt});}
+      try{const fresh=await executableQuote(client,boot,review.input,bps,fetch,output.token,user,native,review.native?'native':'0x');validateQuotePair(fresh,bound,boot);rows.push({review,fresh,attempt});}
       catch(error){skip(review.input,'quote',error);}
     });
     rows.sort((a,b)=>reviews.indexOf(a.review)-reviews.indexOf(b.review));if(!rows.length)return passing;
@@ -307,12 +312,12 @@ export async function runSweep(context:ExecutionContext,preview:SweepPreview,hoo
       if(!group.length)return;stop();const attempt=Math.max(...group.map(r=>r.attempt)),bps=retrySlippage(preview.slippageBps,attempt),bounds=group.map(r=>({...r.review,minimum:quoteMinimum(r.review,bps)}));
       try{progress('Simulating '+group.length+' token'+(group.length===1?'':'s')+' in one group…');await simulateSweepBatch(client,boot,user,group.map(r=>r.fresh),bps,bounds,withApprovals,checks);const groupId=++partition;for(const row of group)passing.push({...row,attempt,partition:groupId,check:checks.get(approvalKey(row.fresh.input.token,quoteSpender(boot,row.fresh)))!});}
       catch(error){
-        stop();if(!(error instanceof SweepPreflightRevert))throw Error('Grouped swap checks are unavailable. Completed steps remain complete; retry after reviewing balances.');
+        stop();if(!(error instanceof SweepPreflightRevert)&&!(error instanceof SweepBatchDataLimit))throw Error('Grouped swap checks are unavailable. Completed steps remain complete; retry after reviewing balances.');
         if(group.length>1){const middle=Math.ceil(group.length/2);await checkGroup(group.slice(0,middle));await checkGroup(group.slice(middle));return;}
-        const row=group[0];let failure:unknown=error;
+        const row=group[0];if(error instanceof SweepBatchDataLimit){skip(row.review.input,'batch',error);return;}let failure:unknown=error;
         for(let level=row.attempt+1;level<=maxAttempt;level++){
           retrying('swap',level);const retryBps=retrySlippage(preview.slippageBps,level),bound={...row.review,minimum:quoteMinimum(row.review,retryBps)};
-          try{const fresh=await executableQuote(client,boot,row.review.input,retryBps,fetch,output.token,user,native,!!row.review.native);validateQuotePair(fresh,bound,boot);const retryChecks=await readApprovalChecks(client,boot,user,approvalRequests(boot,[fresh]));await simulateSweepBatch(client,boot,user,[fresh],retryBps,[bound],withApprovals,retryChecks);passing.push({review:row.review,fresh,attempt:level,partition:++partition,check:retryChecks.get(approvalKey(fresh.input.token,quoteSpender(boot,fresh)))!});failure=undefined;break;}
+          try{const fresh=await executableQuote(client,boot,row.review.input,retryBps,fetch,output.token,user,native,row.review.native?'native':'0x');validateQuotePair(fresh,bound,boot);const retryChecks=await readApprovalChecks(client,boot,user,approvalRequests(boot,[fresh]));await simulateSweepBatch(client,boot,user,[fresh],retryBps,[bound],withApprovals,retryChecks);passing.push({review:row.review,fresh,attempt:level,partition:++partition,check:retryChecks.get(approvalKey(fresh.input.token,quoteSpender(boot,fresh)))!});failure=undefined;break;}
           catch(error){failure=error;if(!(error instanceof SweepPreflightRevert))break;}
         }
         if(failure)skip(row.review.input,'simulation',failure);
@@ -322,7 +327,7 @@ export async function runSweep(context:ExecutionContext,preview:SweepPreview,hoo
   };
   const executeBatch=async(reviews:SweepQuote[],requestedAttempt=0,previousGas=0n):Promise<void>=>{
     stop();const passing=await refreshPassing(reviews,false,requestedAttempt);if(!passing.length)return;
-    const partitions=[...new Set(passing.map(p=>p.partition))];if(partitions.length>1){for(const part of partitions)await executeBatch(passing.filter(p=>p.partition===part).map(p=>p.review),requestedAttempt,previousGas);return;}
+    const partitions=[...new Set(passing.map(p=>p.partition))];if(partitions.length>1){for(const part of partitions)await executeBatch(passing.filter(p=>p.partition===part).map(p=>p.review),Math.max(requestedAttempt,...passing.filter(p=>p.partition===part).map(p=>p.attempt)),previousGas);return;}
     const attempt=Math.max(requestedAttempt,...passing.map(p=>p.attempt)),bps=retrySlippage(preview.slippageBps,attempt);
     highestRetry=Math.max(highestRetry,attempt);
     const current=passing.map(q=>q.fresh),original=passing.map(q=>q.review),reviewed=original.map(q=>({...q,minimum:quoteMinimum(q,bps)})),floor=reviewed.reduce((sum,q)=>sum+q.minimum,0n);

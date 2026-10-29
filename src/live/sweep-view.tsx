@@ -26,7 +26,7 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
   const [tokens,setTokens]=useState<SweepToken[]>([]),[hidden,setHidden]=useState<HiddenSweepToken[]>([]),[selected,setSelected]=useState<Set<string>>(new Set()),[amounts,setAmounts]=useState<Record<string,string>>({}),[notices,setNotices]=useState<string[]>([]);
   const [extra,setExtra]=useState(l.customToken),[slippage,setSlippage]=useState(100),[preview,setPreview]=useState<SweepPreview>(),[result,setResult]=useState<SweepResult>(),[error,setError]=useState(''),[message,setMessage]=useState('');
   const [automaticRetries,setAutomaticRetries]=useState(true),[retryEvents,setRetryEvents]=useState<SweepRetryEvent[]>([]);
-  const lock=useRef(false),stop=useRef(false),alive=useRef(true),scanTicket=useRef(0),claimed=useRef<Map<string,bigint>|undefined>(undefined),claimNotices=useRef<string[]>([]);
+  const lock=useRef(false),stop=useRef(false),alive=useRef(true),scanTicket=useRef(0),claimed=useRef<Map<string,bigint>|undefined>(undefined),claimNotices=useRef<string[]>([]),unreconciled=useRef(new Set<string>());
   const [stopping,setStopping]=useState(false),[walletValues,setWalletValues]=useState<RewardValuation>(),[pricing,setPricing]=useState(false);
   const [claimSources,setClaimSources]=useState({legacy:intent.source!=='liq',liq:intent.source!=='legacy'&&!!boot.liqStakingReady}),[liqClaims,setLiqClaims]=useState<{reading:boolean;rows:LiqReward[];blocked:number;error?:string}>({reading:intent.claimFirst&&intent.source!=='legacy',rows:[],blocked:0}),[confirmed,setConfirmed]=useState<Hash[]>([]),[stakeReview,setStakeReview]=useState(false);
   const claimsDone=useRef(new Set<Hash>()),identity=useRef(l.address?.toLowerCase());
@@ -52,20 +52,21 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
     return()=>controller.abort();
   },[tokens,walletValueKey,boot.registry.legacy.USDC]);
   const busy=phase==='claiming'||phase==='running',reading=phase==='scanning'||phase==='quoting';
-  const walletBlocked=l.chainId!==8453||!l.address||!!l.pending;
+  const walletBlocked=l.chainId!==8453||!l.address||!!l.pending||!!l.error;
   useEffect(()=>{alive.current=true;return()=>{alive.current=false;scanTicket.current++;stop.current=true;};},[]);
   const scan=async()=>{
     const ticket=++scanTicket.current;setError('');setPhase('scanning');
     try{
       if(!l.address)throw Error('Connect your wallet first.');
       if(extra&&!isAddress(extra))throw Error('Enter a valid additional token address.');
+      if(claimed.current)claimed.current=new Map([...claimed.current].filter(([token,amount])=>amount>0n&&!unreconciled.current.has(token)));
       const data=await scanSweepWallet(client,boot,l.address,[...(extra?[extra as Address]:[]),...[...(claimed.current?.keys()??[])].filter(a=>isAddress(a)) as Address[]]);
       if(!alive.current||ticket!==scanTicket.current)return;
       setTokens(data.tokens);setHidden(data.hidden);setNotices([...claimNotices.current,...data.errors]);
       const next=new Set<string>(),values:Record<string,string>={};
       for(const token of data.tokens){
         const key=token.token.toLowerCase(),usdc=key===boot.registry.legacy.USDC.toLowerCase(),received=claimed.current?.get(key)??0n,amount=claimed.current?(received<token.balance?received:token.balance):token.balance;
-        values[key]=units(amount,token.decimals);
+        values[key]=units(amount>0n?amount:token.balance,token.decimals);
         if(amount>0n&&(!usdc||mode!=='USDC'))next.add(key);
       }
       setAmounts(values);setSelected(next);setMessage(claimed.current?'Only amounts received by this flow are selected. Other wallet balances stay unselected.':`Read ${data.tokenCount} token addresses. Only positive wallet balances are shown.`);setPhase('select');
@@ -74,21 +75,22 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
   useEffect(()=>{if(!intent.claimFirst)void scan();},[]);
   const claim=async()=>{
     if(lock.current)return;lock.current=true;setError('');setPhase('claiming');claimed.current??=new Map();
-    const sources=[...(claimSources.legacy&&l.rewards.length?[{address:boot.registry.legacy.epochDistributor,rows:l.rewards,action:claimAction(l.rewards,true)}]:[]),...(claimSources.liq&&liqClaims.rows.length?[{address:boot.registry.liqStaking!.distributor,rows:liqClaims.rows,action:{kind:'liqClaimMany' as const,amount:0n,title:'Claim LIQ rewards before conversion',description:'Claim the simulated LIQ rewards, then review only the tokens actually received for conversion.',source:'LIQ staking',target:'Your wallet',approval:false,rewardLegs:liqClaims.rows.map(r=>({...r,epoch:0n}))}}]:[])];
     let confirmedAny=false;
     try{
+    const sources=[...(claimSources.legacy&&l.rewards.length?[{address:boot.registry.legacy.epochDistributor,rows:l.rewards,action:claimAction(l.rewards,true)}]:[]),...(claimSources.liq&&liqClaims.rows.length?[{address:boot.registry.liqStaking!.distributor,rows:liqClaims.rows,action:{kind:'liqClaimMany' as const,amount:0n,title:'Claim LIQ rewards before conversion',description:'Claim the simulated LIQ rewards, then review only the tokens actually received for conversion.',source:'LIQ staking',target:'Your wallet',approval:false,rewardLegs:liqClaims.rows.map(r=>({...r,epoch:0n}))}}]:[])];
       for(const source of sources){
         let hashes:Hash[]=[],failure:unknown;
         try{const execution=await s.execute(source.action);hashes=execution?.hashes??[];}catch(error){hashes=(error as any)?.confirmedHashes??[];failure=error;}
         if(!alive.current||stop.current)return;
         if(hashes.length){confirmedAny=true;setConfirmed(old=>[...new Set([...old,...hashes])]);
           const unprocessed=hashes.filter(hash=>!claimsDone.current.has(hash));
-          try{const amounts=await claimedTokenAmounts(client,l.address!,source.address,source.rows.map(r=>r.token),unprocessed);for(const [token,amount] of amounts)claimed.current.set(token,(claimed.current.get(token)??0n)+amount);for(const hash of unprocessed)claimsDone.current.add(hash);}
-          catch{claimNotices.current.push('Claims confirmed, but part of the received amount could not be reconciled. Those tokens remain unselected; choose their amounts explicitly if needed.');}
+          try{const amounts=await claimedTokenAmounts(client,l.address!,source.address,source.rows.map(r=>r.token),unprocessed);for(const [token,amount] of amounts)if(!unreconciled.current.has(token))claimed.current.set(token,(claimed.current.get(token)??0n)+amount);for(const hash of unprocessed)claimsDone.current.add(hash);}
+          catch{for(const row of source.rows){const token=row.token.toLowerCase();unreconciled.current.add(token);claimed.current.delete(token);}claimNotices.current.push('Claims confirmed, but part of the received amount could not be reconciled. Those tokens remain unselected; choose their amounts explicitly if needed.');}
         }
         if(failure)throw failure;
       }
       if(!sources.length)throw Error('No rewards selected. Use tokens already in your wallet instead.');
+      claimed.current=new Map([...claimed.current].filter(([,amount])=>amount>0n));
       const usdc=claimed.current.get(boot.registry.legacy.USDC.toLowerCase())??0n;
       if(mode==='USDC'&&claimed.current.size===1&&usdc>0n){setResult({hashes:[...claimsDone.current],outToken:boot.registry.legacy.USDC,outputAmount:usdc,iaero:0n,staked:0n,swapped:0,batches:0,skipped:[]});setPhase('done');return;}
       await scan();
@@ -99,14 +101,14 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
     try{claimed.current=new Map([[boot.registry.aero.token.toLowerCase(),result.outputAmount]]);setPreview(undefined);setResult(undefined);await scan();}finally{lock.current=false;}
   };
   const quote=async()=>{
-    if(lock.current)return;lock.current=true;setError('');setPreview(undefined);setMessage('Checking selected tokens…');setPhase('quoting');
+    if(lock.current)return;lock.current=true;stop.current=false;setError('');setPreview(undefined);setMessage('Checking selected tokens…');setPhase('quoting');
     try{
       if(!l.address)throw Error('Connect your wallet first.');
       const inputs=orderedTokens.filter(t=>selected.has(t.token.toLowerCase())).map(t=>{
         const text=amounts[t.token.toLowerCase()]??'',amount=t.decimals===null?(/^\d+$/.test(text)?BigInt(text):0n):parseAmount(text,t.decimals);
         if(amount<=0n||amount>t.balance)throw Error('Choose an amount within your '+t.symbol+' wallet balance.');return {token:t.token,symbol:t.symbol,decimals:t.decimals,amount};
       });
-      const data=await buildSweepPreview(client,boot,l.address,inputs,mode,slippage,fetch,(checked,total)=>{if(alive.current)setMessage('Checked '+checked+' of '+total+' tokens…');},automaticRetries);if(!alive.current)return;setPreview(data);setPhase('review');
+      const data=await buildSweepPreview(client,boot,l.address,inputs,mode,slippage,fetch,(checked,total)=>{if(alive.current)setMessage('Checked '+checked+' of '+total+' tokens…');},automaticRetries,()=>!alive.current||stop.current);if(!alive.current)return;setPreview(data);setPhase('review');
     }catch(e){if(alive.current){setError(publicError(e));setPhase('select');}}finally{lock.current=false;}
   };
   const execute=async()=>{
@@ -140,6 +142,10 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
   if(stakeReview&&result)return <LiveLegacyStakeDialog maximum={result.iaero} onClose={()=>setStakeReview(false)}/>;
   return <Dialog title={phase==='done'?'Your rewards, put to work.':phase==='claim'||phase==='claiming'?'Claim, then make your next move.':'A little less dust. More possibility.'} subtitle={phase==='done'?(result?.hashes.length?'Confirmed steps on Base. Your actual outputs are below.':'No transactions were sent. Your tokens remain in your wallet.'):'Convert selected wallet tokens into USDC or iAERO, with every amount reviewed.'} onClose={onClose} busy={busy} className="sweep-dialog" stepKey={step}>
     <div className="sweep-context"><Pill tone="blue">Base mainnet</Pill><span>{short(l.address??'')} · Your wallet receives the output</span></div>
+    {!busy&&l.chainId!==8453&&<Info tone="blue">Switch your wallet to Base before claiming or converting.<Button variant="secondary" onClick={()=>void s.liveControls!.switchToBase()}>Switch to Base</Button></Info>}
+    {!busy&&l.pending&&<Info tone="amber">A wallet request is still pending. Close this dialog to review the pending-request notice before starting another transaction.</Info>}
+    {!busy&&l.error&&<Info tone="amber">Base reads need a refresh before continuing. Your completed steps remain in your wallet.<Button variant="secondary" onClick={()=>void s.liveControls!.refresh()}>Retry Base reads</Button></Info>}
+
     {(phase==='claim'||phase==='claiming')?<>
       <p className="dialog-body-copy">Claim rewards, then convert the tokens actually received. You will review exact amounts and quotes before any swap. Principal stays in place.</p>
       {intent.source!=='liq'&&<section className="sweep-claim-source"><label><input type="checkbox" checked={claimSources.legacy} disabled={busy} onChange={e=>setClaimSources(old=>({...old,legacy:e.target.checked}))}/><strong>Previous iAERO staking</strong><span>{groupRewards(l.rewards).length} reward tokens · {l.rewards.length} token/week entries · {l.historyMode==='all'?'all loaded weeks':'currently loaded weeks'}</span></label>{claimSources.legacy&&<RewardSummary rows={l.rewards}/>}</section>}
