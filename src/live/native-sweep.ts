@@ -64,7 +64,8 @@ export function nativeSweepSession(client:BaseClient,boot:Bootstrap){
    const forward=same(pool.token0,path.tokens[i]);if(pool.kind==='V2')return value*(forward?pool.reserve1!:pool.reserve0!)/(forward?pool.reserve0!:pool.reserve1!);
    const ratio=pool.sqrt!**2n;return forward?value*ratio/(2n**192n):value*(2n**192n)/ratio;
   },amount);
-  const candidates=paths.filter(path=>positive(mid(path))).sort((a,b)=>{const aa=mid(a),bb=mid(b);return aa===bb?0:aa>bb?-1:1;}).slice(0,64);
+  const viable=paths.filter(path=>positive(mid(path)));
+  const candidates=[...viable.filter(path=>path.pools.length===1),...viable.filter(path=>path.pools.length>1).sort((a,b)=>{const aa=mid(a),bb=mid(b);return aa===bb?0:aa>bb?-1:1;}).slice(0,64)];
   if(!candidates.length)throw Error('No verified native Aero pool route is available for this token.');
   const results=await client.multicall({multicallAddress:boot.registry.sweep.multicall3,allowFailure:true,batchSize:8192,blockNumber:p.block.number,contracts:candidates.map(path=>({address:boot.registry.sweep.metaquoter,abi:METAQUOTER_ABI,functionName:'quoteExactInput',args:[path.pools.map(pool=>pool.address),tokenIn,amount]} as const))});
   if(results.length!==candidates.length)throw Error('The grouped native route quote is incomplete.');
