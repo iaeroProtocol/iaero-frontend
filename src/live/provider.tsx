@@ -15,6 +15,7 @@ import {runSweep,type SweepPreview,type SweepHooks} from './sweep';
 import {liveValueKey,priceRewards} from './reward-value';
 import {mobileWalletProvider,disconnectMobileWallet} from './walletconnect';
 import {receiptReadClient} from './receipt-read-client';
+import {selectApprovedSessionChain} from './walletconnect-session';
 
 type EventProvider=EIP1193Provider&{on?:(event:string,listener:(...args:any[])=>void)=>void;removeListener?:(event:string,listener:(...args:any[])=>void)=>void;providers?:EventProvider[];isMetaMask?:boolean;isRabby?:boolean};
 const historyKey=(address:Address)=>'iaero.live.activity.8453.'+address.toLowerCase();
@@ -157,13 +158,13 @@ export function LiveProvider({children}:{children:ReactNode}){
     if(switching.current)return;
     const p=current.current.provider;if(!p){setToast('Connect your wallet first.');return;}if(sending.current){setToast('Finish the current wallet request before switching networks.');return;}
     const attempt={provider:p},walletName=current.current.live.walletName;switching.current=attempt;update({connecting:true,error:undefined});
-    try{await p.request({method:'wallet_switchEthereumChain',params:[{chainId:'0x2105'}]});
+    try{if(!await selectApprovedSessionChain(p,8453,current.current.live.address))await p.request({method:'wallet_switchEthereumChain',params:[{chainId:'0x2105'}]});
       const identity=await switchedWalletIdentity(p,()=>switching.current===attempt,8453);
       if(switching.current!==attempt)return;
       if(!identity.address){clearAccount({walletName});setProvider(undefined);throw Error('The wallet session has no authorized account. Reconnect WalletConnect and approve an account on Base.');}
       clearAccount({...identity,walletName,loading:true,connecting:true});setActivities(history(identity.address));
       if(identity.chainId!==8453)throw Error('The wallet has not switched to Base yet. Choose Base in your wallet, then try again.');
-    }catch(error){if(switching.current===attempt){update({error:publicError(error)});setToast('The network switch did not complete. Choose Base in your wallet, then retry.');}}
+    }catch(error){if(switching.current===attempt){update({error:publicError(error)});setToast(publicError(error));}}
     finally{if(switching.current===attempt){switching.current=undefined;update({connecting:false});}}
   };
   const guarded=async<T,>(run:(context:ExecutionContext)=>Promise<T>)=>{

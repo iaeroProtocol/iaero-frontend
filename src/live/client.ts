@@ -88,7 +88,11 @@ export async function readAccount(client:BaseClient,boot:Bootstrap,user:Address,
     else selected=BigInt(Math.floor(seconds/604800)*604800);
   }
   const epochs=selected===undefined?[]:Array.from({length:4},(_,i)=>selected!-BigInt(i)*604800n).filter(e=>e>=0n);
-  const oldAutoEpochs=selected===undefined?[]:Array.from({length:26},(_,i)=>selected!-BigInt(i)*604800n).filter(e=>e>=0n);
+  // [VERIFIED: iAEROAutoUSDCVault.sol currentEpoch/previewUSDCMany] AutoVault
+  // payouts have their own weekly ledger. A historical staking filter must
+  // not hide current USDC or depend on the staking contract's epoch getter.
+  const autoEpoch=block.timestamp/604800n*604800n;
+  const oldAutoEpochs=Array.from({length:26},(_,i)=>autoEpoch-BigInt(i)*604800n).filter(e=>e>=0n);
   const autoRewards=oldAutoEpochs.length?get('Old AutoVault rewards',async()=>{const value=await read(boot.registry.legacy.autoVault,OLD_AUTO_ABI,'previewUSDCMany',[user,oldAutoEpochs]);return BigInt(value[1]);}):undefined;
   const tokens=[...boot.registry.knownLegacyRewardTokens.map(t=>t.address),...(boot.rewardTokenAddresses??[])];
   if(boot.rewardRegistryError)errors.push(boot.rewardRegistryError);
@@ -121,7 +125,7 @@ export async function readAccount(client:BaseClient,boot:Bootstrap,user:Address,
   });
   const oldAutoEarned=await autoRewards;
   if(rewardReadErrors)errors.push(`${rewardReadErrors} selected reward entries could not be read; they are not treated as zero.`);
-  return {wallet,known,errors,ethBalance,legacyReceipts:legacyReceipts===undefined?undefined:BigInt(legacyReceipts),legacyPaused:legacyPaused===undefined?undefined:Boolean(legacyPaused),oldAutoShares:oldAutoShares===undefined?undefined:BigInt(oldAutoShares),oldAutoEarned,oldAutoEpochs,rewards:rewards.sort((a,b)=>a.epoch===b.epoch?a.token.localeCompare(b.token):a.epoch>b.epoch?-1:1),rewardTokenCount:unique.length,rewardReadErrors,rewardSelectionError,readAt:Number(block.timestamp)};
+  return {wallet,known,errors,ethBalance,legacyReceipts:legacyReceipts===undefined?undefined:BigInt(legacyReceipts),legacyPaused:legacyPaused===undefined?undefined:Boolean(legacyPaused),oldAutoShares:oldAutoShares===undefined?undefined:BigInt(oldAutoShares),oldAutoEarned,oldAutoEpochs,rewardEpochs:epochs,rewards:rewards.sort((a,b)=>a.epoch===b.epoch?a.token.localeCompare(b.token):a.epoch>b.epoch?-1:1),rewardTokenCount:unique.length,rewardReadErrors,rewardSelectionError,readAt:Number(block.timestamp)};
 }
 
 export async function walletIdentity(provider:EIP1193Provider):Promise<{address?:Address;chainId:number}>{

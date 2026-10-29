@@ -15,7 +15,7 @@ export type Bootstrap={deposit?:import('./deposit-contract').DepositConnection;r
 export type LiveState={
   boot?:Bootstrap;address?:Address;chainId?:number;walletName?:string;wallets:WalletChoice[];connecting:boolean;loading:boolean;
   error?:string;known:Partial<Record<WalletField,boolean>>;errors:string[];ethBalance?:bigint;legacyReceipts?:bigint;legacyPaused?:boolean;
-  oldAutoShares?:bigint;oldAutoEarned?:bigint;oldAutoEpochs:bigint[];rewards:LegacyReward[];rewardReadErrors:number;rewardTokenCount?:number;
+  oldAutoShares?:bigint;oldAutoEarned?:bigint;oldAutoEpochs:bigint[];rewardEpochs?:bigint[];rewards:LegacyReward[];rewardReadErrors:number;rewardTokenCount?:number;
   selectedDate:string;customToken:string;rewardSelectionError?:string;pending:PendingTransaction|null;lastHash?:Hash;readAt?:number;progress?:string;confirmedHashes?:Hash[];
   liqPosition?:import('./liq').LiqPosition;newPosition?:import('./new-stack').NewPosition;rewardValuation?:RewardValuation;historyMode?:'recent'|'all';legacyDiscovery?:import('./legacy-history').LegacyDiscovery;
 };

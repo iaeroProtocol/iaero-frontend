@@ -119,6 +119,20 @@ describe('actual routes and write guard',()=>{
   });
 });
 describe('real balance failure boundaries',()=>{
+  it('keeps AutoVault USDC on its latest window when an older staking date is selected',async()=>{
+    const env=setup(),original=vi.mocked(env.client.readContract).getMockImplementation()!;
+    vi.mocked(env.client.readContract).mockImplementation(async(r:any)=>r.functionName==='previewUSDCMany'?[r.args[1].map((e:bigint)=>e===epoch?100n:0n),r.args[1].includes(epoch)?100n:0n]:original(r));
+    const data=await readAccount(env.client,boot,user,'2025-10-23');expect(data.oldAutoEarned).toBe(100n);expect(data.oldAutoEpochs[0]).toBe(epoch);expect(data.rewardEpochs?.[0]).toBe(1761177600n);expect(data.rewards.every(r=>r.epoch<=1761177600n)).toBe(true);
+  });
+  it.each(['invalid-date','2099-01-01'])('does not hide AutoVault payouts behind an invalid staking date (%s)',async date=>{
+    const env=setup(),data=await readAccount(env.client,boot,user,date);expect(data.rewardSelectionError).toBeTruthy();expect(data.rewards).toEqual([]);expect(data.oldAutoEarned).toBe(100n);expect(data.oldAutoEpochs[0]).toBe(epoch);
+  });
+  it('reads AutoVault rewards even when the independent staking epoch getter is unavailable',async()=>{
+    const env=setup(),original=vi.mocked(env.client.readContract).getMockImplementation()!;vi.mocked(env.client.readContract).mockImplementation(async(r:any)=>{if(r.functionName==='currentEpoch')throw Error('Staking epoch unavailable');return original(r);});const data=await readAccount(env.client,boot,user);expect(data.oldAutoEarned).toBe(100n);expect(data.oldAutoEpochs[0]).toBe(epoch);expect(data.errors).toContain('Legacy current epoch could not be read.');
+  });
+  it.each([[epoch+604799n,epoch],[epoch+604800n,epoch+604800n]])('uses the exact UTC AutoVault week at timestamp %s',async(timestamp,week)=>{
+    const env=setup();vi.mocked(env.client.getBlock).mockResolvedValue({number:123n,timestamp} as any);const data=await readAccount(env.client,boot,user,'2025-10-23');expect(data.oldAutoEpochs).toHaveLength(26);expect(data.oldAutoEpochs[0]).toBe(week);expect(new Set(data.oldAutoEpochs).size).toBe(26);
+  });
   it.each([['invalid-date',''],['','invalid-token']])('keeps principal reads when the reward selector is invalid (%s)',async(date,token)=>{
     const env=setup(),data=await readAccount(env.client,boot,user,date,token);expect(data.known.legacyStake).toBe(true);expect(data.wallet.legacyStake).toBe(20n*UNIT);expect(data.oldAutoShares).toBe(20n*UNIT);expect(data.rewardSelectionError).toBeTruthy();
   });
