@@ -1,0 +1,27 @@
+// Exercise the exact compiled Worker and a fresh local D1 against the approved
+// read-only bridge. The separate deposit-fork-check tests actual executions.
+// This script loads no provider credential or signing key.
+import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+import {readFile,mkdtemp,mkdir,writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join,resolve} from 'node:path';
+import {Miniflare,Log,LogLevel} from 'miniflare';
+import {encodeFunctionData} from 'viem';
+const context=JSON.parse(await readFile(process.env.DEPOSIT_FORK_CONTEXT,'utf8')),out=process.env.DEPOSIT_FORK_OUTPUT??'/private/tmp/iaero-deposit-evidence-20261029',manifest=JSON.parse(await readFile('config/aero-deposit.json','utf8')),abi=JSON.parse(await readFile('config/aero-deposit.abi.json','utf8'));
+const bridge=new URL(context.readBridgeUrl);assert.equal(bridge.hostname,'127.0.0.1');assert.equal(bridge.protocol,'http:');
+const sourceCommit=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),sourceDirty=!!execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim();
+const methods=new Set(['eth_chainId','eth_blockNumber','eth_getBlockByNumber','eth_getBlockByHash','eth_getCode','eth_getBalance','eth_call','eth_getStorageAt','eth_estimateGas']),readRequests=[];
+const mf=new Miniflare({modules:true,scriptPath:resolve('.release/pages/_worker.js'),compatibilityDate:'2026-07-30',compatibilityFlags:['nodejs_compat','global_fetch_strictly_public'],host:'127.0.0.1',port:0,log:new Log(LogLevel.NONE),d1Databases:{YIELD_DB:'deposit-read-check-only'},d1Persist:await mkdtemp(join(tmpdir(),'iaero-deposit-worker-')),bindings:{BASE_READ_RPC_URLS:'["https://base-mainnet.g.alchemy.com/credential-free-test-placeholder"]',APP_ALLOWED_ORIGINS:'["https://app.iaero.finance"]'},outboundService:async request=>{
+ assert.equal(new URL(request.url).hostname,'base-mainnet.g.alchemy.com');const body=await request.text(),calls=JSON.parse(body);for(const c of Array.isArray(calls)?calls:[calls]){assert(methods.has(c.method),'Only read methods may leave the Worker');readRequests.push(c.method);}const response=await fetch(bridge,{method:'POST',headers:{'content-type':'application/json'},body,signal:AbortSignal.timeout(45000)});return new Response(await response.arrayBuffer(),{status:response.status,headers:{'content-type':'application/json'}});
+}});
+const checks=[],origin='https://app.iaero.finance',record=name=>checks.push({name,pass:true});await mkdir(out,{recursive:true});
+try{
+ const db=await mf.getD1Database('YIELD_DB');for(const migration of ['0001_yield.sql','0002_claim_assessments.sql','0003_bootstrap_cache.sql'])for(const statement of (await readFile('worker/migrations/'+migration,'utf8')).split(/;\s*\n/).filter(s=>s.trim()))await db.exec(statement+';');
+ const response=await mf.dispatchFetch(origin+'/api/contracts');assert.equal(response.status,200);const boot=await response.json();assert.equal(boot.deposit.verified,true);assert.equal(boot.deposit.address.toLowerCase(),manifest.address.toLowerCase());assert.equal(boot.deposit.open,false);assert(boot.deposit.issues.some(i=>Number(i.reason)===2));assert.equal(boot.newStackReady,false);for(const key of ['legacyReady','oldAutoReady','liqStakingReady','sweepReady','marketRouteReady','aeroCompoundReady'])assert.equal(boot[key],true,key);record('compiled Worker connects the real deployed deposit while preserving every existing route');
+ assert.equal(boot.metrics.protocolBacking.complete,true);assert.equal(boot.metrics.protocolBacking.scope,'primary-and-vault');assert(BigInt(boot.metrics.protocolBacking.totalAero)>=BigInt(boot.metrics.backingAero));record('compiled TVL and backing response includes the verified vault census');
+ const count=readRequests.length,cached=await mf.dispatchFetch(origin+'/api/contracts');assert.equal(cached.status,200);assert.deepEqual(await cached.json(),boot);assert.equal(readRequests.length,count);record('shared bootstrap serialization and cache retain the verified proof with no duplicate RPC');
+ const call=await mf.dispatchFetch(origin+'/api/base',{method:'POST',body:JSON.stringify({jsonrpc:'2.0',id:2,method:'eth_call',params:[{to:manifest.address,data:encodeFunctionData({abi,functionName:'checkAeroDeposit',args:['0x0000000000000000000000000000000000000000',10n**18n]})},'latest']})});assert.equal(call.status,200);assert.match((await call.json()).result,/^0x[0-9a-f]+$/);record('the public read proxy supports actual deposit refusal reads');
+ const blocked=await mf.dispatchFetch(origin+'/api/base',{method:'POST',body:JSON.stringify({jsonrpc:'2.0',id:3,method:'eth_sendRawTransaction',params:['0x']})});assert.equal(blocked.status,400);assert(readRequests.every(m=>methods.has(m)));record('transaction broadcast remains blocked at the production read proxy');
+ const result={status:'PASS',sourceCommit,sourceDirty,finalizedBlock:boot.snapshot,checks,readRequests:readRequests.length,actualMainnetTransactions:0,independentAcceptance:false,scope:'Exact compiled production Worker with normal deadlines and finalized tags; local D1 and actual approved-provider reads. No clock, code, storage or role overrides. Execution fork evidence is separate.'};await writeFile(out+'/COMPILED_WORKER_READS.json',JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify({status:'PASS',checks:checks.length,readRequests:readRequests.length}));
+}finally{await mf.dispose();}
