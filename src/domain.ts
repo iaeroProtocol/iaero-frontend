@@ -7,7 +7,7 @@ export const SAMPLE_AERO_PRICE = 644_000n;
 export const SAMPLE_APR_BPS = 2264n;
 export const DEMO_STORAGE_KEY = 'iaero.saero.design-preview.v1';
 
-export type Page = 'overview' | 'earn' | 'get' | 'portfolio';
+export type Page = 'overview' | 'earn' | 'deposit' | 'get' | 'portfolio';
 export type Activity = {id:string; title:string; token:string; amount:string; direction:'in'|'out'; time:number;hash?:`0x${string}`};
 export type DemoWallet = {
   aero:bigint; iaero:bigint; staked:bigint; autoStaked:bigint; usdc:bigint;

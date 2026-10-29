@@ -346,3 +346,6 @@
 .sweep-claim-source .reward-summary{margin-top:12px;}
 .sweep-dialog .transaction-success~.full-width+.full-width{margin-top:12px;}
 @media(max-width:480px){.sweep-claim-source{padding:12px;}.sweep-claim-source>label>strong{font-size:1rem;}}
+
+/* Five primary routes retain clear phone tap targets before lazy screens load. */
+@media(max-width:640px){.mobile-nav{grid-template-columns:repeat(5,minmax(0,1fr))}.mobile-nav a{min-width:0;padding-inline:4px}.mobile-nav a span{font-size:.75rem;letter-spacing:-.02em}}

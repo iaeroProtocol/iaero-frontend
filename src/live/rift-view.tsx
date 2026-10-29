@@ -2,7 +2,7 @@ import {useRef,useState} from 'react';
 import {usePreview} from '../store';
 import {Button,Info,SegmentedTabs} from '../components';
 import type {OpenPanel} from '../screens';
-import {NewMintPanel} from './new-stack-view';
+import {DepositPanel} from './deposit-view';
 import {RiftWalletProvider} from './rift-wallet';
 import GetIaeroSection from '../restored/components/protocol/GetIaeroSection';
 import RiftErrorBoundary from '../restored/components/rift/RiftErrorBoundary';
@@ -14,6 +14,6 @@ export function RiftOrderBackup(){const [notice,setNotice]=useState(''),[busy,se
 export default function NativeGet({openPanel}:{openPanel:OpenPanel}){
  const s=usePreview(),[route,setRoute]=useState<'rift'|'mint'|'nft'>('rift');
  return <div className="page-enter"><div className="page-title"><div><p className="eyebrow">YOUR ROUTE TO LIQUIDITY</p><h1>More ways to get iAERO.</h1><p>Bring assets from another chain. Arrive with liquid iAERO on Base.</p></div></div><SegmentedTabs className="route-tabs" id="live-get-route" label="Get iAERO route" value={route} options={[{value:'rift',label:'Buy with Rift'},{value:'mint',label:'Deposit AERO'},{value:'nft',label:'Deposit NFT'}]} onChange={setRoute}/><section className="native-get-panel" role="tabpanel" id="live-get-route-panel" aria-labelledby={'live-get-route-'+route}>
-  {route==='rift'?<><div className="rift-native"><RiftErrorBoundary><RiftWalletProvider><GetIaeroSection active showToast={m=>s.notify(m)} onGoToStake={()=>s.go('earn')}/></RiftWalletProvider></RiftErrorBoundary></div><RiftOrderBackup/></>:<NewMintPanel route={route}/>}
+  {route==='rift'?<><div className="rift-native"><RiftErrorBoundary><RiftWalletProvider><GetIaeroSection active showToast={m=>s.notify(m)} onGoToStake={()=>s.go('earn')}/></RiftWalletProvider></RiftErrorBoundary></div><RiftOrderBackup/></>:<DepositPanel initialMode={route==='mint'?'aero':'stake'} showRoutes={false}/>}
  </section></div>;
 }

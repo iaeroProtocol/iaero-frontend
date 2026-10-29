@@ -12,7 +12,7 @@ export type Store={
   reset:()=>void;theme:'light'|'dark';toggleTheme:()=>void;
 };
 export const Context=createContext<Store|null>(null);
-const allowedPages:Page[]=['overview','earn','get','portfolio'];
+const allowedPages:Page[]=['overview','earn','deposit','get','portfolio'];
 export const pageFromHash=():Page=>{const p=window.location.hash.slice(1) as Page;return allowedPages.includes(p)?p:'overview';};
 
 export function PreviewProvider({children}:{children:ReactNode}){

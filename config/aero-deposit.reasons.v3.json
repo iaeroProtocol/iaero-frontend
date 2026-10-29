@@ -1,0 +1,1297 @@
+{
+  "schema": "iaero.aero-stake-deposit.reasons",
+  "reasonsVersion": 3,
+  "tableRevision": 5,
+  "contract": "AeroStakeDeposit",
+  "updated": "2026-10-27",
+  "howToUse": [
+    "Call checkStake(tokenId, user) or checkAeroDeposit(user, amount). Each returned Issue has a reason code and fields; the first one is what the deposit would revert with.",
+    "Look the code up in `reasons` (codes are stable; this table must have the same reasonsVersion as the contract's REASONS_VERSION). `tableRevision` counts wording corrections within a version; codes and fields do not change between revisions.",
+    "Cache this file keyed on `tableRevision` (or on the file's hash), not on `REASONS_VERSION` alone: wording corrections raise `tableRevision` while `REASONS_VERSION` stays the same, so a cache keyed only on `REASONS_VERSION` would keep showing old text.",
+    "If the entry has `variants`, use the first one whose `when` matches the Issue (every key in `when` equal to the Issue's field: `chainStatus` or `chainId`); its `instruction`, `steps`, `fee`, `wait` and `technical` replace the entry's.",
+    "Fill the placeholders in `instruction`, `steps`, `wait` and `technical` from the Issue (see `placeholders`) and show `instruction`, then `steps`.",
+    "Show every entry in `notices` where it says, whether or not there is an issue.",
+    "A reverted deposit identifies the refusal, not always how to fix it: match the 4-byte selector against `reasons[].selector` or `otherErrors[].selector` and decode only the parameters the error actually encodes (`errorParams`). The errors do not carry `chainStatus` (codes 16, 18 and 19) or the Base `readyAt` (code 18): never infer them from the revert.",
+    "After a stake-deposit revert, the front end MUST call checkStake(tokenId, user) again and choose the entry and its variant from that fresh result. If that read fails, show a generic refusal (the decoded code's name only, with no variant, no chain status and no wait time).",
+    "After a `LiqBelowMinimum` revert (code 22), call previewDeposit(amount) again and ask for a new minLiqToUser from that fresh preview.",
+    "Before calling, check the amount against the deposit bounds: at least 1 AERO, and at most 10,000,000 AERO for depositAero. An amount far beyond the maximum (near 2^256) makes checkAeroDeposit and depositAero revert with an arithmetic panic instead of AmountTooLarge."
+  ],
+  "placeholders": {
+    "{tokenId}": "Issue.tokenId, decimal",
+    "{chainId}": "Issue.chainId, decimal",
+    "{chainName}": "the name for Issue.chainId in `chains`, or \"chain <id>\" if it is not listed",
+    "{amount}": "Issue.amount in whole tokens (18 decimals), no thousands separators, trailing zeros trimmed (1000000000000000000 -> 1)",
+    "{amountWei}": "Issue.amount as the raw integer, for contract calls",
+    "{limit}": "Issue.limit, formatted like {amount}",
+    "{time}": "Issue.time as UTC, \"YYYY-MM-DD HH:MM UTC\"",
+    "{readyAt}": "\"now\" if Issue.readyAt is 0, else Issue.readyAt formatted like {time}",
+    "{account}": "Issue.account as a 0x address (checksummed)",
+    "{caller}": "the connected wallet (the `user` passed to the check)"
+  },
+  "chainStatuses": [
+    {
+      "value": 0,
+      "name": "None (not read, or not registered)"
+    },
+    {
+      "value": 1,
+      "name": "Active"
+    },
+    {
+      "value": 2,
+      "name": "Paused"
+    },
+    {
+      "value": 3,
+      "name": "Suspended"
+    },
+    {
+      "value": 4,
+      "name": "Sunset"
+    }
+  ],
+  "notices": [
+    {
+      "id": "claimRewardsFirst",
+      "appliesTo": [
+        "depositStake"
+      ],
+      "show": "Before every stake deposit, next to the deposit button.",
+      "text": "Before you deposit a stake, claim its rewards in Aero. After the deposit only the iAERO vault can claim them, and they go to iAERO holders instead of you.",
+      "sources": [
+        "voter/Voter.sol:296-301 (claimRewards: owner or approved only)",
+        "review 1 I-2"
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "version": 1,
+      "date": "2026-10-27",
+      "notes": [
+        "Codes 1-22."
+      ]
+    },
+    {
+      "version": 2,
+      "date": "2026-10-27",
+      "notes": [
+        "Review 1: codes 23 StakeInVaultNotCredited, 24 StakeSentToDepositContract and 25 SafeCannotDeposit appended; codes 1-22 keep their meaning.",
+        "Issue gains `chainStatus` (Aero's live status of the chain, for codes 16, 18 and 19); codes 16, 18 and 19 gain `variants` for Paused and Suspended chains, and code 18 for Base.",
+        "Code 10 now means the stake was deposited through this contract; a stake in the vault without iAERO is code 23.",
+        "An expired stake is no longer also reported as too small (code 14); code 15 and code 16's last step say to deposit at least 1 AERO.",
+        "The `notices` section: claim rewards before depositing a stake."
+      ]
+    },
+    {
+      "version": 3,
+      "date": "2026-10-27",
+      "notes": [
+        "Review 2: codes 26 ProtocolStakeBlocked (a stake the Safe blocked with blockStakes) and 27 StakeIsEmpty (a withdrawn stake) appended; codes 1-25 keep their meaning.",
+        "Codes 16 and 18: a Base-Suspended variant comes first (no ETH, gas limit 0; any ETH reverts NoFeeRequired on Base). Code 18's Paused steps no longer assume a remote chain.",
+        "Code 23 says this deposit contract did not mint iAERO for the stake (it may be a protocol stake), and that the Safe checks how it arrived before returning it."
+      ]
+    },
+    {
+      "version": 3,
+      "revision": 2,
+      "date": "2026-10-27",
+      "notes": [
+        "Review 3 (wording only; codes and fields unchanged): code 26 adds \"if this is your own stake, contact the iAERO team\", and its Safe steps cover a stake held in the deposit contract (sweepStake) or by a signer (back to the Safe first).",
+        "Code 27 no longer says the stake was withdrawn: an expired stake drained through the VPM gets it too.",
+        "otherErrors: CannotBlock (blockStakes refuses an id the Safe or the vault does not hold)."
+      ]
+    },
+    {
+      "version": 3,
+      "revision": 3,
+      "date": "2026-10-27",
+      "notes": [
+        "Review 4 (wording only; codes and fields unchanged): howToUse tells front ends to cache on tableRevision or the file hash, not on REASONS_VERSION alone."
+      ]
+    },
+    {
+      "version": 3,
+      "revision": 4,
+      "date": "2026-10-27",
+      "notes": [
+        "Pass 3 I-1 (wording only; codes and fields unchanged): code 6 says each part must be between 1 AERO and the maximum, so a split never leaves a remainder under the 1 AERO minimum (code 5)."
+      ]
+    },
+    {
+      "version": 3,
+      "revision": 5,
+      "date": "2026-10-27",
+      "notes": [
+        "Outside review ADS-L01 and ADS-I01 (guide only; codes, fields and texts unchanged): a revert identifies the refusal but does not carry chainStatus (16, 18, 19) or Base readyAt (18), so after a stake-deposit revert the front end calls checkStake again and picks the variant from that; a fresh previewDeposit after LiqBelowMinimum; the front end checks the deposit bounds before calling."
+      ]
+    }
+  ],
+  "chains": [
+    {
+      "id": 8453,
+      "name": "Base"
+    },
+    {
+      "id": 1,
+      "name": "Ethereum"
+    },
+    {
+      "id": 10,
+      "name": "OP Mainnet"
+    },
+    {
+      "id": 42161,
+      "name": "Arbitrum One"
+    },
+    {
+      "id": 57073,
+      "name": "Ink"
+    },
+    {
+      "id": 4663,
+      "name": "Robinhood Chain"
+    },
+    {
+      "id": 5042,
+      "name": "Arc"
+    }
+  ],
+  "aeroFactsUsed": {
+    "returnGauge": "0x2E67Fe7bD6843e2D0095f5d02C60a7cD29a26902",
+    "baseVoteCooldownSeconds": 169200,
+    "voteMessageLifetimeSeconds": 3600,
+    "operatorMessageLifetimeSeconds": 7200,
+    "readOn": "Base, 27 Oct 2026: LeafVoter.allocationCooldown() = 169200, Voter.allocationLifetime() = 3600, Voter.messageLifetime() = 7200. Aero governance can change them; update this table if it does."
+  },
+  "reasons": [
+    {
+      "code": 1,
+      "name": "DepositsPaused",
+      "error": "DepositsPaused()",
+      "selector": "0xdeeb6943",
+      "errorParams": [],
+      "issueFields": [],
+      "appliesTo": [
+        "depositAero",
+        "depositStake"
+      ],
+      "whoFixes": "iAERO team",
+      "fee": "No fee beyond normal gas.",
+      "wait": "Until the iAERO team reopens deposits.",
+      "instruction": "Deposits are paused by the iAERO team. Nothing was taken from your wallet; try again once deposits reopen.",
+      "steps": [
+        "Wait for the iAERO team to reopen deposits (watch iAERO's official channels).",
+        "Send the same deposit again."
+      ],
+      "technical": [],
+      "sources": [
+        "AeroStakeDeposit.setPaused (vault Safe only)"
+      ]
+    },
+    {
+      "code": 2,
+      "name": "DepositsClosed",
+      "error": "DepositsClosed()",
+      "selector": "0x1a8ade30",
+      "errorParams": [],
+      "issueFields": [],
+      "appliesTo": [
+        "depositAero",
+        "depositStake"
+      ],
+      "whoFixes": "iAERO team",
+      "fee": "No fee beyond normal gas.",
+      "wait": "Until the iAERO team reopens deposits.",
+      "instruction": "Deposits are closed: the iAERO vault is not taking stakes from any deposit contract right now. Nothing was taken from your wallet.",
+      "steps": [
+        "Do not retry here.",
+        "Watch iAERO's official channels for when deposits reopen."
+      ],
+      "technical": [],
+      "sources": [
+        "vault:391-396 (setDepositor; zero closes deposits)",
+        "vault:328-341 (the vault takes stakes only from its Safe or depositor)"
+      ]
+    },
+    {
+      "code": 3,
+      "name": "DepositContractReplaced",
+      "error": "DepositContractReplaced(address)",
+      "selector": "0x11cc45f8",
+      "errorParams": [
+        "currentDepositor"
+      ],
+      "issueFields": [
+        "account"
+      ],
+      "appliesTo": [
+        "depositAero",
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "This deposit contract has been replaced: the iAERO vault now takes deposits through {account}. Nothing was taken from your wallet; deposit through the current iAERO app instead.",
+      "steps": [
+        "Open the current iAERO app (it uses {account}).",
+        "Approve that contract, not this one, and deposit there."
+      ],
+      "technical": [],
+      "sources": [
+        "vault:391-396 (setDepositor)",
+        "vault:328-341"
+      ]
+    },
+    {
+      "code": 4,
+      "name": "MintingNotEnabled",
+      "error": "MintingNotEnabled(address)",
+      "selector": "0x2a736cf1",
+      "errorParams": [
+        "token"
+      ],
+      "issueFields": [
+        "account"
+      ],
+      "appliesTo": [
+        "depositAero",
+        "depositStake"
+      ],
+      "whoFixes": "iAERO team",
+      "fee": "No fee beyond normal gas.",
+      "wait": "Until the iAERO team enables deposits.",
+      "instruction": "Deposits are not switched on yet: this contract is not yet allowed to mint the token {account}. Nothing was taken from your wallet; try again once iAERO opens deposits.",
+      "steps": [
+        "Wait for the iAERO team to finish enabling deposits.",
+        "Send the same deposit again."
+      ],
+      "technical": [],
+      "sources": [
+        "protocol/contracts/iAEROToken.sol:29-34 and LIQToken.sol:29-36 (mint needs MINTER_ROLE)",
+        "DESIGN.md §10 (go-live batch)"
+      ]
+    },
+    {
+      "code": 5,
+      "name": "AmountTooSmall",
+      "error": "AmountTooSmall(uint256,uint256)",
+      "selector": "0x02d2d938",
+      "errorParams": [
+        "amount",
+        "minimum"
+      ],
+      "issueFields": [
+        "amount",
+        "limit"
+      ],
+      "appliesTo": [
+        "depositAero"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "You tried to deposit {amount} AERO; the minimum is {limit} AERO. Deposit at least {limit} AERO.",
+      "steps": [
+        "Enter an amount of at least {limit} AERO.",
+        "Deposit again."
+      ],
+      "technical": [],
+      "sources": [
+        "V5:62, 222 (MIN_DEPOSIT 1 AERO)"
+      ]
+    },
+    {
+      "code": 6,
+      "name": "AmountTooLarge",
+      "error": "AmountTooLarge(uint256,uint256)",
+      "selector": "0x7f162703",
+      "errorParams": [
+        "amount",
+        "maximum"
+      ],
+      "issueFields": [
+        "amount",
+        "limit"
+      ],
+      "appliesTo": [
+        "depositAero"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "You tried to deposit {amount} AERO; one deposit can be at most {limit} AERO. Split it into several deposits, each between 1 and {limit} AERO.",
+      "steps": [
+        "Deposit at most {limit} AERO at a time, and at least 1 AERO each time.",
+        "Repeat until the whole amount is deposited. If the last part would be under 1 AERO, make an earlier part smaller."
+      ],
+      "technical": [],
+      "sources": [
+        "V5:63, 223 (MAX_SINGLE_LOCK 10,000,000 AERO)"
+      ]
+    },
+    {
+      "code": 7,
+      "name": "AeroBalanceTooLow",
+      "error": "AeroBalanceTooLow(uint256,uint256)",
+      "selector": "0xe2849598",
+      "errorParams": [
+        "amount",
+        "balance"
+      ],
+      "issueFields": [
+        "amount",
+        "limit"
+      ],
+      "appliesTo": [
+        "depositAero"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "This wallet holds {limit} AERO but the deposit needs {amount} AERO. Deposit at most {limit} AERO, or add AERO to this wallet first.",
+      "steps": [
+        "Make sure the AERO is the Aero token (the token Aero stakes, VotingEscrow.TOKEN()), not old Aerodrome AERO.",
+        "Lower the amount to at most {limit} AERO, or add AERO to this wallet.",
+        "Deposit again."
+      ],
+      "technical": [],
+      "sources": [
+        "core/VotingEscrow.sol:78 (TOKEN)",
+        "token/Token.sol (the Aero root token)"
+      ]
+    },
+    {
+      "code": 8,
+      "name": "AeroAllowanceTooLow",
+      "error": "AeroAllowanceTooLow(uint256,uint256,address)",
+      "selector": "0x53cdf06c",
+      "errorParams": [
+        "amount",
+        "allowance",
+        "spender"
+      ],
+      "issueFields": [
+        "amount",
+        "limit",
+        "account"
+      ],
+      "appliesTo": [
+        "depositAero"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Approve the iAERO deposit contract {account} to spend {amount} AERO (it may spend {limit} AERO now), then deposit again.",
+      "steps": [
+        "From this wallet, approve {account} to spend at least {amount} AERO.",
+        "Deposit again."
+      ],
+      "technical": [
+        "AERO.approve({account}, {amountWei})"
+      ],
+      "sources": [
+        "token/BaseToken.sol:37-41 (transferFrom spends the allowance)"
+      ]
+    },
+    {
+      "code": 9,
+      "name": "StakeNotFound",
+      "error": "StakeNotFound(uint256)",
+      "selector": "0x51651db9",
+      "errorParams": [
+        "tokenId"
+      ],
+      "issueFields": [
+        "tokenId"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Stake #{tokenId} does not exist in Aero. Check the stake number in the Aero app and try again.",
+      "steps": [
+        "Find the stake's number in the Aero app.",
+        "Deposit that stake."
+      ],
+      "technical": [],
+      "sources": [
+        "OZ ERC721 ownerOf (reverts for a token that does not exist)"
+      ]
+    },
+    {
+      "code": 10,
+      "name": "StakeAlreadyInVault",
+      "error": "StakeAlreadyInVault(uint256,address)",
+      "selector": "0x3f678a6d",
+      "errorParams": [
+        "tokenId",
+        "vault"
+      ],
+      "issueFields": [
+        "tokenId",
+        "account"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "nobody",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Stake #{tokenId} is already in the iAERO vault ({account}) and was deposited through iAERO, so its iAERO was minted when it was deposited. There is nothing to do.",
+      "steps": [
+        "Nothing to do. The iAERO for this stake went to the wallet that deposited it."
+      ],
+      "technical": [],
+      "sources": [
+        "vault:328-341 (the vault holds deposited stakes)",
+        "AeroStakeDeposit.credited(tokenId) is true"
+      ]
+    },
+    {
+      "code": 11,
+      "name": "NotStakeOwner",
+      "error": "NotStakeOwner(uint256,address,address)",
+      "selector": "0x90562eaf",
+      "errorParams": [
+        "tokenId",
+        "owner",
+        "caller"
+      ],
+      "issueFields": [
+        "tokenId",
+        "account"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Stake #{tokenId} belongs to {account}, not to the wallet you are using ({caller}). Connect {account} and deposit from it.",
+      "steps": [
+        "Disconnect this wallet.",
+        "Connect {account}, the wallet that owns stake #{tokenId}.",
+        "Approve and deposit from that wallet."
+      ],
+      "technical": [],
+      "sources": [
+        "V5:261 (only the owner deposits its stake)"
+      ]
+    },
+    {
+      "code": 12,
+      "name": "PrimaryStake",
+      "error": "PrimaryStake(uint256)",
+      "selector": "0x9dd649bd",
+      "errorParams": [
+        "tokenId"
+      ],
+      "issueFields": [
+        "tokenId"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "protocol Safe",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Stake #{tokenId} is the iAERO protocol's own stake and cannot be deposited.",
+      "steps": [
+        "Protocol Safe only: send it back to the vault with VotingEscrow.safeTransferFrom(Safe, vault, {tokenId}), never through this contract."
+      ],
+      "technical": [],
+      "sources": [
+        "vault:328-341, 350-352 (the Safe may send stakes in directly; rescue returns them to the Safe)"
+      ]
+    },
+    {
+      "code": 13,
+      "name": "AlreadyCredited",
+      "error": "AlreadyCredited(uint256)",
+      "selector": "0x731810e5",
+      "errorParams": [
+        "tokenId"
+      ],
+      "issueFields": [
+        "tokenId"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "protocol Safe",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Stake #{tokenId} has already been exchanged for iAERO once and cannot be paid for again.",
+      "steps": [
+        "If the protocol returned this stake to you, contact the iAERO team.",
+        "Protocol Safe: return a rescued stake to the vault with a plain safeTransferFrom."
+      ],
+      "technical": [],
+      "sources": [
+        "DESIGN.md §3 check 3, D9"
+      ]
+    },
+    {
+      "code": 14,
+      "name": "StakeTooSmall",
+      "error": "StakeTooSmall(uint256,uint256,uint256)",
+      "selector": "0x5d7ce324",
+      "errorParams": [
+        "tokenId",
+        "amount",
+        "minimum"
+      ],
+      "issueFields": [
+        "tokenId",
+        "amount",
+        "limit"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Stake #{tokenId} holds {amount} AERO; the minimum is {limit} AERO. Add AERO to the stake in Aero, then deposit again.",
+      "steps": [
+        "In Aero, increase stake #{tokenId}'s amount so it holds at least {limit} AERO (no fee beyond gas, no waiting).",
+        "Deposit the stake again."
+      ],
+      "technical": [
+        "AERO.approve(VotingEscrow, value), then VotingEscrow.increaseStakeAmount({tokenId}, value)"
+      ],
+      "sources": [
+        "core/VotingEscrow.sol:236-258 (increaseStakeAmount: owner or approved; not on an expired decaying stake)",
+        "V5:266 (minimum)"
+      ]
+    },
+    {
+      "code": 15,
+      "name": "StakeHasExpired",
+      "error": "StakeHasExpired(uint256,uint256,uint256)",
+      "selector": "0x0672e1cb",
+      "errorParams": [
+        "tokenId",
+        "amount",
+        "endedAt"
+      ],
+      "issueFields": [
+        "tokenId",
+        "amount",
+        "time"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Stake #{tokenId} expired on {time}. An expired stake cannot be made permanent, so it cannot be deposited. Withdraw its {amount} AERO in Aero, then deposit at least 1 AERO here (add more if the stake held less).",
+      "steps": [
+        "In Aero, withdraw stake #{tokenId} to your wallet. It has no votes left, so this needs no fee and no waiting.",
+        "If it held less than 1 AERO, add AERO so you deposit at least 1 AERO (the minimum).",
+        "Approve the iAERO deposit contract for the amount and deposit it with Deposit AERO."
+      ],
+      "technical": [
+        "VotingEscrow.withdraw({tokenId}, yourAddress)",
+        "AERO.approve(depositContract, amount), then depositAero(amount, minLiq) with amount of at least 1000000000000000000"
+      ],
+      "sources": [
+        "core/VotingEscrow.sol:313-318 (an expired stake cannot be upgraded)",
+        "core/VotingEscrow.sol:241 (nor topped up)",
+        "core/VotingEscrow.sol:283-311 (withdraw: expired, whole amount on CHAIN0)",
+        "V5:62 (1 AERO minimum)"
+      ]
+    },
+    {
+      "code": 16,
+      "name": "ExpiredStakeHasVotes",
+      "error": "ExpiredStakeHasVotes(uint256,uint256,uint256,uint256,uint256)",
+      "selector": "0xe3aff66f",
+      "errorParams": [
+        "tokenId",
+        "chainId",
+        "booked",
+        "endedAt",
+        "readyAt"
+      ],
+      "issueFields": [
+        "tokenId",
+        "chainId",
+        "amount",
+        "time",
+        "readyAt",
+        "chainStatus"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "Off Base: a cross-chain message fee in ETH (a few thousandths of an ETH; the excess is refunded). On Base: no fee.",
+      "wait": "On Base: until the vote cooldown ends ({readyAt}). Elsewhere: until that chain's vote cooldown since your last vote there has passed, then one cross-chain round trip (usually minutes).",
+      "instruction": "Stake #{tokenId} expired on {time} and still has {amount} AERO of votes on {chainName}. Remove those votes, withdraw the stake in Aero, then deposit the AERO here.",
+      "steps": [
+        "Remove all of stake #{tokenId}'s votes on {chainName} (chain {chainId}) with one vote that sends the whole {amount} AERO to Aero's return gauge. On Base this is free and instant, possible from {readyAt}. On any other chain it costs a cross-chain message fee in ETH (a few thousandths of an ETH; the excess is refunded) and must be sent after that chain's vote cooldown since your last vote there has passed (47 hours on Base), or the message expires after 1 hour and does nothing.",
+        "Off Base, wait until the AERO is back on Base (one cross-chain round trip, usually minutes).",
+        "Do the same for every other chain this check lists for the stake.",
+        "In Aero, withdraw stake #{tokenId} to your wallet.",
+        "Approve the iAERO deposit contract for the AERO and deposit it with Deposit AERO (at least 1 AERO; add more if the stake held less)."
+      ],
+      "technical": [
+        "Voter.allocateGauges({tokenId}, {chainId}, [(0x2E67Fe7bD6843e2D0095f5d02C60a7cD29a26902, {amountWei}, 0x)], gasLimit, yourAddress): on Base gasLimit 0 and no ETH; elsewhere gasLimit of at least 2000000 and ETH for the fee",
+        "VotingEscrow.withdraw({tokenId}, yourAddress)"
+      ],
+      "sources": [
+        "libraries/ProtocolConstants.sol:37-41 (the return gauge)",
+        "libraries/AllocationLogicLibrary.sol:784-795 (an expired stake may still send a lone return)",
+        "libraries/AllocationLogicLibrary.sol:1384-1385 (the list must add up to the chain's booking)",
+        "bridge/RootMessageOrchestrator.sol:65-68 (the fee includes the return message)",
+        "libraries/LeafAllocationLibrary.sol:90-96, 744-765 (vote cooldown; a vote message expires)",
+        "core/VotingEscrow.sol:283-311 (withdraw needs the whole amount back on CHAIN0)",
+        "libraries/AllocationLogicLibrary.sol:439-444, 775 (votes only on an Active or Sunset chain)",
+        "voter/Voter.sol:416-429 (emergencyDeallocate: Suspended chain, governance switch)"
+      ],
+      "variants": [
+        {
+          "when": {
+            "chainStatus": 3,
+            "chainId": 8453
+          },
+          "fee": "No fee beyond normal gas.",
+          "wait": "Until Aero governance allows emergency returns on Base.",
+          "instruction": "Stake #{tokenId} expired on {time} and still has {amount} AERO of votes on Base, which Aero has suspended. Normal vote removal does not work there: pull the votes back with Aero's emergency return once Aero governance allows it for this suspension (on Base it is free: send no ETH), then withdraw the stake in Aero and deposit the AERO here.",
+          "steps": [
+            "Check that Aero allows emergency returns on Base now (Voter.emergencyDeallocationAllowed(8453) is true); if not, wait until it does.",
+            "Pull the stake's votes on Base back with the emergency return, sending no ETH (Aero refuses ETH on Base) and a gas limit of 0. The AERO is back at once.",
+            "In Aero, withdraw stake #{tokenId} to your wallet.",
+            "Deposit the AERO here with Deposit AERO (at least 1 AERO; add more if the stake held less)."
+          ],
+          "technical": [
+            "Voter.emergencyDeallocate({tokenId}, 8453, 0, yourAddress) with no ETH (on Base any ETH reverts NoFeeRequired)",
+            "VotingEscrow.withdraw({tokenId}, yourAddress)"
+          ]
+        },
+        {
+          "when": {
+            "chainStatus": 2
+          },
+          "fee": "No fee beyond normal gas.",
+          "wait": "Until Aero resumes {chainName}.",
+          "instruction": "Stake #{tokenId} expired on {time} and still has {amount} AERO of votes on {chainName}, which Aero has paused. Votes cannot be removed from a paused chain: wait until Aero resumes {chainName}, then remove them, withdraw the stake in Aero and deposit the AERO here.",
+          "steps": [
+            "Wait until Aero resumes {chainName} (its status returns to Active or Sunset).",
+            "Then remove the stake's votes on {chainName}, withdraw the stake in Aero, and deposit the AERO here (at least 1 AERO), as for any expired stake with votes."
+          ],
+          "technical": []
+        },
+        {
+          "when": {
+            "chainStatus": 3
+          },
+          "fee": "Off Base: a cross-chain message fee in ETH (a few thousandths of an ETH; the excess is refunded). On Base: no fee.",
+          "wait": "Until Aero governance allows emergency returns on {chainName}.",
+          "instruction": "Stake #{tokenId} expired on {time} and still has {amount} AERO of votes on {chainName}, which Aero has suspended. Normal vote removal does not work there: pull the votes back with Aero's emergency return once Aero governance allows it for this suspension, then withdraw the stake in Aero and deposit the AERO here.",
+          "steps": [
+            "Check that Aero allows emergency returns on {chainName} now (Voter.emergencyDeallocationAllowed({chainId}) is true); if not, wait until it does.",
+            "Pull the stake's votes on {chainName} back with the emergency return. The AERO is back on Base at once; off Base it costs a cross-chain message fee in ETH (the excess is refunded).",
+            "In Aero, withdraw stake #{tokenId} to your wallet.",
+            "Deposit the AERO here with Deposit AERO (at least 1 AERO; add more if the stake held less)."
+          ],
+          "technical": [
+            "Voter.emergencyDeallocate({tokenId}, {chainId}, gasLimit, yourAddress) with ETH for the fee; a gasLimit of at least 8000000 lets the chain's own unwind be delivered",
+            "VotingEscrow.withdraw({tokenId}, yourAddress)"
+          ]
+        }
+      ]
+    },
+    {
+      "code": 17,
+      "name": "VoterRecordMismatch",
+      "error": "VoterRecordMismatch(uint256,uint256,uint256)",
+      "selector": "0x46d1fe75",
+      "errorParams": [
+        "tokenId",
+        "staked",
+        "committed"
+      ],
+      "issueFields": [
+        "tokenId",
+        "amount",
+        "limit"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Aero's voting record for stake #{tokenId} ({limit} AERO) does not match the stake ({amount} AERO). Add some AERO to the stake in Aero so Aero books it again, then deposit again.",
+      "steps": [
+        "In Aero, increase stake #{tokenId}'s amount (if Aero's record is larger than the stake, by at least the difference). Aero then books the whole stake again. No fee beyond gas, no waiting.",
+        "Deposit again.",
+        "If the mismatch stays, do not deposit this stake: contact the iAERO team."
+      ],
+      "technical": [
+        "AERO.approve(VotingEscrow, value), then VotingEscrow.increaseStakeAmount({tokenId}, value)"
+      ],
+      "sources": [
+        "core/VotingEscrow.sol:236-258, 688-692 (a top-up re-books the stake)",
+        "libraries/AllocationLogicLibrary.sol:333-338 (books staked minus committed)",
+        "interfaces/voter/IVoter.sol:681-689"
+      ]
+    },
+    {
+      "code": 18,
+      "name": "VotesOnUnreachableChain",
+      "error": "VotesOnUnreachableChain(uint256,uint256,uint256)",
+      "selector": "0x58dfe56a",
+      "errorParams": [
+        "tokenId",
+        "chainId",
+        "booked"
+      ],
+      "issueFields": [
+        "tokenId",
+        "chainId",
+        "amount",
+        "readyAt",
+        "chainStatus"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "A cross-chain message fee in ETH (a few thousandths of an ETH; the excess is refunded).",
+      "wait": "Until {chainName}'s vote cooldown since your last vote there has passed, then one cross-chain round trip (usually minutes).",
+      "instruction": "Stake #{tokenId} has {amount} AERO of votes on {chainName}, a chain where the iAERO vault cannot manage votes. Remove all of the stake's votes on {chainName}, wait for the AERO to return to Base, then deposit again.",
+      "steps": [
+        "Remove all of stake #{tokenId}'s votes on {chainName} (chain {chainId}) with one vote that sends the whole {amount} AERO to Aero's return gauge. It costs a cross-chain message fee in ETH (a few thousandths of an ETH; the excess is refunded) and must be sent after {chainName}'s vote cooldown since your last vote there has passed (47 hours on Base), or the message expires after 1 hour and does nothing.",
+        "Wait until the AERO is back on Base (one cross-chain round trip, usually minutes). This check stops listing {chainName} once it is.",
+        "Do the same for every other chain this check lists, then deposit again."
+      ],
+      "technical": [
+        "Voter.allocateGauges({tokenId}, {chainId}, [(0x2E67Fe7bD6843e2D0095f5d02C60a7cD29a26902, {amountWei}, 0x)], gasLimit, yourAddress) with a gasLimit of at least 2000000 and ETH for the fee"
+      ],
+      "sources": [
+        "libraries/ProtocolConstants.sol:37-41",
+        "libraries/AllocationLogicLibrary.sol:1384-1385",
+        "bridge/RootMessageOrchestrator.sol:65-68",
+        "libraries/LeafAllocationLibrary.sol:90-96, 744-765",
+        "vault:737-739, 807-814 (chains the vault keeper can reach)",
+        "DESIGN.md §3.1, D3",
+        "libraries/AllocationLogicLibrary.sol:439-444, 775 (votes only on an Active or Sunset chain)",
+        "voter/Voter.sol:416-429 (emergencyDeallocate)",
+        "bridge/RootLocalAdapter.sol:40 (no ETH on Base)"
+      ],
+      "variants": [
+        {
+          "when": {
+            "chainStatus": 3,
+            "chainId": 8453
+          },
+          "fee": "No fee beyond normal gas.",
+          "wait": "Until Aero governance allows emergency returns on Base.",
+          "instruction": "Stake #{tokenId} has {amount} AERO of votes on Base, where the iAERO vault does not manage votes at the moment, and Aero has suspended Base. Normal vote removal does not work there: pull the votes back with Aero's emergency return once Aero governance allows it for this suspension (on Base it is free: send no ETH), then deposit again.",
+          "steps": [
+            "Check that Aero allows emergency returns on Base now (Voter.emergencyDeallocationAllowed(8453) is true); if not, wait until it does.",
+            "Pull the stake's votes on Base back with the emergency return, sending no ETH (Aero refuses ETH on Base) and a gas limit of 0. The AERO is back at once.",
+            "Deposit again."
+          ],
+          "technical": [
+            "Voter.emergencyDeallocate({tokenId}, 8453, 0, yourAddress) with no ETH (on Base any ETH reverts NoFeeRequired)"
+          ]
+        },
+        {
+          "when": {
+            "chainStatus": 2
+          },
+          "fee": "No fee beyond normal gas.",
+          "wait": "Until Aero resumes {chainName}.",
+          "instruction": "Stake #{tokenId} has {amount} AERO of votes on {chainName}, a chain where the iAERO vault cannot manage votes, and Aero has paused {chainName}. Votes cannot be removed from a paused chain: wait until Aero resumes it, then remove them and deposit again.",
+          "steps": [
+            "Wait until Aero resumes {chainName} (its status returns to Active or Sunset).",
+            "Then remove all of the stake's votes on {chainName} as this check's normal instruction for {chainName} says, and deposit again."
+          ],
+          "technical": []
+        },
+        {
+          "when": {
+            "chainStatus": 3
+          },
+          "fee": "Off Base: a cross-chain message fee in ETH (a few thousandths of an ETH; the excess is refunded). On Base: no fee.",
+          "wait": "Until Aero governance allows emergency returns on {chainName}.",
+          "instruction": "Stake #{tokenId} has {amount} AERO of votes on {chainName}, a chain where the iAERO vault cannot manage votes, and Aero has suspended {chainName}. Normal vote removal does not work there: pull the votes back with Aero's emergency return once Aero governance allows it for this suspension, then deposit again.",
+          "steps": [
+            "Check that Aero allows emergency returns on {chainName} now (Voter.emergencyDeallocationAllowed({chainId}) is true); if not, wait until it does.",
+            "Pull the stake's votes on {chainName} back with the emergency return. The AERO is back on Base at once; off Base it costs a cross-chain message fee in ETH (the excess is refunded).",
+            "Deposit again."
+          ],
+          "technical": [
+            "Voter.emergencyDeallocate({tokenId}, {chainId}, gasLimit, yourAddress) with ETH for the fee; a gasLimit of at least 8000000 lets the chain's own unwind be delivered"
+          ]
+        },
+        {
+          "when": {
+            "chainId": 8453
+          },
+          "fee": "No fee beyond normal gas.",
+          "wait": "Until {readyAt} (Base's vote cooldown since the stake's last Base vote).",
+          "instruction": "Stake #{tokenId} has {amount} AERO of votes on Base, where the iAERO vault does not manage votes at the moment. Remove all of the stake's votes on Base, then deposit again.",
+          "steps": [
+            "Remove all of stake #{tokenId}'s votes on Base with one vote that sends the whole {amount} AERO to Aero's return gauge. On Base this is free (send no ETH: Aero refuses ETH there) and takes effect at once, from {readyAt}.",
+            "Deposit again."
+          ],
+          "technical": [
+            "Voter.allocateGauges({tokenId}, 8453, [(0x2E67Fe7bD6843e2D0095f5d02C60a7cD29a26902, {amountWei}, 0x)], 0, yourAddress) with no ETH"
+          ]
+        }
+      ]
+    },
+    {
+      "code": 19,
+      "name": "BaseOperatorSet",
+      "error": "BaseOperatorSet(uint256,address)",
+      "selector": "0x716b37df",
+      "errorParams": [
+        "tokenId",
+        "operator"
+      ],
+      "issueFields": [
+        "tokenId",
+        "account",
+        "chainStatus"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None: on Base it applies at once.",
+      "instruction": "Stake #{tokenId} has an operator on Base ({account}) that could claim its rewards after you deposit. Remove the operator, then deposit again.",
+      "steps": [
+        "From the wallet that owns stake #{tokenId}, set its Base operator to none. On Base this applies at once, costs no fee (send no ETH) and has no cooldown.",
+        "Deposit again."
+      ],
+      "technical": [
+        "Voter.setOperator({tokenId}, 8453, 0x0000000000000000000000000000000000000000, 0, yourAddress)"
+      ],
+      "sources": [
+        "voter/Voter.sol:570-596 (setOperator: owner or approved; refused while the chain is Paused, :578)",
+        "libraries/AllocationLogicLibrary.sol:469-471 (no gas limit needed on Base)",
+        "voter/LeafVoter.sol:213-227, 286-289, 434-436"
+      ],
+      "variants": [
+        {
+          "when": {
+            "chainStatus": 2
+          },
+          "fee": "No fee beyond normal gas.",
+          "wait": "Until Aero resumes Base.",
+          "instruction": "Stake #{tokenId} has an operator on Base ({account}) that could claim its rewards after you deposit, and Aero has paused Base, so the operator cannot be removed right now. Wait until Aero resumes Base, remove the operator, then deposit again.",
+          "steps": [
+            "Wait until Aero resumes Base.",
+            "From the wallet that owns stake #{tokenId}, set its Base operator to none (no fee, no cooldown).",
+            "Deposit again."
+          ],
+          "technical": [
+            "Voter.setOperator({tokenId}, 8453, 0x0000000000000000000000000000000000000000, 0, yourAddress)"
+          ]
+        }
+      ]
+    },
+    {
+      "code": 20,
+      "name": "StakeNotApproved",
+      "error": "StakeNotApproved(uint256,address)",
+      "selector": "0x77f86559",
+      "errorParams": [
+        "tokenId",
+        "spender"
+      ],
+      "issueFields": [
+        "tokenId",
+        "account"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Approve the iAERO deposit contract {account} for stake #{tokenId}, then deposit again.",
+      "steps": [
+        "From the wallet that owns stake #{tokenId}, approve {account} for this one stake (better than approving all your stakes).",
+        "Deposit again."
+      ],
+      "technical": [
+        "VotingEscrow.approve({account}, {tokenId})"
+      ],
+      "sources": [
+        "OZ ERC721:164-168 (approved addresses may transfer)",
+        "core/VotingEscrow.sol:313-329"
+      ]
+    },
+    {
+      "code": 21,
+      "name": "LiqCapReached",
+      "error": "LiqCapReached()",
+      "selector": "0x0efd7fbe",
+      "errorParams": [],
+      "issueFields": [],
+      "appliesTo": [
+        "depositAero",
+        "depositStake"
+      ],
+      "whoFixes": "iAERO team",
+      "fee": "No fee beyond normal gas.",
+      "wait": "Until LIQ supply falls below its cap.",
+      "instruction": "LIQ has reached its 100,000,000 maximum supply, so under iAERO's LIQ rules this deposit cannot be accepted. Nothing was taken from your wallet.",
+      "steps": [
+        "Contact the iAERO team: deposits stay blocked while LIQ supply is at the cap."
+      ],
+      "technical": [],
+      "sources": [
+        "V5:654-661 (\"LIQ cap reached\")",
+        "protocol/contracts/LIQToken.sol:15, 32"
+      ]
+    },
+    {
+      "code": 22,
+      "name": "LiqBelowMinimum",
+      "error": "LiqBelowMinimum(uint256,uint256)",
+      "selector": "0x74370e70",
+      "errorParams": [
+        "liqToUser",
+        "minLiqToUser"
+      ],
+      "issueFields": [
+        "amount",
+        "limit"
+      ],
+      "appliesTo": [
+        "depositAero",
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "You would receive {amount} LIQ, less than the minimum of {limit} LIQ you set; the LIQ rate changed before your deposit. Nothing was taken from your wallet.",
+      "steps": [
+        "Check the new LIQ amount in the deposit preview.",
+        "Deposit again with a new minimum if you accept it."
+      ],
+      "technical": [],
+      "sources": [
+        "V5:513-518 (rate halves every 5,000,000 LIQ minted)"
+      ]
+    },
+    {
+      "code": 23,
+      "name": "StakeInVaultNotCredited",
+      "error": "StakeInVaultNotCredited(uint256,address)",
+      "selector": "0x8df6a203",
+      "errorParams": [
+        "tokenId",
+        "vault"
+      ],
+      "issueFields": [
+        "tokenId",
+        "account"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "iAERO team",
+      "fee": "No fee beyond normal gas.",
+      "wait": "Until the iAERO team returns the stake.",
+      "instruction": "Stake #{tokenId} is in the iAERO vault ({account}), but this deposit contract did not mint iAERO for it. It may be a protocol stake, or a stake sent to the vault directly or swept in after being sent to the deposit contract by mistake. If you sent it, contact the iAERO team: once the protocol Safe has checked how it arrived, it can take it out of the vault and return it to you, and you can then deposit it here.",
+      "steps": [
+        "If you sent this stake, contact the iAERO team soon, with the stake number #{tokenId} and the wallet that sent it. Once Aero opens merging, stakes in the vault can be merged into the protocol's own stake and could no longer be returned.",
+        "The protocol Safe checks how the stake arrived (the Safe's return check in the README) and, if it came from that wallet by mistake, takes it out of the vault and returns it in one batch.",
+        "Then approve the deposit contract for the stake and deposit it the normal way."
+      ],
+      "technical": [
+        "vault.rescueNFT({tokenId}) by the protocol Safe, then VotingEscrow.transferFrom(Safe, owner, {tokenId})"
+      ],
+      "sources": [
+        "vault:328-341 (a plain transferFrom is owned but not held)",
+        "vault:350-352 (rescueNFT sends any owned stake to the Safe)",
+        "AeroStakeDeposit.credited(tokenId) is false",
+        "review 1 L-2",
+        "review 2 R2-L2"
+      ]
+    },
+    {
+      "code": 24,
+      "name": "StakeSentToDepositContract",
+      "error": "StakeSentToDepositContract(uint256)",
+      "selector": "0x53126b19",
+      "errorParams": [
+        "tokenId"
+      ],
+      "issueFields": [
+        "tokenId",
+        "account"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "iAERO team",
+      "fee": "No fee beyond normal gas.",
+      "wait": "Until the iAERO team returns the stake.",
+      "instruction": "Stake #{tokenId} was sent to the iAERO deposit contract ({account}) with a plain transfer instead of a deposit, so no iAERO was minted. Contact the iAERO team: the protocol Safe moves it into the iAERO vault and can return it to you from there, and you can then deposit it the normal way.",
+      "steps": [
+        "Contact the iAERO team with the stake number #{tokenId} and the wallet that sent it.",
+        "The protocol Safe sweeps it into the vault and returns it to that wallet.",
+        "Then approve the deposit contract for the stake and deposit it with Deposit stake. Never transfer a stake to the contract directly."
+      ],
+      "technical": [
+        "depositContract.sweepStake({tokenId}) by the protocol Safe, then vault.rescueNFT({tokenId}) and VotingEscrow.transferFrom(Safe, owner, {tokenId})"
+      ],
+      "sources": [
+        "AeroStakeDeposit.sweepStake",
+        "OZ ERC721 transferFrom (no receiver check)",
+        "review 1 L-3"
+      ]
+    },
+    {
+      "code": 25,
+      "name": "SafeCannotDeposit",
+      "error": "SafeCannotDeposit(address)",
+      "selector": "0xb3438d2f",
+      "errorParams": [
+        "safe"
+      ],
+      "issueFields": [
+        "account"
+      ],
+      "appliesTo": [
+        "depositAero",
+        "depositStake"
+      ],
+      "whoFixes": "protocol Safe",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "The protocol Safe ({account}) cannot use the deposit contract. Protocol stakes already back iAERO: send them into the vault directly with VotingEscrow.safeTransferFrom(Safe, vault, tokenId), and never exchange them for iAERO here.",
+      "steps": [
+        "Protocol Safe: send stakes into the vault with VotingEscrow.safeTransferFrom(Safe, vault, tokenId).",
+        "To add AERO for the protocol, stake it yourself (createStake, permanent) and send the stake in the same way."
+      ],
+      "technical": [],
+      "sources": [
+        "vault:328-341 (the vault takes stakes from the Safe directly)",
+        "review 1 L-4"
+      ]
+    },
+    {
+      "code": 26,
+      "name": "ProtocolStakeBlocked",
+      "error": "ProtocolStakeBlocked(uint256)",
+      "selector": "0xc859fd99",
+      "errorParams": [
+        "tokenId"
+      ],
+      "issueFields": [
+        "tokenId"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "protocol Safe",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Stake #{tokenId} is an iAERO protocol stake: it already backs iAERO, so it cannot be deposited. If this is your own stake, contact the iAERO team.",
+      "steps": [
+        "If this is your own stake, contact the iAERO team with the stake number #{tokenId}.",
+        "Protocol Safe: protocol stakes belong in the vault. If the vault holds it, there is nothing to do. If the deposit contract holds it, sweep it in with sweepStake({tokenId}). If the Safe holds it, send it in with VotingEscrow.safeTransferFrom(Safe, vault, {tokenId}).",
+        "Protocol Safe: if a signer or anyone else holds it, it has left the protocol's custody and must come back to the Safe first, then go into the vault as above."
+      ],
+      "technical": [],
+      "sources": [
+        "AeroStakeDeposit.blockStakes (vault Safe only, block-only; only ids the Safe or the vault hold)",
+        "review 2 R2-L3",
+        "review 3 R3-L2, R3-I1"
+      ]
+    },
+    {
+      "code": 27,
+      "name": "StakeIsEmpty",
+      "error": "StakeIsEmpty(uint256)",
+      "selector": "0x7617d357",
+      "errorParams": [
+        "tokenId"
+      ],
+      "issueFields": [
+        "tokenId"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Stake #{tokenId} holds no AERO and its staking period has ended, so there is nothing to deposit. Put at least 1 AERO back into it as a permanent stake in Aero and deposit it again, or deposit AERO directly instead.",
+      "steps": [
+        "Either: in Aero, revive stake #{tokenId} as a permanent stake with at least 1 AERO (approve the AERO to Aero first), then deposit the stake here.",
+        "Or: deposit AERO directly with Deposit AERO (at least 1 AERO)."
+      ],
+      "technical": [
+        "AERO.approve(VotingEscrow, value), then VotingEscrow.reviveStake({tokenId}, value, 0, true) with value of at least 1000000000000000000"
+      ],
+      "sources": [
+        "core/VotingEscrow.sol:209-234, 914-917 (reviveStake: an empty stake whose period is over; permanent takes 0 weeks)",
+        "core/VotingEscrow.sol:283-311 (withdraw empties a stake)",
+        "core/VotingEscrow.sol:355-436 (the VPM can drain one too)",
+        "review 2 R2-I1",
+        "review 3 R3-I2"
+      ]
+    }
+  ],
+  "otherErrors": [
+    {
+      "name": "AeroTransferShort",
+      "error": "AeroTransferShort(uint256,uint256)",
+      "selector": "0x96fceb94",
+      "errorParams": [
+        "received",
+        "expected"
+      ],
+      "kind": "unexpected",
+      "instruction": "The AERO token delivered {received} instead of {expected}. Nothing happened; contact the iAERO team."
+    },
+    {
+      "name": "HandoffFailed",
+      "error": "HandoffFailed(uint256)",
+      "selector": "0x60147462",
+      "errorParams": [
+        "tokenId"
+      ],
+      "kind": "unexpected",
+      "instruction": "The iAERO vault did not take stake #{tokenId}. Nothing happened; contact the iAERO team."
+    },
+    {
+      "name": "StakeMismatch",
+      "error": "StakeMismatch(uint256)",
+      "selector": "0x7a248d04",
+      "errorParams": [
+        "tokenId"
+      ],
+      "kind": "unexpected",
+      "instruction": "Stake #{tokenId} changed while it was being deposited. Nothing happened; contact the iAERO team."
+    },
+    {
+      "name": "Reentrancy",
+      "error": "Reentrancy()",
+      "selector": "0xab143c06",
+      "errorParams": [],
+      "kind": "unexpected",
+      "instruction": "A call tried to re-enter the deposit contract. Nothing happened; contact the iAERO team."
+    },
+    {
+      "name": "NotSafe",
+      "error": "NotSafe(address,address)",
+      "selector": "0xdad26734",
+      "errorParams": [
+        "caller",
+        "safe"
+      ],
+      "kind": "admin",
+      "instruction": "Only the protocol Safe {safe} can do this; {caller} cannot."
+    },
+    {
+      "name": "StakeNotHere",
+      "error": "StakeNotHere(uint256,address)",
+      "selector": "0x2f9e0d59",
+      "errorParams": [
+        "tokenId",
+        "owner"
+      ],
+      "kind": "admin",
+      "instruction": "The deposit contract does not own stake #{tokenId} (its owner is {owner}); there is nothing to sweep."
+    },
+    {
+      "name": "CannotBlock",
+      "error": "CannotBlock(uint256,address)",
+      "selector": "0x11706a64",
+      "errorParams": [
+        "tokenId",
+        "owner"
+      ],
+      "kind": "admin",
+      "instruction": "Stake #{tokenId} cannot be blocked: only stakes the Safe or the vault hold can be (its owner is {owner}). Never predict an id: read the minted id from the receipt and block it in a later batch."
+    },
+    {
+      "name": "NotAContract",
+      "error": "NotAContract(address)",
+      "selector": "0x8a8b41ec",
+      "errorParams": [
+        "account"
+      ],
+      "kind": "admin",
+      "instruction": "{account} is not a token contract."
+    },
+    {
+      "name": "TokenTransferFailed",
+      "error": "TokenTransferFailed(address)",
+      "selector": "0x2b596cb7",
+      "errorParams": [
+        "token"
+      ],
+      "kind": "admin",
+      "instruction": "The token {token} refused the transfer. Check the amount and the token."
+    },
+    {
+      "name": "ZeroAddress",
+      "error": "ZeroAddress()",
+      "selector": "0xd92e233d",
+      "errorParams": [],
+      "kind": "deploy",
+      "instruction": "A constructor address is zero."
+    },
+    {
+      "name": "WrongChain",
+      "error": "WrongChain()",
+      "selector": "0x10dfc033",
+      "errorParams": [],
+      "kind": "deploy",
+      "instruction": "The vault is for another chain than this deployment."
+    },
+    {
+      "name": "WiringMismatch",
+      "error": "WiringMismatch()",
+      "selector": "0x2351953c",
+      "errorParams": [],
+      "kind": "deploy",
+      "instruction": "The vault's VotingEscrow points at another Voter than the vault does."
+    },
+    {
+      "name": "ScheduleMismatch",
+      "error": "ScheduleMismatch()",
+      "selector": "0x2a77124a",
+      "errorParams": [],
+      "kind": "deploy",
+      "instruction": "The predecessor's LIQ schedule (tokens, step, treasury share or base rate) differs from this contract's."
+    },
+    {
+      "name": "BadDecimals",
+      "error": "BadDecimals()",
+      "selector": "0x8ad8cb20",
+      "errorParams": [],
+      "kind": "deploy",
+      "instruction": "iAERO, LIQ and AERO must all have 18 decimals."
+    },
+    {
+      "name": "BadMinterRole",
+      "error": "BadMinterRole(address)",
+      "selector": "0x483ba430",
+      "errorParams": [
+        "token"
+      ],
+      "kind": "deploy",
+      "instruction": "The token {token} does not use keccak256(\"MINTER_ROLE\") as its minter role."
+    }
+  ]
+}

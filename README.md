@@ -1,6 +1,14 @@
 # iAERO app
 
-The iAERO frontend combines live positions, original-token reward claims, LIQ staking, reward sweeps, Rift routes and shared protocol yield. New deposit and USDC-stream actions open only after their deployment manifest and live links pass verification. The owner confirmed that only the new vault, keeper and harvester are deployed as of 27 October 2026.
+The iAERO frontend combines live positions, original-token reward claims, LIQ staking, reward sweeps, Rift routes and shared protocol yield. The separate AeroStakeDeposit contract is connected at `0xD5E4a7869D1189caa617749d483aaD95Af370c70`. Its exact runtime, immutable links and refusal version are verified independently of the future USDC staking stream. Deposit controls open only when fresh on-chain checks permit them. The replacement USDC stream and wrappers remain gated by their own deployment manifest.
+
+## New AERO and stake deposits
+
+The Deposit page supports new AERO and existing Aero stake NFTs, with exact ERC20 or single-NFT approvals. It rechecks after approvals and simulates before each wallet request. A lower LIQ preview requires a fresh review; the app never submits a zero LIQ minimum. Old Aerodrome AERO is directed to the official upgrade page. The handoff's version 3, revision 5 guidance is preserved byte-for-byte in `config/aero-deposit.reasons.v3.json`.
+
+Source, runtime and refusal-table identities live in `config/aero-deposit.json`. Protocol TVL includes the primary stake and verified separate vault-held NFTs, deduplicated at the same finalized block. The existing yield recorder continues to identify its explicit primary position; this frontend change does not rewrite historical yield.
+
+`npm run test:browser:deposit` checks compiled desktop and phone screens with a deterministic wallet and RPC. For an isolated deployed-contract replay, set `DEPOSIT_FORK_CONTEXT` to a public JSON file containing `forkUrl`, `readBridgeUrl`, `forkBlock` and `forkBlockHash`, then run `npm run test:deposit:fork` followed by `npm run test:deposit:worker-fork`. Both URLs must be loopback HTTP, and the bridge must forward read methods only. These scripts reset their disposable Anvil, impersonate accounts only locally, and never load a signing key. The Worker replay uses a local D1 and advances empty blocks for Anvil's finalized tag. Author-run fork tests do not close independent review, Safe signature, keeper, provider or owner go-live gates.
 
 ## Local development
 
