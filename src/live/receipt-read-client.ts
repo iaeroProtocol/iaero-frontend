@@ -14,8 +14,15 @@ export function receiptReadClient(source:BaseClient){
   if(!anchor||receipt.blockNumber>=anchor.number)anchor={number:receipt.blockNumber,hash:receipt.blockHash};
   missing.delete(hash.toLowerCase());incomplete=missing.size>0;revision++;pending=undefined;
  };
- const loadHead=async()=>{
-  if(incomplete)throw Error('The confirmed transaction block is unavailable. Refresh before the next step.');
+ const loadHead=async():Promise<any>=>{
+  if(incomplete){
+   const beganIn=scope,rows=await Promise.all([...missing].map(async hash=>{try{return {hash:hash as Hash,receipt:await source.getTransactionReceipt({hash:hash as Hash})};}catch{return undefined;}}));
+   // A read retry reconciles known transaction hashes; it never resubmits a
+   // transaction or clears an unverified receipt floor. Account resets win.
+   if(beganIn!==scope)return loadHead();
+   for(const row of rows)if(row?.receipt.status==='success'&&row.receipt.transactionHash?.toLowerCase()===row.hash.toLowerCase()&&typeof row.receipt.blockNumber==='bigint'&&/^0x[0-9a-f]{64}$/i.test(row.receipt.blockHash??''))remember(row.receipt,row.hash);
+   if(incomplete)throw Error('The confirmed transaction block is unavailable. Retry Base reads once its receipt is available.');
+  }
   const required=anchor;
   if(!required)return source.getBlock({blockTag:'latest'});
   for(let attempt=0;attempt<3;attempt++){

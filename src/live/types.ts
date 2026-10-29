@@ -26,6 +26,7 @@ export type LiveControls={
   approve:(kind:ActionKind,amount:bigint)=>Promise<void>;
   sweep:(preview:SweepPreview,hooks?:SweepHooks)=>Promise<SweepResult>;
   refreshRewardValues:()=>void;
+  retryBaseReads?:()=>Promise<void>;
 };
 
 export function emptyWallet():DemoWallet{return {aero:0n,iaero:0n,staked:0n,autoStaked:0n,usdc:0n,earned:0n,autoEarned:0n,legacyStake:0n,legacyRewards:0n,liq:0n,checkpoint:0};}

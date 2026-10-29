@@ -35,7 +35,7 @@ export function LiveProvider({children}:{children:ReactNode}){
     generation.current++;readTicket.current++;activeRead.current=null;requestedSelection.current=undefined;receiptReads.reset();setWallet(emptyWallet());setActivities([]);setAction(null);
     setLive(s=>({...initialLiveState(),boot:s.boot,wallets:s.wallets,...patch}));
   },[receiptReads]);
-  const refresh=useCallback(async(date?:string,customToken?:string,historyMode?:'recent'|'all')=>{
+  const refresh=useCallback(async(date?:string,customToken?:string,historyMode?:'recent'|'all',reportFailure=false)=>{
     const ticket=++readTicket.current,old=current.current.live,previous=requestedSelection.current;
     // Keep explicit discovery/filter intent even if a user requests another
     // refresh before it commits. Automatic polling never replaces an active read.
@@ -62,6 +62,7 @@ export function LiveProvider({children}:{children:ReactNode}){
       // outage. The error blocks every write; account/network changes still
       // clear all observations synchronously through clearAccount.
       setLive(s=>({...s,error:publicError(error)}));
+      if(reportFailure)throw Error(publicError(error));
     }}finally{if(activeRead.current===ticket)activeRead.current=null;if(ticket===readTicket.current)setLive(s=>({...s,loading:false}));}
   },[client]);
 
@@ -120,8 +121,10 @@ export function LiveProvider({children}:{children:ReactNode}){
       }catch(error){if(active&&ticket===generation.current)update({loading:false,error:publicError(error)});}
     };
     const disconnected=()=>{if(!active)return;clearAccount();setProvider(undefined);};
-    provider.on?.('accountsChanged',change);provider.on?.('chainChanged',change);provider.on?.('disconnect',disconnected);
-    return()=>{active=false;provider.removeListener?.('accountsChanged',change);provider.removeListener?.('chainChanged',change);provider.removeListener?.('disconnect',disconnected);};
+    const accountsChanged=(accounts:unknown)=>{if(Array.isArray(accounts)&&typeof accounts[0]==='string'&&accounts[0].toLowerCase()===current.current.live.address?.toLowerCase())return;void change();};
+    const chainChanged=(chain:unknown)=>{try{if(typeof chain==='string'&&Number(BigInt(chain))===current.current.live.chainId)return;}catch{/* Unknown event payloads clear the account scope. */}void change();};
+    provider.on?.('accountsChanged',accountsChanged);provider.on?.('chainChanged',chainChanged);provider.on?.('disconnect',disconnected);
+    return()=>{active=false;provider.removeListener?.('accountsChanged',accountsChanged);provider.removeListener?.('chainChanged',chainChanged);provider.removeListener?.('disconnect',disconnected);};
   },[provider,clearAccount]);
   useEffect(()=>{if(live.address)void refresh();},[live.address,live.chainId,refresh]);
   useEffect(()=>{
@@ -185,7 +188,7 @@ export function LiveProvider({children}:{children:ReactNode}){
   const value:Store={mode:'live',live,liveControls:{activeProvider:()=>current.current.provider,readClient:()=>client,connectMobile,connectWallet,switchToBase,refresh:()=>refresh(),loadAllLegacy:()=>refresh(undefined,undefined,'all'),loadLegacy:(date,custom)=>refresh(date,custom,'recent'),reviewPending:async(attest=false)=>{
     if(!live.address)throw Error('Connect the originating wallet first.');
     await reviewPendingTransaction(client as unknown as ReadClient,8453,live.address,attest);void refresh();
-  },refreshRewardValues:()=>setValueRefresh(n=>n+1),sweep:(preview:SweepPreview,hooks?:SweepHooks)=>guarded(context=>runSweep(context,preview,hooks)),approve:async()=>{throw Error('This route has no accepted deployed approval target.');}},
+  },retryBaseReads:()=>refresh(undefined,undefined,undefined,true),refreshRewardValues:()=>setValueRefresh(n=>n+1),sweep:(preview:SweepPreview,hooks?:SweepHooks)=>guarded(context=>runSweep(context,preview,hooks)),approve:async()=>{throw Error('This route has no accepted deployed approval target.');}},
     disabledReason:kind=>liveReason(kind,live,!!live.address),page,go,connected:!!live.address,connect:()=>setWalletDialog(true),
     disconnect:()=>{if(sending.current){setToast('Finish the wallet request before disconnecting.');return;}try{localStorage.removeItem('iaero.wallet.connector.v1');}catch{}if(current.current.live.walletName==='WalletConnect')void disconnectMobileWallet().catch(()=>{});clearAccount();setProvider(undefined);setWalletDialog(false);},
     wallet,activities,flags:{paused:!live.boot?.newStackReady,rewardsUnavailable:true,nftEnabled:false},setFlags:()=>{},

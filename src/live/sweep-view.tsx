@@ -27,6 +27,7 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
   const [extra,setExtra]=useState(l.customToken),[slippage,setSlippage]=useState(100),[preview,setPreview]=useState<SweepPreview>(),[result,setResult]=useState<SweepResult>(),[error,setError]=useState(''),[message,setMessage]=useState('');
   const [automaticRetries,setAutomaticRetries]=useState(true),[retryEvents,setRetryEvents]=useState<SweepRetryEvent[]>([]);
   const lock=useRef(false),stop=useRef(false),alive=useRef(true),scanTicket=useRef(0),claimed=useRef<Map<string,bigint>|undefined>(undefined),claimNotices=useRef<string[]>([]),unreconciled=useRef(new Set<string>());
+  const [retryingReads,setRetryingReads]=useState(false),[readRetryError,setReadRetryError]=useState('');
   const [stopping,setStopping]=useState(false),[walletValues,setWalletValues]=useState<RewardValuation>(),[pricing,setPricing]=useState(false);
   const [claimSources,setClaimSources]=useState({legacy:intent.source!=='liq',liq:intent.source!=='legacy'&&!!boot.liqStakingReady}),[liqClaims,setLiqClaims]=useState<{reading:boolean;rows:LiqReward[];blocked:number;error?:string}>({reading:intent.claimFirst&&intent.source!=='legacy',rows:[],blocked:0}),[confirmed,setConfirmed]=useState<Hash[]>([]),[stakeReview,setStakeReview]=useState(false);
   const claimsDone=useRef(new Set<Hash>()),identity=useRef(l.address?.toLowerCase());
@@ -69,7 +70,7 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
         values[key]=units(amount>0n?amount:token.balance,token.decimals);
         if(amount>0n&&(!usdc||mode!=='USDC'))next.add(key);
       }
-      setAmounts(values);setSelected(next);setMessage(claimed.current?'Only amounts received by this flow are selected. Other wallet balances stay unselected.':`Read ${data.tokenCount} token addresses. Only positive wallet balances are shown.`);setPhase('select');
+      setAmounts(values);setSelected(next);setMessage(claimed.current?'Only amounts received by this flow are selected. Other wallet balances stay unselected.':`Read ${data.tokenCount} token addresses. Only positive wallet balances are shown.`);setPhase('select');return true;
     }catch(e){if(alive.current&&ticket===scanTicket.current){setError(publicError(e));setPhase('select');}}
   };
   useEffect(()=>{if(!intent.claimFirst)void scan();},[]);
@@ -124,6 +125,12 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
     }}
     finally{lock.current=false;}
   };
+  const retryBaseReads=async()=>{
+    if(lock.current)return;lock.current=true;setRetryingReads(true);setReadRetryError('');setPreview(undefined);setError('');
+    try{await (s.liveControls!.retryBaseReads??s.liveControls!.refresh)();const recovered=await scan();if(!recovered)throw Error('Wallet balances are still unavailable. Wait a moment and retry.');if(alive.current){setSelected(new Set());setMessage('Base reads recovered. Choose the remaining tokens and review fresh balances; confirmed steps will not be repeated.');}}
+    catch(e){if(alive.current)setReadRetryError(publicError(e));}
+    finally{lock.current=false;if(alive.current)setRetryingReads(false);}
+  };
   const changeMode=(value:SweepMode)=>{setMode(value);setPreview(undefined);if(value==='USDC')setSelected(old=>new Set([...old].filter(a=>a!==boot.registry.legacy.USDC.toLowerCase())));};
   const count=tokens.filter(t=>selected.has(t.token.toLowerCase())).length;
   const label=mode==='USDC'?'USDC':mode==='iAERO'?'liquid iAERO':'iAERO + previous staking';
@@ -144,7 +151,7 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
     <div className="sweep-context"><Pill tone="blue">Base mainnet</Pill><span>{short(l.address??'')} · Your wallet receives the output</span></div>
     {!busy&&l.chainId!==8453&&<Info tone="blue">Switch your wallet to Base before claiming or converting.<Button variant="secondary" onClick={()=>void s.liveControls!.switchToBase()}>Switch to Base</Button></Info>}
     {!busy&&l.pending&&<Info tone="amber">A wallet request is still pending. Close this dialog to review the pending-request notice before starting another transaction.</Info>}
-    {!busy&&l.error&&<Info tone="amber">Base reads need a refresh before continuing. Your completed steps remain in your wallet.<Button variant="secondary" onClick={()=>void s.liveControls!.refresh()}>Retry Base reads</Button></Info>}
+    {!busy&&(l.error||retryingReads||readRetryError)&&<Info tone="amber"><span role="status">{retryingReads||l.loading?'Refreshing Base reads…':'Base reads need a refresh before continuing. Your completed steps remain in your wallet.'}</span>{(readRetryError||l.error)&&<p className="small">{readRetryError||l.error}</p>}<Button variant="secondary" disabled={retryingReads||l.loading||reading} onClick={()=>void retryBaseReads()}>{retryingReads||l.loading?'Refreshing Base reads…':'Retry Base reads'}</Button></Info>}
 
     {(phase==='claim'||phase==='claiming')?<>
       <p className="dialog-body-copy">Claim rewards, then convert the tokens actually received. You will review exact amounts and quotes before any swap. Principal stays in place.</p>
