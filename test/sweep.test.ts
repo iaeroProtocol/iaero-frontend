@@ -78,7 +78,7 @@ describe('token aggregation and batch claims',()=>{
     await expect(sendRewardClaims({client:e.client,distributor:registry.legacy.epochDistributor as Address,user,rows:Array.from({length:51},(_,i)=>row(input.token,epoch-BigInt(i)*604800n)),send,onConfirmed:confirmed})).rejects.toThrow('Second batch');expect(confirmed).toHaveBeenCalledTimes(1);expect(confirmed.mock.calls[0][0].hash).toBe(hash());
   });
   it('refuses an unknown preflight instead of silently dropping a reward',async()=>{
-    const e=env(),send=vi.fn();vi.mocked(e.client.readContract).mockRejectedValue(Error('Read unavailable'));await expect(sendRewardClaims({client:e.client,distributor:registry.legacy.epochDistributor as Address,user,rows:[row()],send})).rejects.toThrow('Read unavailable');expect(send).not.toHaveBeenCalled();
+    const e=env(),send=vi.fn();vi.mocked(e.client.readContract).mockRejectedValue(Error('Read unavailable'));await expect(sendRewardClaims({client:e.client,distributor:registry.legacy.epochDistributor as Address,user,rows:[row()],send})).rejects.toThrow('status is unavailable');expect(send).not.toHaveBeenCalled();
   });
   it('reads the full registry in bounded batched views, preserving known principal',async()=>{
     const e=env(),addresses=Array.from({length:140},(_,i)=>('0x'+(i+10).toString(16).padStart(40,'0')) as Address),data=await readAccount(e.client,{...boot,rewardTokenAddresses:addresses},user);expect(data.rewardTokenCount).toBeGreaterThanOrEqual(140);expect(data.rewards.length).toBe(data.rewardTokenCount!*4);expect(vi.mocked(e.client.readContract).mock.calls.filter(([r])=>r.functionName==='previewClaimsForEpoch').length).toBeLessThan(16);expect(data.known.legacyStake).toBe(true);

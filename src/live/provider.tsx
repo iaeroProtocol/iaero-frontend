@@ -4,7 +4,7 @@ import {Context,pageFromHash,type Store} from '../store';
 import type {Action,Activity,DemoWallet,Page} from '../domain';
 import {pendingTransaction,reviewPendingTransaction} from '../protocol/pendingTransaction';
 import type {ReadClient} from '../protocol/streamingClient';
-import {executeLiveAction,fetchBootstrap,publicBaseClient,publicError,readAccount,walletIdentity,type ExecutionContext} from './client';
+import {executeLiveAction,fetchBootstrap,publicBaseClient,publicError,readAccount,walletIdentity,switchedWalletIdentity,type ExecutionContext} from './client';
 import {emptyWallet,initialLiveState,liveReason,type LiveState,type WalletChoice} from './types';
 import {readLiq} from './liq';
 import {accountReadScope} from './account-read-client';
@@ -27,6 +27,7 @@ export function LiveProvider({children}:{children:ReactNode}){
   const [receiptReads]=useState(()=>receiptReadClient(publicBaseClient())),client=receiptReads.client,[provider,setProvider]=useState<EventProvider>();
   const [valueRefresh,setValueRefresh]=useState(0),valueKey=liveValueKey(live);
   const current=useRef({live,wallet,provider}),generation=useRef(0),readTicket=useRef(0),sending=useRef(false),connecting=useRef(false);
+  const switching=useRef<{provider:EventProvider}|undefined>(undefined);
   const activeRead=useRef<number|null>(null),requestedSelection=useRef<{date:string;customToken:string;scope:'recent'|'all'}|undefined>(undefined);
   current.current={live,wallet,provider};
   useEffect(()=>()=>{generation.current++;readTicket.current++;activeRead.current=null;requestedSelection.current=undefined;},[]);
@@ -110,19 +111,23 @@ export function LiveProvider({children}:{children:ReactNode}){
   useEffect(()=>{
     if(!provider)return;
     let active=true;
-    const change=async()=>{
+    const change=async(retainAddress=false,dropOnFailure=false)=>{
       if(!active)return;
       const walletName=current.current.live.walletName;
-      clearAccount({loading:true,walletName});
+      // Retain the public connection through a chain transition, but clear its
+      // balances and chain ID immediately. Writes require a fresh identity.
+      clearAccount({address:retainAddress?current.current.live.address:undefined,loading:true,walletName,connecting:!!switching.current});
       const ticket=generation.current;
-      try{const identity=await walletIdentity(provider);if(!active||ticket!==generation.current)return;
+      try{const identity=retainAddress?await switchedWalletIdentity(provider,()=>active&&ticket===generation.current):await walletIdentity(provider);if(!active||ticket!==generation.current)return;
         setLive(s=>({...s,...identity,walletName:s.wallets.find(w=>w.provider===provider)?.name??walletName,loading:!!identity.address}));
         if(identity.address)setActivities(history(identity.address));
-      }catch(error){if(active&&ticket===generation.current)update({loading:false,error:publicError(error)});}
+      }catch(error){if(active&&ticket===generation.current){if(dropOnFailure){switching.current=undefined;clearAccount({error:publicError(error)});setProvider(undefined);}else update({loading:false,error:publicError(error)});}}
     };
-    const disconnected=()=>{if(!active)return;clearAccount();setProvider(undefined);};
+    // [VERIFIED: EIP-1193 Connectivity/Provider Errors] 4901 describes one
+    // unavailable chain. A network transition must not revoke the wallet.
+    const disconnected=(error?:{code?:number;name?:string})=>{if(!active)return;if(error?.code===4901||switching.current?.provider===provider&&error?.code!==4900&&error?.code!==6000&&error?.name!=='USER_DISCONNECTED'){void change(true,true);return;}switching.current=undefined;clearAccount();setProvider(undefined);};
     const accountsChanged=(accounts:unknown)=>{if(Array.isArray(accounts)&&typeof accounts[0]==='string'&&accounts[0].toLowerCase()===current.current.live.address?.toLowerCase())return;void change();};
-    const chainChanged=(chain:unknown)=>{try{if(typeof chain==='string'&&Number(BigInt(chain))===current.current.live.chainId)return;}catch{/* Unknown event payloads clear the account scope. */}void change();};
+    const chainChanged=(chain:unknown)=>{try{if(typeof chain==='string'&&Number(BigInt(chain))===current.current.live.chainId)return;}catch{/* Unknown event payloads clear the account scope. */}void change(true);};
     provider.on?.('accountsChanged',accountsChanged);provider.on?.('chainChanged',chainChanged);provider.on?.('disconnect',disconnected);
     return()=>{active=false;provider.removeListener?.('accountsChanged',accountsChanged);provider.removeListener?.('chainChanged',chainChanged);provider.removeListener?.('disconnect',disconnected);};
   },[provider,clearAccount]);
@@ -136,8 +141,8 @@ export function LiveProvider({children}:{children:ReactNode}){
     return()=>{window.removeEventListener('saero:pending-changed',sync);window.removeEventListener('storage',sync);};
   },[live.address]);
 
-  const connectMobile=async()=>{if(connecting.current)return;connecting.current=true;update({connecting:true,error:undefined});try{const p=await mobileWalletProvider(),accounts=await p.request({method:'eth_requestAccounts'});if(!accounts[0])throw Error('No wallet account was selected.');const address=getAddress(accounts[0]),chainId=Number(BigInt(await p.request({method:'eth_chainId'})));clearAccount({address,chainId,walletName:'WalletConnect',loading:true});setProvider(p);setActivities(history(address));setWalletDialog(false);try{localStorage.setItem('iaero.wallet.connector.v1','walletconnect');}catch{}}catch(error){update({error:publicError(error)});}finally{connecting.current=false;update({connecting:false});}};
-  useEffect(()=>{let active=true;try{if(localStorage.getItem('iaero.wallet.connector.v1')==='walletconnect')void mobileWalletProvider(false).then(async p=>{if(!p||!active)return;const accounts=await p.request({method:'eth_accounts'});if(!accounts[0]||!active)return;const address=getAddress(accounts[0]),chainId=Number(BigInt(await p.request({method:'eth_chainId'})));if(active){clearAccount({address,chainId,walletName:'WalletConnect',loading:true});setProvider(p);setActivities(history(address));}}).catch(()=>{});}catch{}return()=>{active=false;};},[clearAccount]);
+  const connectMobile=async()=>{if(connecting.current)return;connecting.current=true;const ticket=generation.current;update({connecting:true,error:undefined});try{const p=await mobileWalletProvider(),identity=await switchedWalletIdentity(p,()=>ticket===generation.current);if(!identity.address)throw Error('The wallet session has no authorized account. Reconnect WalletConnect and approve an account on Base.');if(ticket!==generation.current)return;const address=identity.address;clearAccount({...identity,walletName:'WalletConnect',loading:true});setProvider(p);setActivities(history(address));setWalletDialog(false);try{localStorage.setItem('iaero.wallet.connector.v1','walletconnect');}catch{}}catch(error){if(ticket===generation.current)update({error:publicError(error)});}finally{connecting.current=false;update({connecting:false});}};
+  useEffect(()=>{let active=true;const ticket=generation.current;try{if(localStorage.getItem('iaero.wallet.connector.v1')==='walletconnect')void mobileWalletProvider(false).then(async p=>{if(!p||!active||ticket!==generation.current||connecting.current||current.current.provider)return;const identity=await walletIdentity(p);if(!identity.address)return;if(active&&ticket===generation.current&&!connecting.current&&!current.current.provider){clearAccount({...identity,walletName:'WalletConnect',loading:true});setProvider(p);setActivities(history(identity.address));}}).catch(()=>{});}catch{}return()=>{active=false;};},[clearAccount]);
   const connectWallet=async(id:string)=>{
     if(connecting.current)return;connecting.current=true;update({connecting:true,error:undefined});
     try{
@@ -149,9 +154,17 @@ export function LiveProvider({children}:{children:ReactNode}){
     }catch(error){update({error:publicError(error)});}finally{connecting.current=false;update({connecting:false});}
   };
   const switchToBase=async()=>{
-    try{if(!provider)throw Error('Connect a browser wallet first.');await provider.request({method:'wallet_switchEthereumChain',params:[{chainId:'0x2105'}]});
-      const identity=await walletIdentity(provider);clearAccount({...identity,walletName:live.walletName,loading:!!identity.address});
-    }catch(error){update({error:publicError(error)});setToast('Choose Base (chain 8453) in your wallet, then reconnect if needed.');}
+    if(switching.current)return;
+    const p=current.current.provider;if(!p){setToast('Connect your wallet first.');return;}if(sending.current){setToast('Finish the current wallet request before switching networks.');return;}
+    const attempt={provider:p},walletName=current.current.live.walletName;switching.current=attempt;update({connecting:true,error:undefined});
+    try{await p.request({method:'wallet_switchEthereumChain',params:[{chainId:'0x2105'}]});
+      const identity=await switchedWalletIdentity(p,()=>switching.current===attempt,8453);
+      if(switching.current!==attempt)return;
+      if(!identity.address){clearAccount({walletName});setProvider(undefined);throw Error('The wallet session has no authorized account. Reconnect WalletConnect and approve an account on Base.');}
+      clearAccount({...identity,walletName,loading:true,connecting:true});setActivities(history(identity.address));
+      if(identity.chainId!==8453)throw Error('The wallet has not switched to Base yet. Choose Base in your wallet, then try again.');
+    }catch(error){if(switching.current===attempt){update({error:publicError(error)});setToast('The network switch did not complete. Choose Base in your wallet, then retry.');}}
+    finally{if(switching.current===attempt){switching.current=undefined;update({connecting:false});}}
   };
   const guarded=async<T,>(run:(context:ExecutionContext)=>Promise<T>)=>{
     if(sending.current)throw Error('A wallet request is already in progress.');
@@ -188,9 +201,9 @@ export function LiveProvider({children}:{children:ReactNode}){
   const value:Store={mode:'live',live,liveControls:{activeProvider:()=>current.current.provider,readClient:()=>client,connectMobile,connectWallet,switchToBase,refresh:()=>refresh(),loadAllLegacy:()=>refresh(undefined,undefined,'all'),loadLegacy:(date,custom)=>refresh(date,custom,'recent'),reviewPending:async(attest=false)=>{
     if(!live.address)throw Error('Connect the originating wallet first.');
     await reviewPendingTransaction(client as unknown as ReadClient,8453,live.address,attest);void refresh();
-  },retryBaseReads:()=>refresh(undefined,undefined,undefined,true),refreshRewardValues:()=>setValueRefresh(n=>n+1),deposit:(review,hooks)=>guarded(async context=>(await import('./deposit')).runDeposit(context,review,hooks)),sweep:(preview:SweepPreview,hooks?:SweepHooks)=>guarded(context=>runSweep(context,preview,hooks)),approve:async()=>{throw Error('This route has no accepted deployed approval target.');}},
+  },retryBaseReads:async()=>{await receiptReads.reconcile();await refresh(undefined,undefined,undefined,true);},refreshRewardValues:()=>setValueRefresh(n=>n+1),deposit:(review,hooks)=>guarded(async context=>(await import('./deposit')).runDeposit(context,review,hooks)),sweep:(preview:SweepPreview,hooks?:SweepHooks)=>guarded(context=>runSweep(context,preview,hooks)),approve:async()=>{throw Error('This route has no accepted deployed approval target.');}},
     disabledReason:kind=>liveReason(kind,live,!!live.address),page,go,connected:!!live.address,connect:()=>setWalletDialog(true),
-    disconnect:()=>{if(sending.current){setToast('Finish the wallet request before disconnecting.');return;}try{localStorage.removeItem('iaero.wallet.connector.v1');}catch{}if(current.current.live.walletName==='WalletConnect')void disconnectMobileWallet().catch(()=>{});clearAccount();setProvider(undefined);setWalletDialog(false);},
+    disconnect:()=>{if(sending.current){setToast('Finish the wallet request before disconnecting.');return;}switching.current=undefined;try{localStorage.removeItem('iaero.wallet.connector.v1');}catch{}if(current.current.live.walletName==='WalletConnect')void disconnectMobileWallet().catch(()=>{});clearAccount();setProvider(undefined);setWalletDialog(false);},
     wallet,activities,flags:{paused:!live.boot?.newStackReady,rewardsUnavailable:true,nftEnabled:false},setFlags:()=>{},
     walletDialog,setWalletDialog,action,setAction,execute,notify:setToast,toast,dismissToast:()=>setToast(''),reset:()=>void refresh(),theme,toggleTheme:()=>setTheme(t=>t==='light'?'dark':'light')};
   return <Context.Provider value={value}>{children}</Context.Provider>;

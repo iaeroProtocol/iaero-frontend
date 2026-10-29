@@ -128,6 +128,19 @@ export async function walletIdentity(provider:EIP1193Provider):Promise<{address?
   const [accounts,chain]=await Promise.all([provider.request({method:'eth_accounts'}),provider.request({method:'eth_chainId'})]);
   return {address:accounts[0]?getAddress(accounts[0]):undefined,chainId:Number(BigInt(chain))};
 }
+// Network/session transitions can publish chainChanged before eth_accounts
+// catches up. Only connection transitions use these bounded read retries;
+// transaction guards continue to use the immediate identity check above.
+export async function switchedWalletIdentity(provider:EIP1193Provider,current:()=>boolean,targetChain?:number){
+  let identity:{address?:Address;chainId:number}|undefined,error:unknown;
+  for(let attempt=0;attempt<4;attempt++){
+    if(!current())throw Error('The wallet connection changed during the network switch.');
+    try{identity=await walletIdentity(provider);error=undefined;if(identity.address&&(targetChain===undefined||identity.chainId===targetChain))return identity;}catch(e){error=e;}
+    if(attempt<3)await new Promise(r=>setTimeout(r,150*(attempt+1)));
+  }
+  if(!current())throw Error('The wallet connection changed during the network switch.');
+  if(error)throw error;return identity!;
+}
 
 export type ExecutionContext={client:BaseClient;provider:EIP1193Provider;state:LiveState;onBroadcast:(hash:Hash)=>void;onProgress?:(text:string)=>void;onConfirmed?:(activity:Activity)=>void;canContinue?:()=>boolean};
 export async function createGuardedSender({client,provider,state,onBroadcast,canContinue:workflowCurrent}:ExecutionContext,canContinue=()=>true,gasLimit?:(request:any)=>bigint|undefined){
@@ -153,7 +166,7 @@ export async function executeLiveAction(context:ExecutionContext&{action:Action}
   };
   if(['stake','unstake','claim','autoStake','autoUnstake','autoClaim','mint','nft','collateralWrap','collateralRedeem','collateralClaim'].includes(action.kind)){const hashes=await executeNew(context,action,observedSend);return {hashes,activities:[]};}
   if(action.kind.startsWith('liq')){const hashes=await executeLiq(context,action,observedSend);return {hashes,activities:[]};}
-  if(action.kind==='legacyClaimMany')return sendRewardClaims({client,distributor:c.epochDistributor,user,rows:action.rewardLegs??[],send,onProgress,onConfirmed});
+  if(action.kind==='legacyClaimMany')return sendRewardClaims({client,boot,distributor:c.epochDistributor,user,rows:action.rewardLegs??[],send,onProgress,onConfirmed});
   if(action.kind==='legacyStake'){
     const checks=await readApprovalChecks(client,boot,user,[{token:c.iAERO,spender:c.epochDistributor}]),check=checks.get(approvalKey(c.iAERO,c.epochDistributor));
     if(action.amount<=0n||!check||check.error||check.balance===undefined||check.allowance===undefined||action.amount>check.balance)throw Error(check?.error??'The available iAERO balance changed. Review the staking amount.');

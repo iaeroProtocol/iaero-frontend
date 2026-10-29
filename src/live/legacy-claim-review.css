@@ -1,0 +1,10 @@
+.legacy-claim-availability{margin:16px 0;min-width:0}
+.legacy-claim-availability p{line-height:1.65;overflow-wrap:anywhere}
+.legacy-claim-availability details{margin-top:10px}
+.legacy-claim-availability summary{min-height:44px;display:flex;align-items:center;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.legacy-claim-availability summary:focus-visible{outline:2px solid var(--blue);outline-offset:3px;border-radius:4px}
+.legacy-claim-blocked-token{border-top:1px solid var(--line);padding:12px 0}
+.legacy-claim-blocked-token strong{display:block;overflow-wrap:anywhere}
+.legacy-claim-blocked-token a{font-size:.875rem;font-weight:400;white-space:nowrap}
+.legacy-claim-blocked-token p{font-size:.875rem;margin:6px 0 0}
+@media(max-width:640px){.legacy-claim-availability>.button{max-width:100%;white-space:normal}.legacy-claim-blocked-token a{display:inline-block}}

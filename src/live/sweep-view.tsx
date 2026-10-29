@@ -12,6 +12,7 @@ import {claimedTokenAmounts} from './claim-receipts';
 import {LiveLegacyStakeDialog} from './views';
 import {RewardSummary} from './reward-list';
 import {ExactAmount} from './exact-amount';
+import {LegacyClaimAvailability,useLegacyClaimPlan} from './legacy-claim-review';
 import {retrySlippage,SWEEP_MAX_RETRIES,type SweepRetryEvent} from './sweep-retries';
 import {priceRewards,valueText,type RewardValuation} from './reward-value';
 import {buildSweepPreview,scanSweepWallet,orderSweepTokens,sweepOutput,SWEEP_BATCH_LIMIT,sweepGroups,type SweepMode,type SweepPreview,type SweepResult,type SweepToken,type SweepSkipped,type HiddenSweepToken} from './sweep';
@@ -31,6 +32,7 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
   const [stopping,setStopping]=useState(false),[walletValues,setWalletValues]=useState<RewardValuation>(),[pricing,setPricing]=useState(false);
   const [claimSources,setClaimSources]=useState({legacy:intent.source!=='liq',liq:intent.source!=='legacy'&&!!boot.liqStakingReady}),[liqClaims,setLiqClaims]=useState<{reading:boolean;rows:LiqReward[];blocked:number;error?:string}>({reading:intent.claimFirst&&intent.source!=='legacy',rows:[],blocked:0}),[confirmed,setConfirmed]=useState<Hash[]>([]),[stakeReview,setStakeReview]=useState(false);
   const claimsDone=useRef(new Set<Hash>()),identity=useRef(l.address?.toLowerCase());
+  const legacyClaims=useLegacyClaimPlan(intent.claimFirst&&intent.source!=='liq'&&claimSources.legacy?l.rewards:undefined),legacyRows=legacyClaims.data?.eligible??[];
   useEffect(()=>{if(identity.current!==l.address?.toLowerCase()||l.chainId!==8453){stop.current=true;scanTicket.current++;claimed.current=undefined;setSelected(new Set());setPreview(undefined);setError('Wallet or network changed. Reopen this flow for the connected account.');}},[l.address,l.chainId]);
   useEffect(()=>{let current=true;if(!intent.claimFirst||intent.source==='legacy')return;
     if(!boot.liqStakingReady||!l.address){setLiqClaims({reading:false,rows:[],blocked:0,error:'LIQ staking is not verified.'});return;}
@@ -78,7 +80,8 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
     if(lock.current)return;lock.current=true;setError('');setPhase('claiming');claimed.current??=new Map();
     let confirmedAny=false;
     try{
-    const sources=[...(claimSources.legacy&&l.rewards.length?[{address:boot.registry.legacy.epochDistributor,rows:l.rewards,action:claimAction(l.rewards,true)}]:[]),...(claimSources.liq&&liqClaims.rows.length?[{address:boot.registry.liqStaking!.distributor,rows:liqClaims.rows,action:{kind:'liqClaimMany' as const,amount:0n,title:'Claim LIQ rewards before conversion',description:'Claim the simulated LIQ rewards, then review only the tokens actually received for conversion.',source:'LIQ staking',target:'Your wallet',approval:false,rewardLegs:liqClaims.rows.map(r=>({...r,epoch:0n}))}}]:[])];
+    if(claimSources.legacy&&l.rewards.length&&!legacyClaims.ready)throw Error('Recheck previous reward payout availability before claiming.');
+    const sources=[...(claimSources.legacy&&legacyRows.length?[{address:boot.registry.legacy.epochDistributor,rows:legacyRows,action:claimAction(legacyRows,true)}]:[]),...(claimSources.liq&&liqClaims.rows.length?[{address:boot.registry.liqStaking!.distributor,rows:liqClaims.rows,action:{kind:'liqClaimMany' as const,amount:0n,title:'Claim LIQ rewards before conversion',description:'Claim the simulated LIQ rewards, then review only the tokens actually received for conversion.',source:'LIQ staking',target:'Your wallet',approval:false,rewardLegs:liqClaims.rows.map(r=>({...r,epoch:0n}))}}]:[])];
       for(const source of sources){
         let hashes:Hash[]=[],failure:unknown;
         try{const execution=await s.execute(source.action);hashes=execution?.hashes??[];}catch(error){hashes=(error as any)?.confirmedHashes??[];failure=error;}
@@ -145,7 +148,7 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
     }catch{unpricedSelection++;}
   }
   const step=phase==='done'?'done':phase==='review'||phase==='running'?'review':phase==='claim'||phase==='claiming'?'claim':'select';
-  const claimCount=(claimSources.legacy?l.rewards.length:0)+(claimSources.liq?liqClaims.rows.length:0),claimBlocked=walletBlocked||claimSources.legacy&&!!s.disabledReason('legacyClaimMany')||claimSources.liq&&(liqClaims.reading||!!liqClaims.error);
+  const claimCount=(claimSources.legacy?legacyRows.length:0)+(claimSources.liq?liqClaims.rows.length:0),claimBlocked=walletBlocked||claimSources.legacy&&(!!s.disabledReason('legacyClaimMany')||l.rewards.length>0&&!legacyClaims.ready)||claimSources.liq&&(liqClaims.reading||!!liqClaims.error);
   if(stakeReview&&result)return <LiveLegacyStakeDialog maximum={result.iaero} onClose={()=>setStakeReview(false)}/>;
   return <Dialog title={phase==='done'?'Your rewards, put to work.':phase==='claim'||phase==='claiming'?'Claim, then make your next move.':'A little less dust. More possibility.'} subtitle={phase==='done'?(result?.hashes.length?'Confirmed steps on Base. Your actual outputs are below.':'No transactions were sent. Your tokens remain in your wallet.'):'Convert selected wallet tokens into USDC or iAERO, with every amount reviewed.'} onClose={onClose} busy={busy} className="sweep-dialog" stepKey={step}>
     <div className="sweep-context"><Pill tone="blue">Base mainnet</Pill><span>{short(l.address??'')} · Your wallet receives the output</span></div>
@@ -155,7 +158,7 @@ export function SweepWizard({intent,onClose}:{intent:SweepIntent;onClose:()=>voi
 
     {(phase==='claim'||phase==='claiming')?<>
       <p className="dialog-body-copy">Claim rewards, then convert the tokens actually received. You will review exact amounts and quotes before any swap. Principal stays in place.</p>
-      {intent.source!=='liq'&&<section className="sweep-claim-source"><label><input type="checkbox" checked={claimSources.legacy} disabled={busy} onChange={e=>setClaimSources(old=>({...old,legacy:e.target.checked}))}/><strong>Previous iAERO staking</strong><span>{groupRewards(l.rewards).length} reward tokens · {l.rewards.length} token/week entries · {l.historyMode==='all'?'all loaded weeks':'currently loaded weeks'}</span></label>{claimSources.legacy&&<RewardSummary rows={l.rewards}/>}</section>}
+      {intent.source!=='liq'&&<section className="sweep-claim-source"><label><input type="checkbox" checked={claimSources.legacy} disabled={busy} onChange={e=>setClaimSources(old=>({...old,legacy:e.target.checked}))}/><strong>Previous iAERO staking</strong><span>{legacyClaims.reading?'Checking payout availability…':groupRewards(legacyRows).length+' available reward tokens · '+legacyRows.length+' token/week entries'} · {l.historyMode==='all'?'all loaded weeks':'currently loaded weeks'}</span></label>{claimSources.legacy&&<><RewardSummary rows={legacyRows}/>{l.rewards.length>0&&<LegacyClaimAvailability reading={legacyClaims} disabled={busy}/>}</>}</section>}
       {intent.source!=='legacy'&&<section className="sweep-claim-source"><label><input type="checkbox" checked={claimSources.liq} disabled={busy||!boot.liqStakingReady} onChange={e=>setClaimSources(old=>({...old,liq:e.target.checked}))}/><strong>LIQ staking</strong><span>{liqClaims.reading?'Checking available rewards…':liqClaims.error?'Reward checks unavailable':liqClaims.rows.length+' available reward tokens'}</span></label>{claimSources.liq&&liqClaims.rows.length>0&&<RewardSummary rows={liqClaims.rows.map(r=>({...r,epoch:0n}))}/>} {!!liqClaims.blocked&&<p className="small muted">{liqClaims.blocked} unavailable LIQ token(s) stay unclaimed.</p>}{claimSources.liq&&liqClaims.error&&<p className="form-error">{liqClaims.error}</p>}</section>}
       <p className="small muted">Claims are grouped up to 50 entries per transaction. Each source confirms in order. Native ETH stays in your wallet.</p>{error&&<p className="form-error" role="alert">{error}</p>}
       <Button className="full-width" disabled={busy||claimBlocked||!claimCount} onClick={()=>void claim()}>{phase==='claiming'?<><span className="spinner"/>{l.progress??'Confirm the claims in your wallet…'}</>:claimSources.liq&&liqClaims.reading?'Checking rewards…':'Claim selected rewards in wallet'}</Button>
