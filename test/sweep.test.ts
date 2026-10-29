@@ -111,7 +111,7 @@ describe('sweep execution and ownership',()=>{
   it('allows liquid iAERO output without staking',async()=>{const e=env(),p=await buildSweepPreview(e.client,boot,user,[input],'iAERO',100),result=await runSweep(e.context,p);expect(result.iaero).toBe(100n*UNIT);expect(result.staked).toBe(0n);expect(e.sent.some(w=>w.name==='stake')).toBe(false);});
   it('leaves converted iAERO liquid when previous staking becomes paused',async()=>{
     const e=env(),p=await buildSweepPreview(e.client,boot,user,[input],'stake',100),original=vi.mocked(e.client.readContract).getMockImplementation()!;
-    vi.mocked(e.client.readContract).mockImplementation(async(r:any)=>r.functionName==='paused'?true:original(r));await expect(runSweep(e.context,p)).rejects.toThrow('staking is unavailable');expect(e.sent.some(w=>w.name==='execute')).toBe(true);expect(e.sent.some(w=>w.name==='stake')).toBe(false);
+    vi.mocked(e.client.readContract).mockImplementation(async(r:any)=>r.functionName==='paused'?true:original(r));expect((await runSweep(e.context,p)).stakingDeferred).toMatch(/staking is unavailable/);expect(e.sent.some(w=>w.name==='execute')).toBe(true);expect(e.sent.some(w=>w.name==='stake')).toBe(false);
   });
   it('does not stake when the exact conversion receipt lacks a verifiable iAERO transfer',async()=>{
     const e=env(),p=await buildSweepPreview(e.client,boot,user,[input],'stake',100),original=vi.mocked(e.client.getTransactionReceipt).getMockImplementation()!;
@@ -144,7 +144,7 @@ describe('independent swap checks and spam filtering',()=>{
   it('excludes a reverting swap while retaining a separately simulated valid swap',async()=>{
     const e=env();e.simulationFailures.add(rndr.token.toLowerCase());
     const p=await buildSweepPreview(e.client,boot,user,[rndr,input],'USDC',100);
-    expect(p.inputs).toEqual([input]);expect(p.skipped[0].stage).toBe('simulation');expect(e.client.simulateBlocks).toHaveBeenCalledTimes(2);expect(e.sent).toHaveLength(0);expect(e.allowances.size).toBe(0);
+    expect(p.inputs).toEqual([input]);expect(p.skipped[0].stage).toBe('simulation');expect(e.client.simulateBlocks).toHaveBeenCalledTimes(3);expect(e.sent).toHaveLength(0);expect(e.allowances.size).toBe(0);
   });
   it('simulates an insufficient allowance reset, exact approval and exact swap without changing actual allowances',async()=>{
     const e=env();e.allowances.set(input.token.toLowerCase()+':'+registry.sweep.swapper.toLowerCase(),1n);
@@ -164,14 +164,14 @@ describe('independent swap checks and spam filtering',()=>{
   });
   it('does not enable a token when the simulation provider is unavailable',async()=>{
     const e=env();vi.mocked(e.client.simulateBlocks).mockRejectedValue(Error('Method unavailable'));
-    const p=await buildSweepPreview(e.client,boot,user,[rndr,input],'USDC',100);expect(p.inputs).toHaveLength(0);expect(p.skipped.every(s=>s.stage==='simulation')).toBe(true);expect(e.sent).toHaveLength(0);
+    await expect(buildSweepPreview(e.client,boot,user,[rndr,input],'USDC',100)).rejects.toThrow('Grouped token checks');expect(e.client.simulateBlocks).toHaveBeenCalledTimes(1);expect(e.sent).toHaveLength(0);
   });
   it('rejects a false approval result and missing or foreign simulated output events',async()=>{
     const e=env(),original=vi.mocked(e.client.simulateBlocks).getMockImplementation()!;
     vi.mocked(e.client.simulateBlocks).mockImplementation(async(p:any)=>{const result=await original(p);(result[0].calls[0] as any).data=encodeFunctionResult({abi:STAKING_ERC20_ABI,functionName:'approve',result:false});return result;});
     expect((await buildSweepPreview(e.client,boot,user,[input],'USDC',100)).inputs).toHaveLength(0);
     vi.mocked(e.client.simulateBlocks).mockImplementation(async(p:any)=>{const result=await original(p);(result[0].calls.at(-1) as any).logs[0].address=other;return result;});
-    expect((await buildSweepPreview(e.client,boot,user,[input],'USDC',100)).inputs).toHaveLength(0);expect(e.sent).toHaveLength(0);
+    await expect(buildSweepPreview(e.client,boot,user,[input],'USDC',100)).rejects.toThrow('Grouped token checks');expect(e.sent).toHaveLength(0);
   });
   it('hides listed addresses even when they impersonate WETH, while legitimate unpriced tokens remain distinct',()=>{
     const policy=boot.tokenFilter!,blocked=policy.addresses.find(a=>BigInt(a)>0n)!;
@@ -250,13 +250,13 @@ describe('adaptive swap batches',()=>{
   });
   it('isolates an individual gas-check failure and still sends the valid subset',async()=>{
     const e=env(),rows=inputs(2),p=await buildSweepPreview(e.client,boot,user,rows,'USDC',100);
-    vi.mocked(e.client.estimateContractGas).mockImplementation(async(r:any)=>{if(r.args[0].some((q:any)=>q.tokenIn.toLowerCase()===rows[0].token.toLowerCase()))throw Error('Gas estimation failed');return 300000n;});
+    vi.mocked(e.client.estimateContractGas).mockImplementation(async(r:any)=>{if(r.args[0].some((q:any)=>q.tokenIn.toLowerCase()===rows[0].token.toLowerCase()))throw new SweepPreflightRevert('Token gas simulation reverted');return 300000n;});
     const result=await runSweep(e.context,p),trades=e.sent.filter(t=>t.name==='executePlanFromCallerAdvanced');
     expect(result.skipped[0]).toMatchObject({input:rows[0],stage:'batch'});expect(result.swapped).toBe(1);expect(trades).toHaveLength(1);expect(trades[0].args[0][0].tokenIn.toLowerCase()).toBe(rows[1].token.toLowerCase());
   });
   it('requires a successful gas estimate and sends no swaps when estimation is unavailable',async()=>{
     const e=env(),p=await buildSweepPreview(e.client,boot,user,inputs(2),'USDC',100);vi.mocked(e.client.estimateContractGas).mockRejectedValue(Error('RPC unavailable'));
-    const result=await runSweep(e.context,p);expect(result.swapped).toBe(0);expect(result.skipped).toHaveLength(2);expect(e.sent.some(t=>t.name==='executePlanFromCallerAdvanced')).toBe(false);
+    await expect(runSweep(e.context,p)).rejects.toThrow('RPC unavailable');expect(e.client.estimateContractGas).toHaveBeenCalledTimes(1);expect(e.sent.some(t=>t.name==='executePlanFromCallerAdvanced')).toBe(false);
   });
   it('does not split or replay a batch after confirmation when its receipt cannot be reconciled',async()=>{
     const e=env(),p=await buildSweepPreview(e.client,boot,user,inputs(2),'USDC',100);e.setCorruptLogs();

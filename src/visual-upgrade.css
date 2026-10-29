@@ -338,3 +338,11 @@
  .live-status-wrap{gap:6px;margin-bottom:4px}
  .deployment-caption{margin-top:0}
 }
+
+.sweep-claim-source{border:1px solid var(--line);border-radius:16px;padding:16px;margin:16px 0;}
+.sweep-claim-source>label{display:grid;grid-template-columns:22px minmax(0,1fr);gap:4px 10px;align-items:center;cursor:pointer;}
+.sweep-claim-source>label>input{grid-row:1/3;accent-color:var(--blue);width:18px;height:18px;}
+.sweep-claim-source>label>span{grid-column:2;font-size:.875rem;color:var(--muted);}
+.sweep-claim-source .reward-summary{margin-top:12px;}
+.sweep-dialog .transaction-success~.full-width+.full-width{margin-top:12px;}
+@media(max-width:480px){.sweep-claim-source{padding:12px;}.sweep-claim-source>label>strong{font-size:1rem;}}

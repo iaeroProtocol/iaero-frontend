@@ -1,5 +1,5 @@
 import {useCallback,useEffect,useRef,useState,type ReactNode} from 'react';
-import {getAddress,type Address,type EIP1193Provider} from 'viem';
+import {getAddress,type Address,type Hash,type EIP1193Provider} from 'viem';
 import {Context,pageFromHash,type Store} from '../store';
 import type {Action,Activity,DemoWallet,Page} from '../domain';
 import {pendingTransaction,reviewPendingTransaction} from '../protocol/pendingTransaction';
@@ -14,6 +14,7 @@ import {walletWorkflow} from './session';
 import {runSweep,type SweepPreview,type SweepHooks} from './sweep';
 import {liveValueKey,priceRewards} from './reward-value';
 import {mobileWalletProvider,disconnectMobileWallet} from './walletconnect';
+import {receiptReadClient} from './receipt-read-client';
 
 type EventProvider=EIP1193Provider&{on?:(event:string,listener:(...args:any[])=>void)=>void;removeListener?:(event:string,listener:(...args:any[])=>void)=>void;providers?:EventProvider[];isMetaMask?:boolean;isRabby?:boolean};
 const historyKey=(address:Address)=>'iaero.live.activity.8453.'+address.toLowerCase();
@@ -23,7 +24,7 @@ export function LiveProvider({children}:{children:ReactNode}){
   const [live,setLive]=useState<LiveState>(initialLiveState),[wallet,setWallet]=useState<DemoWallet>(emptyWallet),[activities,setActivities]=useState<Activity[]>([]);
   const [page,setPage]=useState<Page>(pageFromHash),[walletDialog,setWalletDialog]=useState(false),[action,setAction]=useState<Action|null>(null),[toast,setToast]=useState('');
   const [theme,setTheme]=useState<'light'|'dark'>(()=>{try{return localStorage.getItem('iaero.preview.theme')==='dark'?'dark':'light';}catch{return 'light';}});
-  const [client]=useState(publicBaseClient),[provider,setProvider]=useState<EventProvider>();
+  const [receiptReads]=useState(()=>receiptReadClient(publicBaseClient())),client=receiptReads.client,[provider,setProvider]=useState<EventProvider>();
   const [valueRefresh,setValueRefresh]=useState(0),valueKey=liveValueKey(live);
   const current=useRef({live,wallet,provider}),generation=useRef(0),readTicket=useRef(0),sending=useRef(false),connecting=useRef(false);
   const activeRead=useRef<number|null>(null),requestedSelection=useRef<{date:string;customToken:string;scope:'recent'|'all'}|undefined>(undefined);
@@ -31,9 +32,9 @@ export function LiveProvider({children}:{children:ReactNode}){
   useEffect(()=>()=>{generation.current++;readTicket.current++;activeRead.current=null;requestedSelection.current=undefined;},[]);
   const update=(patch:Partial<LiveState>)=>setLive(s=>({...s,...patch}));
   const clearAccount=useCallback((patch:Partial<LiveState>={})=>{
-    generation.current++;readTicket.current++;activeRead.current=null;requestedSelection.current=undefined;setWallet(emptyWallet());setActivities([]);setAction(null);
+    generation.current++;readTicket.current++;activeRead.current=null;requestedSelection.current=undefined;receiptReads.reset();setWallet(emptyWallet());setActivities([]);setAction(null);
     setLive(s=>({...initialLiveState(),boot:s.boot,wallets:s.wallets,...patch}));
-  },[]);
+  },[receiptReads]);
   const refresh=useCallback(async(date?:string,customToken?:string,historyMode?:'recent'|'all')=>{
     const ticket=++readTicket.current,old=current.current.live,previous=requestedSelection.current;
     // Keep explicit discovery/filter intent even if a user requests another
@@ -155,8 +156,9 @@ export function LiveProvider({children}:{children:ReactNode}){
     if(!snapshot.provider||!snapshot.live.address)throw Error('Connect a wallet first.');
     if(snapshot.live.chainId!==8453||snapshot.live.pending)throw Error('Switch to Base and resolve any pending request first.');
     if(snapshot.live.error)throw Error('Refresh Base contract data successfully before starting a transaction.');
-    sending.current=true;update({lastHash:undefined,progress:undefined,confirmedHashes:[]});
+    sending.current=true;const confirmed:Hash[]=[];update({lastHash:undefined,progress:undefined,confirmedHashes:[]});
     const onConfirmed=(activity:Activity)=>{
+      if(activity.hash&&!confirmed.includes(activity.hash))confirmed.push(activity.hash);
       const address=snapshot.live.address!,records=[activity,...history(address).filter(a=>a.hash!==activity.hash)].slice(0,30);
       try{localStorage.setItem(historyKey(address),JSON.stringify(records));}catch{}
       if(ticket===generation.current){setActivities(records);setLive(s=>({...s,confirmedHashes:[...(s.confirmedHashes??[]).filter(h=>h!==activity.hash),activity.hash!]}));}
@@ -165,7 +167,7 @@ export function LiveProvider({children}:{children:ReactNode}){
       return await walletWorkflow(snapshot.live.address,()=>run({client,provider:snapshot.provider!,state:snapshot.live,canContinue:()=>ticket===generation.current,onConfirmed,onProgress:progress=>{if(ticket===generation.current)update({progress,lastHash:undefined});},onBroadcast:hash=>{
         if(ticket===generation.current)update({lastHash:hash});
       }}));
-    }catch(error){throw Error(publicError(error));}finally{sending.current=false;if(ticket===generation.current)void refresh();}
+    }catch(error){throw Object.assign(Error(publicError(error)),{confirmedHashes:confirmed.slice()});}finally{sending.current=false;if(ticket===generation.current)void refresh();}
   };
   const execute=async(request:Action)=>{
     const reason=liveReason(request.kind,current.current.live,!!current.current.live.address);if(reason)throw Error(reason);
@@ -180,7 +182,7 @@ export function LiveProvider({children}:{children:ReactNode}){
     });
   };
   const go=(p:Page)=>{setPage(p);window.location.hash=p;window.scrollTo({top:0,behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'});};
-  const value:Store={mode:'live',live,liveControls:{activeProvider:()=>current.current.provider,connectMobile,connectWallet,switchToBase,refresh:()=>refresh(),loadAllLegacy:()=>refresh(undefined,undefined,'all'),loadLegacy:(date,custom)=>refresh(date,custom,'recent'),reviewPending:async(attest=false)=>{
+  const value:Store={mode:'live',live,liveControls:{activeProvider:()=>current.current.provider,readClient:()=>client,connectMobile,connectWallet,switchToBase,refresh:()=>refresh(),loadAllLegacy:()=>refresh(undefined,undefined,'all'),loadLegacy:(date,custom)=>refresh(date,custom,'recent'),reviewPending:async(attest=false)=>{
     if(!live.address)throw Error('Connect the originating wallet first.');
     await reviewPendingTransaction(client as unknown as ReadClient,8453,live.address,attest);void refresh();
   },refreshRewardValues:()=>setValueRefresh(n=>n+1),sweep:(preview:SweepPreview,hooks?:SweepHooks)=>guarded(context=>runSweep(context,preview,hooks)),approve:async()=>{throw Error('This route has no accepted deployed approval target.');}},

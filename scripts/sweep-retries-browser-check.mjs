@@ -11,7 +11,8 @@ for(const width of [1440,390,320]){
  state.failedBroadcastNames=new Map();
  const tools=()=>page.getByRole('region',{name:'Reward tools',exact:true}),dialog=()=>page.getByRole('dialog');
  const open=async(name='Sweep to USDC',bps=100,retries=true)=>{
-  await tools().getByRole('button',{name,exact:true}).click();
+  await tools().getByRole('button',{name:name==='Compound to iAERO'?'Claim & compound':'Claim & sweep to USDC',exact:true}).click();
+  await page.getByRole('button',{name:'Use tokens already in my wallet',exact:true}).click();
   await page.getByRole('checkbox',{name:'Select WETH 0x4200…0006',exact:true}).waitFor();
   await page.getByRole('button',{name:'Clear selection',exact:true}).click();await page.getByRole('checkbox',{name:'Select WETH 0x4200…0006',exact:true}).check();
   await page.getByRole('textbox',{name:'Amount of WETH 0x4200…0006',exact:true}).fill('0.25');await page.locator('#sweep-slippage').selectOption(String(bps));

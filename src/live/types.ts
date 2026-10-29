@@ -10,7 +10,7 @@ export type WalletField=Exclude<keyof DemoWallet,'checkpoint'>;
 export type WalletChoice={id:string;name:string;rdns:string;provider:EIP1193Provider};
 export type LegacyReward=RewardLeg;
 export type BaseRegistry={chainId:8453;network:string;explorer:string;legacy:Record<'iAERO'|'LIQ'|'USDC'|'WETH'|'epochDistributor'|'stiAERO'|'autoVault'|'harvester',Address>;aero:{token:Address;votingEscrow:Address;voter:Address;protocolNft:string};forwarder:Address;newStack:{status:string;svault:Address|null;streamingDistributor:Address|null;streamAutoVault:Address|null;rewardForwarder:Address|null;revenueConverter:Address|null};marketData:{liqUsdcPool:Address;liqCirculation:{treasurySourceVault:Address;vesting:Address;streamIds:string[]}};knownLegacyRewardTokens:{address:Address;symbol:string;decimals:number}[];sweep:SweepConfig;liqStaking?:{distributor:Address;source?:string}};
-export type SweepConfig={swapper:Address;tokenRegistry:Address;metarouter:Address;aeroUsdcPool:Address;aeroIaeroPool:Address;aeroIaeroClPool:Address;metaquoter:Address;multicall3:Address;quoteEndpoint:string};
+export type SweepConfig={factoryRegistry?:Address;swapper:Address;tokenRegistry:Address;metarouter:Address;aeroUsdcPool:Address;aeroIaeroPool:Address;aeroIaeroClPool:Address;metaquoter:Address;multicall3:Address;quoteEndpoint:string};
 export type Bootstrap={readCoverage?:import('../protocol-data/read-coverage').ReadCoverage;rewardTokenAddresses?:Address[];rewardRegistryError?:string;tokenFilter?:TokenFilter;sweepReady?:boolean;marketRouteReady?:boolean;aeroCompoundReady?:boolean;registry:BaseRegistry;verifiedAt:string;snapshot:{block:string;hash:Hash;timestamp:number;independentProviders:number};contracts:Record<string,{address:Address;deployed:boolean;codeHash:Hash|null}>;legacyReady:boolean;legacyPaused?:boolean;oldAutoReady:boolean;newStack?:import('../../server/new-stack').NewStackConnection;liqStakingReady?:boolean;newStackReady:boolean;newStackReason:string;serviceErrors?:Record<string,string>;metrics:{liqStaking?:{totalStaked:string;paused:boolean};allocations?:{chainId:string;amount:string}[];market?:ProtocolMarketMetrics;backingAero?:string;permanent?:boolean;protocolNftOwner?:Address;legacyTotalStaked?:string}};
 export type LiveState={
   boot?:Bootstrap;address?:Address;chainId?:number;walletName?:string;wallets:WalletChoice[];connecting:boolean;loading:boolean;
@@ -20,6 +20,7 @@ export type LiveState={
   liqPosition?:import('./liq').LiqPosition;newPosition?:import('./new-stack').NewPosition;rewardValuation?:RewardValuation;historyMode?:'recent'|'all';legacyDiscovery?:import('./legacy-history').LegacyDiscovery;
 };
 export type LiveControls={
+  readClient?:()=>import('./client').BaseClient;
   activeProvider:()=>EIP1193Provider|undefined;connectMobile:()=>Promise<void>;connectWallet:(id:string)=>Promise<void>;switchToBase:()=>Promise<void>;refresh:()=>Promise<void>;
   loadAllLegacy:()=>Promise<void>;loadLegacy:(date:string,customToken?:string)=>Promise<void>;reviewPending:(attest?:boolean)=>Promise<void>;
   approve:(kind:ActionKind,amount:bigint)=>Promise<void>;
@@ -37,6 +38,7 @@ export function liveReason(kind:ActionKind,state:LiveState,connected:boolean):st
   if(state.chainId!==8453)return 'Switch your wallet to Base before continuing.';
   if(state.error)return 'Refresh Base contract data successfully before starting a transaction.';
   if(state.pending)return 'Resolve the pending wallet request before starting another.';
+  if(kind==='legacyStake'&&(!state.boot.legacyReady||state.legacyPaused!==false||!state.known.iaero))return 'The previous staking route or liquid iAERO balance is unavailable.';
   if(kind==='legacyWithdraw'&&(!state.boot.legacyReady||state.legacyPaused!==false||!state.known.legacyStake||state.legacyReceipts===undefined))return 'The legacy principal or receipt checks are not available.';
   if((kind==='legacyClaim'||kind==='legacyClaimMany')&&(!state.boot.legacyReady||state.legacyPaused!==false))return 'The legacy reward contract is not available for claims.';
   if((kind==='oldAutoClaim'||kind==='oldAutoWithdraw')&&!state.boot.oldAutoReady)return 'The old AutoVault is not verified on Base.';

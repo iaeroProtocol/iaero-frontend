@@ -16,7 +16,7 @@ export type DemoWallet = {
 };
 export type RewardLeg={token:`0x${string}`;symbol:string;decimals:number|null;epoch:bigint;amount:bigint};
 export type ActionResult={noAction?:string;hashes:`0x${string}`[];received?:{token:`0x${string}`;amount:bigint}[]};
-export type ActionKind = 'stake'|'unstake'|'autoStake'|'autoUnstake'|'claim'|'autoClaim'|'mint'|'nft'|'buy'|'legacyClaim'|'legacyClaimMany'|'legacyWithdraw'|'oldAutoClaim'|'oldAutoWithdraw'|'liqStake'|'liqWithdraw'|'liqClaim'|'liqClaimMany'|'collateralWrap'|'collateralRedeem'|'collateralClaim';
+export type ActionKind = 'stake'|'unstake'|'autoStake'|'autoUnstake'|'claim'|'autoClaim'|'mint'|'nft'|'buy'|'legacyClaim'|'legacyClaimMany'|'legacyWithdraw'|'legacyStake'|'oldAutoClaim'|'oldAutoWithdraw'|'liqStake'|'liqWithdraw'|'liqClaim'|'liqClaimMany'|'collateralWrap'|'collateralRedeem'|'collateralClaim';
 export type Action = {kind:ActionKind; amount:bigint; title:string; description:string; source:string; target:string; approval:boolean; nftId?:string;tokenAddress?:`0x${string}`;tokenSymbol?:string;tokenDecimals?:number|null;epoch?:bigint;epochs?:bigint[];minNetOut?:bigint;rewardLegs?:RewardLeg[];minShares?:bigint;maxUSDC?:bigint;minPrincipal?:bigint;minUSDC?:bigint;previewIaeroOut?:bigint;previewLiqOut?:bigint};
 
 export function initialWallet(now = Math.floor(Date.now()/1000)):DemoWallet {
@@ -96,6 +96,7 @@ export function applyAction(wallet:DemoWallet,action:Action,now=Math.floor(Date.
     case 'legacyWithdraw':if(w.legacyStake<=0n)throw Error('No legacy stake to withdraw.');return {...w,iaero:w.iaero+w.legacyStake,legacyStake:0n};
     case 'nft':throw Error('Public NFT intake is awaiting its verified VPM registration route.');
     case 'legacyClaimMany':throw Error('Batch claims require the live contract adapter.');
+    case 'legacyStake':throw Error('Previous staking transactions require the live contract adapter.');
     case 'oldAutoClaim':case 'oldAutoWithdraw':throw Error('Old AutoVault transactions require the live contract adapter.');
   }
 }

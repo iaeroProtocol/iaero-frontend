@@ -8,7 +8,7 @@ import {usePreview} from './store';
 import {amountText,dollarText,mintPreview,numberText,parseAmount,SAMPLE_APR_BPS,SAMPLE_IAERO_PRICE,sampleBuyPreview,tokenText,UNIT,type Action,type ActionKind} from './domain';
 import {LiveEarn,LiveGet,LivePortfolio,LiveProtocolStats,LiveRewardCard} from './live/views';
 
-export type OpenPanel=(panel:'how'|'legacy'|'liq'|'receipt'|'sweep'|'compound')=>void;
+export type OpenPanel=(panel:'how'|'legacy'|'liq'|'receipt'|'sweep'|'compound'|'claimSweep'|'claimCompound'|'liqSweep'|'liqCompound'|'legacyStake')=>void;
 
 function PortfolioStats(){const s=usePreview();if(s.mode==='live')return <LiveProtocolStats/>;return <div className="protocol-stats" aria-label="Illustrative protocol statistics">
   <div><span>Permanent AERO backing <Icon name="shield" size={14}/></span><strong>4.85<span>M</span><small>AERO</small></strong><p><span className="mini-dot"/>One permanent position</p></div>

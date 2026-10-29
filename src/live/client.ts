@@ -11,10 +11,11 @@ import {emptyWallet,liveReason,type Bootstrap,type LegacyReward,type LiveState,t
 import {CLAIM_MANY_ABI,sendRewardClaims} from './rewards';
 import {acceptedReadCoverage} from '../protocol-data/read-coverage';
 import {mapReadBatches} from './read-concurrency';
+import {readApprovalChecks,approvalKey} from './approval-checks';
 import {accountReadClient} from './account-read-client';
 
 export const META_ABI=parseAbi(['function symbol() view returns(string)','function decimals() view returns(uint8)']);
-export const PRINCIPAL_ABI=parseAbi(['function unstake(uint256)','function balanceOf(address) view returns(uint256)','function paused() view returns(bool)']);
+export const PRINCIPAL_ABI=parseAbi(['function stake(uint256)','function unstake(uint256)','function balanceOf(address) view returns(uint256)','function paused() view returns(bool)']);
 export const publicBaseClient=()=>createPublicClient({chain:base,transport:http(new URL('/api/base',window.location.origin).href,{timeout:45000,retryCount:0}),batch:{multicall:false},ccipRead:false});
 export type BaseClient=ReturnType<typeof publicBaseClient>;
 export function publicError(error:unknown){
@@ -153,7 +154,13 @@ export async function executeLiveAction(context:ExecutionContext&{action:Action}
   if(['stake','unstake','claim','autoStake','autoUnstake','autoClaim','mint','nft','collateralWrap','collateralRedeem','collateralClaim'].includes(action.kind)){const hashes=await executeNew(context,action,observedSend);return {hashes,activities:[]};}
   if(action.kind.startsWith('liq')){const hashes=await executeLiq(context,action,observedSend);return {hashes,activities:[]};}
   if(action.kind==='legacyClaimMany')return sendRewardClaims({client,distributor:c.epochDistributor,user,rows:action.rewardLegs??[],send,onProgress,onConfirmed});
-  if(action.kind==='legacyWithdraw'){
+  if(action.kind==='legacyStake'){
+    const checks=await readApprovalChecks(client,boot,user,[{token:c.iAERO,spender:c.epochDistributor}]),check=checks.get(approvalKey(c.iAERO,c.epochDistributor));
+    if(action.amount<=0n||!check||check.error||check.balance===undefined||check.allowance===undefined||action.amount>check.balance)throw Error(check?.error??'The available iAERO balance changed. Review the staking amount.');
+    if(await client.readContract({address:c.epochDistributor,abi:PRINCIPAL_ABI,functionName:'paused'}))throw Error('Previous staking is paused. Your iAERO remains liquid.');
+    if(check.allowance<action.amount){if(check.allowance>0n)await observedSend(c.iAERO,STAKING_ERC20_ABI,'approve',[c.epochDistributor,0n]);await observedSend(c.iAERO,STAKING_ERC20_ABI,'approve',[c.epochDistributor,action.amount]);}
+    hash=await send(c.epochDistributor,PRINCIPAL_ABI,'stake',[action.amount]);
+  }else if(action.kind==='legacyWithdraw'){
     if(action.amount<=0n)throw Error('No old principal to withdraw.');
     const [balance,receipts,paused]=await Promise.all([
       client.readContract({address:c.epochDistributor,abi:LEGACY_STAKING_ABI,functionName:'balanceOf',args:[user]}),
@@ -179,6 +186,6 @@ export async function executeLiveAction(context:ExecutionContext&{action:Action}
     const hashes:Hash[]=[];for(let i=0;i<epochs.length;i+=50){const group=epochs.slice(i,i+50),preview=await client.readContract({address:c.autoVault,abi:OLD_AUTO_ABI,functionName:'previewUSDCMany',args:[user,group]});if(preview[1]<=0n)continue;const part=await send(c.autoVault,OLD_AUTO_ABI,'claimUSDC',[group]);hashes.push(part);onConfirmed?.({id:part,hash:part,title:action.title,token:'USDC',amount:tokenText(preview[1],6,6),direction:'in',time:Date.now()});}return {hashes,activities:[],noAction:hashes.length?undefined:'The selected AutoVault rewards are already settled. No transaction was sent.'};
   }else throw Error('This route has no accepted deployed contract yet.');
   const decimals=action.tokenDecimals===null?null:action.tokenDecimals??(['legacyClaim','oldAutoClaim'].includes(action.kind)?6:18);
-  const activity:Activity={id:hash,hash,title:action.title,token:action.tokenSymbol??(action.kind==='legacyClaim'?'USDC':'iAERO'),amount:decimals===null?action.amount.toString()+' raw units':tokenText(action.amount,decimals,6),direction:'in',time:Date.now()};
+  const activity:Activity={id:hash,hash,title:action.title,token:action.tokenSymbol??(action.kind==='legacyClaim'?'USDC':'iAERO'),amount:decimals===null?action.amount.toString()+' raw units':tokenText(action.amount,decimals,6),direction:action.kind==='legacyStake'?'out':'in',time:Date.now()};
   return {hash,activity};
 }
