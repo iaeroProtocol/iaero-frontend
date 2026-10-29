@@ -87,12 +87,12 @@ function summariseWeeklyYield(state:YieldLedger,now:number,chainIds:number[],ass
   else if(!baseline)reason='Building a complete seven-day observation window.';
   else if(!verified)reason='An independent second provider is still required for every allocated chain.';
   else if(!baseline.pendingComplete||received.some(c=>effectiveClaim(state,c).providers<2))reason='Independent verification of this observation window is still pending.';
-  else if(unpriced.length)reason='Some received tokens have no verified claim-time USDC valuation.';
+  else if(received.some(c=>BigInt(c.amount)>0n&&effectiveClaim(state,c).recipientRecognised===false))reason='Some claim recipients have not been verified.';
   else if(state.snapshots.some(s=>s.timestamp>cutoff&&s.timestamp<=now&&s.backingAero!==baseline.backingAero))reason='Backing changed during this window; a flow-adjusted basis is required.';
   const basis=baseline?.tvlUsdcWad?BigInt(baseline.tvlUsdcWad):0n;
   if(!reason&&basis<=0n)reason='The seven-day capital basis is unavailable.';
   // Received APY uses receipt-time values, never today's prices for old claims.
-  const receivedReason=reason,receivedApy=receivedReason===null?annualisedWeeklyApy(receivedValue,basis):null;
+  const receivedReason=reason??(unpriced.length?'Some received tokens have no verified claim-time USDC valuation.':null),receivedApy=receivedReason===null?annualisedWeeklyApy(receivedValue,basis):null;
   if(!reason&&(!baseline?.pendingComplete||!latest?.pendingComplete||partialPending))reason='Some pending rewards or values are unavailable.';
   // Earned return is a token-unit delta; this avoids counting token price rises as income.
   let earned:bigint|null=null,earnedPriceObservedAt:number|null=null;
@@ -121,12 +121,14 @@ function observedAnnualisedYield(state:YieldLedger,now:number,chainIds:number[],
  else if(chainIds.some(id=>state.cursors[id].timestamp<now))reason='Claim history has not reached the shared finalized cutoff.';
  else if(seconds===null||!baseline||!latest||latest.timestamp!==now)reason='A complete starting and ending observation is required.';
  else if(chainIds.some(id=>!baseline.chains.includes(id)||!latest.chains.includes(id)))reason='An allocated chain is missing from this observation window.';
+ else if(received.some(c=>BigInt(c.amount)>0n&&effectiveClaim(state,c).recipientRecognised===false))reason='Some claim recipients have not been verified.';
  else if(points.some(s=>s.timestamp>=start!&&s.timestamp<=now&&s.backingAero!==baseline.backingAero))reason='Backing changed during this window; a flow-adjusted basis is required.';
  const basis=baseline?.tvlUsdcWad?BigInt(baseline.tvlUsdcWad):0n;
  if(!reason&&basis<=0n)reason='The observation-window capital basis is unavailable.';
  const receivedValue=received.reduce((n,c)=>n+BigInt(claimValue(state,c)??'0'),0n);
- if(!reason&&received.some(c=>BigInt(c.amount)>0n&&claimValue(state,c)===null))reason='Some received tokens have no verified claim-time USDC valuation.';
- const receivedReason=reason,receivedApy=reason===null?annualisedApy(receivedValue,basis,seconds!):null;
+ // Earned income reconciles token units at current prices. Historical receipt
+ // valuations belong only to the independently calculated received return.
+ const receivedReason=reason??(received.some(c=>BigInt(c.amount)>0n&&claimValue(state,c)===null)?'Some received tokens have no verified claim-time USDC valuation.':null),receivedApy=receivedReason===null?annualisedApy(receivedValue,basis,seconds!):null;
  if(!reason&&(!baseline||!(baseline.observedComplete??baseline.pendingComplete)||!latest||!(latest.observedComplete??latest.pendingComplete)||chainIds.some(id=>providers(baseline,id)<1||providers(latest,id)<1)||latest.assets.some(a=>BigInt(a.amount)>0n&&a.valueUsdcWad===null)))reason='Some pending rewards, chain observations or prices are unavailable.';
  let earned:bigint|null=null,earnedPriceObservedAt:number|null=null;
  if(!reason&&baseline&&latest){
@@ -145,7 +147,7 @@ function observedAnnualisedYield(state:YieldLedger,now:number,chainIds:number[],
  return {windowStart:seconds===null?null:start,windowEnd:now,windowSeconds:seconds,provisional,qualification:earnedApy!==null||receivedApy!==null?provisional?'provisional':'verified':'unavailable',unverifiedChainIds:unverified,earnedApy,receivedApy,earnedPriceObservedAt:earnedApy===null?null:earnedPriceObservedAt,earnedIncomeUsdcWad:earned?.toString()??null,receivedIncomeUsdcWad:receivedReason===null?receivedValue.toString():null,capitalUsdcWad:basis>0n?basis.toString():null,earnedUnavailableReason:reason,receivedUnavailableReason:receivedReason??(receivedApy===null?'The observed return could not be annualised.':null)};
 }
 export function summariseYield(state:YieldLedger,now:number,chainIds:number[],assetAliases:Record<string,string>={},options:{startedAt?:number}={}){
- return {...summariseWeeklyYield(state,now,chainIds,assetAliases),annualised:observedAnnualisedYield(state,now,chainIds,assetAliases,options.startedAt)};
+ return {...summariseWeeklyYield(state,now,chainIds,assetAliases),annualised:observedAnnualisedYield(state,now,chainIds,assetAliases,options.startedAt),calculationVersion:'earned-token-growth-v2'};
 }
 export function invalidateAnnualised(summary:AnnualisedYield,reason:string){
  summary.earnedApy=null;summary.receivedApy=null;summary.earnedPriceObservedAt=null;summary.earnedIncomeUsdcWad=null;summary.receivedIncomeUsdcWad=null;summary.qualification='unavailable';summary.earnedUnavailableReason=reason;summary.receivedUnavailableReason=reason;

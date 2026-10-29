@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {addClaim,addSnapshot,annualisedApy,blankLedger,summariseYield,validateLedger,WEEK,type YieldAsset,type YieldSnapshot} from '../src/protocol-data/yield-model';
+import {addClaim,addSnapshot,annualisedApy,blankLedger,summariseYield,validateLedger,WEEK,type YieldAsset,type YieldSnapshot,type YieldClaim} from '../src/protocol-data/yield-model';
 const DAY=86400,now=1793100000,E=10n**18n,token='0x'+'22'.repeat(20),hash='0x'+'11'.repeat(32);
 function ledger(days=3,ids=[8453],single=false){
  const s=blankLedger('test'),providers=Object.fromEntries(ids.map(id=>[id,id===4663&&single?1:2]));
@@ -9,8 +9,21 @@ function ledger(days=3,ids=[8453],single=false){
 }
 const asset=(amount:number,id=8453,value=amount):YieldAsset=>({chainId:id,token,amount:BigInt(amount*1000000).toString(),decimals:6,symbol:'USDC',valueUsdcWad:(BigInt(value)*E).toString()});
 const result=(s:ReturnType<typeof ledger>,days=3)=>summariseYield(s,now,Object.keys(s.cursors).map(Number),{},{startedAt:now-days*DAY});
-function receipt(s:ReturnType<typeof ledger>,amount=1,id=8453){addClaim(s,{id:'claim:'+id,chainId:id,block:'1',blockHash:hash,timestamp:now-1,transactionHash:hash,logIndex:id,manager:token,recipient:token,token,amount:BigInt(amount*1000000).toString(),decimals:6,symbol:'USDC',kind:'fees',programId:null,valueUsdcWad:(BigInt(amount)*E).toString(),valuation:'exact-usdc',providers:s.cursors[id].providers});}
+function receipt(s:ReturnType<typeof ledger>,amount=1,id=8453,patch:Partial<YieldClaim>={}){addClaim(s,{id:'claim:'+id,chainId:id,block:'1',blockHash:hash,timestamp:now-1,transactionHash:hash,logIndex:id,manager:token,recipient:token,token,amount:BigInt(amount*1000000).toString(),decimals:6,symbol:'USDC',kind:'fees',programId:null,valueUsdcWad:(BigInt(amount)*E).toString(),valuation:'exact-usdc',providers:s.cursors[id].providers,...patch});}
 describe('annualised observed-window income',()=>{
+ it.each([3,7])('keeps earned yield neutral through a harvest with unpriced receipt-time values over %i days',days=>{
+  const s=ledger(days);s.snapshots[0].assets=[asset(4)];s.snapshots[1].assets=[asset(6,8453,12)];s.snapshots[1].prices=[asset(1,8453,2)];const before=result(s,days);
+  s.snapshots[1].assets=[];receipt(s,6,8453,{valueUsdcWad:null,valuation:'unpriced'});const original=JSON.stringify(s),after=result(s,days);
+  expect(after.annualised.earnedApy).toBe(before.annualised.earnedApy);expect(after.annualised.earnedIncomeUsdcWad).toBe((4n*E).toString());expect(after.annualised.earnedUnavailableReason).toBeNull();expect(after.annualised.receivedApy).toBeNull();expect(after.annualised.receivedIncomeUsdcWad).toBeNull();expect(after.annualised.receivedUnavailableReason).toContain('claim-time');expect(after.receivedValueUsdcWad).toBe('0');expect(after.receivedPartial).toBe(true);expect(JSON.stringify(s)).toBe(original);
+  if(days===7){expect(after.earnedApy7d).toBe(before.earnedApy7d);expect(after.earnedApy7d).toBeGreaterThan(0);expect(after.receivedApy7d).toBeNull();}
+ });
+ it('reconciles all chains provisionally without using unpriced historical receipts as current prices',()=>{
+  const s=ledger(7,[8453,1,4663,42161],true);s.snapshots[1].assets=[asset(1),asset(2,1),asset(3,42161)];s.snapshots[1].prices=[asset(1,4663,2)];receipt(s,4,4663,{valueUsdcWad:null,valuation:'unpriced'});
+  const a=result(s,7).annualised;expect(a.qualification).toBe('provisional');expect(a.unverifiedChainIds).toEqual([4663]);expect(a.earnedIncomeUsdcWad).toBe((14n*E).toString());expect(a.receivedApy).toBeNull();expect(a.earnedApy).toBeGreaterThan(0);
+  s.snapshots[1].prices=[];const missing=result(s,7).annualised;expect(missing.earnedApy).toBeNull();expect(missing.earnedUnavailableReason).toContain('current USDC price');expect(missing.receivedUnavailableReason).toContain('claim-time');
+ });
+ it('keeps a genuine zero earned return after harvesting only pre-window accrual',()=>{const s=ledger();s.snapshots[0].assets=[asset(4)];s.snapshots[1].prices=[asset(1)];receipt(s,4,8453,{valueUsdcWad:null,valuation:'unpriced'});const a=result(s).annualised;expect(a.earnedApy).toBe(0);expect(a.earnedIncomeUsdcWad).toBe('0');expect(a.receivedApy).toBeNull();});
+ it.each([3,7])('keeps recipient verification separate from missing historical prices over %i days',days=>{const s=ledger(days);s.snapshots[1].prices=[asset(1)];receipt(s,4,8453,{recipientRecognised:false,valueUsdcWad:null,valuation:'unpriced'});const r=result(s,days);expect(r.annualised.earnedApy).toBeNull();expect(r.annualised.receivedApy).toBeNull();expect(r.annualised.earnedUnavailableReason).toContain('recipients');if(days===7)expect(r.earnedApy7d).toBeNull();});
  it.each([1,2,3,4,5,6])('annualises %i days of unclaimed earnings without inventing a weekly observation',days=>{
   const s=ledger(days);s.snapshots[1].assets=[asset(10)];const out=result(s,days);
   expect(out.earnedApy7d).toBeNull();expect(out.receivedApy7d).toBeNull();
