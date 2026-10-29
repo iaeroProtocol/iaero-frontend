@@ -162,7 +162,12 @@ export function LiveProvider({children}:{children:ReactNode}){
       const identity=await switchedWalletIdentity(p,()=>switching.current===attempt,8453);
       if(switching.current!==attempt)return;
       if(!identity.address){clearAccount({walletName});setProvider(undefined);throw Error('The wallet session has no authorized account. Reconnect WalletConnect and approve an account on Base.');}
-      clearAccount({...identity,walletName,loading:true,connecting:true});setActivities(history(identity.address));
+      // chainChanged may already have committed this identity and started its
+      // refresh. Clearing it again cancels that read without changing the
+      // effect's account/chain dependencies, leaving balances blank until poll.
+      const committed=current.current.live;
+      if(committed.address?.toLowerCase()!==identity.address.toLowerCase()||committed.chainId!==identity.chainId)clearAccount({...identity,walletName,loading:true,connecting:true});
+      setActivities(history(identity.address));
       if(identity.chainId!==8453)throw Error('The wallet has not switched to Base yet. Choose Base in your wallet, then try again.');
     }catch(error){if(switching.current===attempt){update({error:publicError(error)});setToast(publicError(error));}}
     finally{if(switching.current===attempt){switching.current=undefined;update({connecting:false});}}
