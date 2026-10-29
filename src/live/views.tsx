@@ -1,7 +1,7 @@
 import {acceptedReadCoverage} from '../protocol-data/read-coverage';
 import {PortfolioDashboard} from './portfolio-dashboard';
 import {ExactAmount,BalanceAmount} from './exact-amount';
-import {Component,lazy,Suspense,useRef,useState,type ReactNode} from 'react';
+import {Component,lazy,Suspense,useEffect,useRef,useState,type ReactNode} from 'react';
 import {formatUnits,type Address} from 'viem';
 import {Button,Dialog,EmptyWallet,Info,Pill,TokenPair} from '../components';
 import {Icon,TokenIcon} from '../icons';
@@ -68,6 +68,8 @@ export function LiveWalletDialog(){
 
 export function LiveTransactionDialog({action,onDone}:{action:Action;onDone:()=>void}){
   const s=usePreview(),l=s.live!,[phase,setPhase]=useState<'review'|'sending'|'done'|'settled'>('review'),[noAction,setNoAction]=useState(''),[error,setError]=useState(''),[retryingReads,setRetryingReads]=useState(false),lock=useRef(false);
+  const [walletWaiting,setWalletWaiting]=useState(false);
+  useEffect(()=>{setWalletWaiting(false);if(phase!=='sending'||l.lastHash||!l.progress?.startsWith('Confirm claim batch '))return;const timer=setTimeout(()=>setWalletWaiting(true),15000);return()=>clearTimeout(timer);},[phase,l.progress,l.lastHash]);
   const isBatch=action.kind==='legacyClaimMany',isClaim=action.kind==='legacyClaim'||action.kind==='oldAutoClaim'||action.kind==='liqClaim'||action.kind==='liqClaimMany'||action.kind==='claim'||action.kind==='autoClaim'||action.kind==='collateralClaim'||isBatch,oldAuto=action.kind.startsWith('oldAuto');
   const legacyRows=isBatch?(action.rewardLegs??[]):action.kind==='legacyClaim'&&action.tokenAddress&&action.epoch!==undefined?[{token:action.tokenAddress,epoch:action.epoch,amount:action.amount,symbol:action.tokenSymbol??'TOKEN',decimals:action.tokenDecimals===undefined?18:action.tokenDecimals}]:undefined;
   const legacy=useLegacyClaimPlan(legacyRows),payout=legacy.data,reviewAction=isBatch&&payout?.eligible.length?claimAction(payout.eligible,action.title.startsWith('Claim all')):action,claimBlocked=!!legacyRows&&(!legacy.ready||!payout?.eligible.length);
@@ -88,6 +90,7 @@ export function LiveTransactionDialog({action,onDone}:{action:Action;onDone:()=>
       {action.kind==='oldAutoClaim'&&phase==='review'&&l.pending&&<PendingNotice/>}
       {action.kind==='oldAutoClaim'&&phase==='review'&&l.error&&<Button variant="secondary" disabled={retryingReads} onClick={()=>void retryReads()}>{retryingReads?'Refreshing Base reads…':'Retry Base reads'}</Button>}
       <Button className="full-width" icon={phase==='sending'?undefined:'arrow'} disabled={phase==='sending'||!!reason||claimBlocked||retryingReads} onClick={()=>void confirm()}>{phase==='sending'?<><span className="spinner"/>{l.progress??(l.lastHash?'Waiting for confirmation…':'Simulating, then opening your wallet…')}</>:payout?.blocked.length?'Claim '+groupRewards(payout.eligible).length+' available reward token'+(groupRewards(payout.eligible).length===1?'':'s'):'Confirm in wallet'}</Button>
+      {walletWaiting&&<Info tone="amber">The request was handed to your connected wallet, which has not returned a transaction hash. Open the wallet extension or app and check its pending requests. Keep this claim open and resolve that request before starting another.</Info>}
       {phase==='sending'&&l.lastHash&&<a className="text-link live-receipt-link" href={'https://basescan.org/tx/'+l.lastHash} target="_blank" rel="noreferrer">Track transaction <Icon name="up-right" size={13}/></a>}
       <p className="form-footnote"><Icon name="shield" size={13}/>{isClaim?'Claiming leaves your principal in place.':action.kind==='mint'||action.kind==='nft'?'Deposited backing is permanent. iAERO remains liquid and transferable.':action.kind==='liqStake'?'Staking renews the seven-day lock on your entire LIQ position.':'Principal and previously earned rewards are accounted separately.'}</p>
     </>}

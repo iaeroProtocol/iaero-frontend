@@ -187,7 +187,7 @@ export function LiveProvider({children}:{children:ReactNode}){
     };
     try{
       return await walletWorkflow(snapshot.live.address,()=>run({client,provider:snapshot.provider!,state:snapshot.live,canContinue:()=>ticket===generation.current,onConfirmed,onProgress:progress=>{if(ticket===generation.current)update({progress,lastHash:undefined});},onBroadcast:hash=>{
-        if(ticket===generation.current)update({lastHash:hash});
+        if(ticket===generation.current)update({lastHash:hash,progress:'Transaction submitted. Waiting for Base confirmation…'});
       }}));
     }catch(error){throw Object.assign(Error(publicError(error)),{confirmedHashes:confirmed.slice()});}finally{sending.current=false;if(ticket===generation.current)void refresh();}
   };

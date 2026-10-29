@@ -91,6 +91,7 @@ export async function liveFixture(contextOptions={},sourceOrigin){
         state.gasEstimateRequests.push(count);if(count>state.gasBatchLimit)throw Error('gas required exceeds: 16777216');result='0x'+(250000n*BigInt(count)).toString(16);
       }else if(method==='eth_call'){
         const decoded=decodeFunctionData({abi,data:params[0].data});if(decoded.functionName==='aggregate3'){const names=decoded.args[0].map(c=>{try{return decodeFunctionData({abi,data:c.callData}).functionName;}catch{return 'unknown';}});if(names.includes('allowance'))state.approvalAggregates.push(names);}if(state.delaySimulation&&['approve','unstake','claim','claimMany','execute','executePlanFromCallerAdvanced'].includes(decoded.functionName)){state.delaySimulation=false;await page.evaluate(other=>window.testWallet.changeAccount(other),other);}
+        if(decoded.functionName==='claimMany'&&params[0].to.toLowerCase()===registry.legacy.epochDistributor.toLowerCase()&&state.claimSimulationGate){const g=state.claimSimulationGate;if(++g.calls>g.pass){g.entered?.();await g.wait;}}
         result=call(params[0].to,params[0].data);
       }else if(method==='eth_simulateV1'){
         state.simulationPlans.push(params[0].blockStateCalls[0].calls.map(c=>{const d=decodeFunctionData({abi,data:c.data});return {name:d.functionName,tokens:d.functionName==='executePlanFromCallerAdvanced'?d.args[0].length:0};}));

@@ -13,6 +13,7 @@ import {acceptedReadCoverage} from '../protocol-data/read-coverage';
 import {mapReadBatches} from './read-concurrency';
 import {readApprovalChecks,approvalKey} from './approval-checks';
 import {accountReadClient} from './account-read-client';
+import {boundedWalletRead,claimStageText,type TransactionStage} from './transaction-stages';
 
 export const META_ABI=parseAbi(['function symbol() view returns(string)','function decimals() view returns(uint8)']);
 export const PRINCIPAL_ABI=parseAbi(['function stake(uint256)','function unstake(uint256)','function balanceOf(address) view returns(uint256)','function paused() view returns(bool)']);
@@ -147,13 +148,14 @@ export async function switchedWalletIdentity(provider:EIP1193Provider,current:()
 }
 
 export type ExecutionContext={client:BaseClient;provider:EIP1193Provider;state:LiveState;onBroadcast:(hash:Hash)=>void;onProgress?:(text:string)=>void;onConfirmed?:(activity:Activity)=>void;canContinue?:()=>boolean};
-export async function createGuardedSender({client,provider,state,onBroadcast,canContinue:workflowCurrent}:ExecutionContext,canContinue=()=>true,gasLimit?:(request:any)=>bigint|undefined){
+export async function createGuardedSender({client,provider,state,onBroadcast,canContinue:workflowCurrent}:ExecutionContext,canContinue=()=>true,gasLimit?:(request:any)=>bigint|undefined,onStage?:(stage:TransactionStage)=>void){
   const user=state.address!,c=legacyConfig(state.boot!);
-  const identity=async()=>{const current=await walletIdentity(provider);return current.chainId===8453&&canContinue()&&(workflowCurrent?.()??true)?current.address:undefined;};
+  const identity=async()=>{onStage?.('checking-wallet');const current=await(onStage?boundedWalletRead(()=>walletIdentity(provider)):walletIdentity(provider));return current.chainId===8453&&canContinue()&&(workflowCurrent?.()??true)?current.address:undefined;};
   if((await identity())?.toLowerCase()!==user.toLowerCase())throw Error('Wallet or network changed. Refresh before continuing.');
-  const wallet=createWalletClient({account:user,chain:base,transport:custom(provider)});
-  const reads=gasLimit?{...client,simulateContract:async(request:any)=>{
-    const gas=gasLimit(request);
+  const traced=onStage?{request:((request:any)=>{if(request.method==='eth_sendTransaction'||request.method==='wallet_sendTransaction'){onStage('requesting-wallet');return provider.request(request);}if(request.method==='eth_accounts'||request.method==='eth_chainId'){onStage('checking-wallet');return boundedWalletRead(()=>provider.request(request));}return provider.request(request);}) as EIP1193Provider['request']}:provider;
+  const wallet=createWalletClient({account:user,chain:base,transport:custom(traced)});
+  const reads=gasLimit||onStage?{...client,simulateContract:async(request:any)=>{
+    onStage?.('simulating');const gas=gasLimit?.(request);
     if(gas!==undefined&&(gas<=0n||gas>16_000_000n))throw Error('The transaction gas limit is outside the supported budget.');
     return client.simulateContract(gas===undefined?request:{...request,gas});
   }}:client;
@@ -162,7 +164,8 @@ export async function createGuardedSender({client,provider,state,onBroadcast,can
 export async function executeLiveAction(context:ExecutionContext&{action:Action}){
   const {client,state,action,onProgress,onConfirmed}=context;
   const reason=liveReason(action.kind,state,!!state.address);if(reason)throw Error(reason);
-  const boot=state.boot!,user=state.address!,c=legacyConfig(boot),send=await createGuardedSender(context);
+  let claimBatch:{number:number;total:number}|undefined;
+  const boot=state.boot!,user=state.address!,c=legacyConfig(boot),send=await createGuardedSender(context,undefined,undefined,action.kind==='legacyClaimMany'?stage=>onProgress?.(claimBatch?claimStageText(stage,claimBatch):'Checking your wallet connection…'):undefined);
   let hash:Hash;
   const observedSend=async(to:Address,abi:readonly unknown[],fn:string,args:readonly unknown[]=[])=>{
     const hash=await send(to,abi,fn,args),approval=fn==='approve',symbol=to.toLowerCase()===boot.registry.legacy.USDC.toLowerCase()?'USDC':to.toLowerCase()===boot.registry.legacy.LIQ.toLowerCase()?'LIQ':action.tokenSymbol??'iAERO',claim=fn==='claimMany'||fn==='withdrawCredit'||fn==='getReward'||fn==='claimUSDC';
@@ -170,7 +173,7 @@ export async function executeLiveAction(context:ExecutionContext&{action:Action}
   };
   if(['stake','unstake','claim','autoStake','autoUnstake','autoClaim','mint','nft','collateralWrap','collateralRedeem','collateralClaim'].includes(action.kind)){const hashes=await executeNew(context,action,observedSend);return {hashes,activities:[]};}
   if(action.kind.startsWith('liq')){const hashes=await executeLiq(context,action,observedSend);return {hashes,activities:[]};}
-  if(action.kind==='legacyClaimMany')return sendRewardClaims({client,boot,distributor:c.epochDistributor,user,rows:action.rewardLegs??[],send,onProgress,onConfirmed});
+  if(action.kind==='legacyClaimMany')return sendRewardClaims({client,boot,distributor:c.epochDistributor,user,rows:action.rewardLegs??[],send,onBatch:(number,total)=>{claimBatch={number,total};},onProgress,onConfirmed});
   if(action.kind==='legacyStake'){
     const checks=await readApprovalChecks(client,boot,user,[{token:c.iAERO,spender:c.epochDistributor}]),check=checks.get(approvalKey(c.iAERO,c.epochDistributor));
     if(action.amount<=0n||!check||check.error||check.balance===undefined||check.allowance===undefined||action.amount>check.balance)throw Error(check?.error??'The available iAERO balance changed. Review the staking amount.');

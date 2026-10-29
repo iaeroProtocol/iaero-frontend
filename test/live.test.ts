@@ -4,7 +4,8 @@ import {createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import registry from '../config/base.registry.json';
 import {canonicalReadRequest} from '../server/base-rpc';
-import {executeLiveAction,legacyConfig,readAccount,fetchBootstrap,publicError,publicBaseClient,type BaseClient} from '../src/live/client';
+import {createGuardedSender,executeLiveAction,legacyConfig,readAccount,fetchBootstrap,publicError,publicBaseClient,type BaseClient} from '../src/live/client';
+import {WALLET_READ_TIMEOUT_MS,type TransactionStage} from '../src/live/transaction-stages';
 import {initialLiveState,liveReason,type Bootstrap,type LiveState} from '../src/live/types';
 import {pendingTransaction} from '../src/protocol/pendingTransaction';
 import {UNIT,type Action} from '../src/domain';
@@ -32,7 +33,32 @@ function setup(){
     }),simulateContract:vi.fn(async(r:any)=>({request:r})),waitForTransactionReceipt:vi.fn(async(_r:any)=>({status:'success',transactionHash:hash})),getTransactionReceipt:vi.fn(async()=>{throw Error('No receipt');})} as unknown as BaseClient;
   return {provider,request,client,setAccount:(a:Address)=>{account=a;},setChain:(c:string)=>{chain=c;},storage};
 }
-afterEach(()=>vi.unstubAllGlobals());
+afterEach(()=>{vi.useRealTimers();vi.unstubAllGlobals();});
+
+describe('claim wallet handoff',()=>{
+ it('reports wallet handoff only at the actual write and never repeats or times out an unresolved wallet request',async()=>{
+  vi.useFakeTimers();const env=setup(),stages:TransactionStage[]=[],broadcast=vi.fn();let releaseSimulation!:(r:any)=>void,releaseWallet!:(h:typeof hash)=>void;
+  vi.mocked(env.client.simulateContract).mockImplementation(()=>new Promise(r=>{releaseSimulation=r;}));
+  const original=env.request.getMockImplementation()!;env.request.mockImplementation(r=>r.method==='eth_sendTransaction'?new Promise(resolve=>{releaseWallet=resolve;}):original(r));
+  const send=await createGuardedSender({...env,state:state(),onBroadcast:broadcast},undefined,undefined,s=>stages.push(s));let settled=false;
+  const attempt=send(registry.legacy.epochDistributor as Address,LEGACY_TEST_CLAIM_ABI,'claimMany',[[registry.legacy.USDC],[epoch]]).finally(()=>{settled=true;});
+  await vi.advanceTimersByTimeAsync(0);expect(stages.at(-1)).toBe('simulating');expect(stages).not.toContain('requesting-wallet');expect(env.request.mock.calls.some(([r])=>r.method==='eth_sendTransaction')).toBe(false);
+  releaseSimulation({request:{address:registry.legacy.epochDistributor,abi:LEGACY_TEST_CLAIM_ABI,functionName:'claimMany',args:[[registry.legacy.USDC],[epoch]]}});await vi.advanceTimersByTimeAsync(0);
+  expect(stages.at(-1)).toBe('requesting-wallet');expect(pendingTransaction(8453,user)).toMatchObject({action:'claimMany'});expect(pendingTransaction(8453,user)?.hash).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(WALLET_READ_TIMEOUT_MS*3);expect(settled).toBe(false);expect(env.request.mock.calls.filter(([r])=>r.method==='eth_sendTransaction')).toHaveLength(1);expect(pendingTransaction(8453,user)).not.toBeNull();
+  releaseWallet(hash);await attempt;expect(broadcast).toHaveBeenCalledWith(hash);expect(pendingTransaction(8453,user)).toBeNull();
+ });
+ it('bounds a stalled preflight account read and cannot revive the send when the old answer arrives',async()=>{
+  vi.useFakeTimers();const env=setup(),stages:TransactionStage[]=[];let release!:(r:any)=>void;const original=env.request.getMockImplementation()!;env.request.mockImplementation(r=>r.method==='eth_accounts'?new Promise(resolve=>{release=resolve;}):original(r));
+  const attempt=createGuardedSender({...env,state:state(),onBroadcast:vi.fn()},undefined,undefined,s=>stages.push(s)),rejection=expect(attempt).rejects.toThrow('wallet did not answer');await vi.advanceTimersByTimeAsync(WALLET_READ_TIMEOUT_MS);await rejection;
+  release([user]);await vi.advanceTimersByTimeAsync(0);expect(stages).toEqual(['checking-wallet']);expect(env.client.simulateContract).not.toHaveBeenCalled();expect(env.request.mock.calls.some(([r])=>r.method==='eth_sendTransaction')).toBe(false);expect(pendingTransaction(8453,user)).toBeNull();
+ });
+ it('preserves account-change refusal and emits no write-stage notification',async()=>{
+  const env=setup(),stages:TransactionStage[]=[];const send=await createGuardedSender({...env,state:state(),onBroadcast:vi.fn()},undefined,undefined,s=>stages.push(s));env.setAccount(other);
+  await expect(send(registry.legacy.epochDistributor as Address,LEGACY_TEST_CLAIM_ABI,'claimMany',[[registry.legacy.USDC],[epoch]])).rejects.toThrow('changed');expect(stages).not.toContain('requesting-wallet');expect(pendingTransaction(8453,user)).toBeNull();
+ });
+});
+const LEGACY_TEST_CLAIM_ABI=parseAbi(['function claimMany(address[],uint256[])']);
 
 describe('read-only local RPC boundary',()=>{
   it('keeps browser reads on loopback and disables contract-directed CCIP HTTP requests',()=>{

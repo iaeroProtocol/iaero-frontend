@@ -81,13 +81,14 @@ export async function previewRewardClaims(client:BaseClient,distributor:Address,
  eligible=positive.filter(r=>!blocked.some(b=>b.token.toLowerCase()===r.token.toLowerCase()));
  return {user,distributor,eligible,settled,blocked,groups:planned,block:block.number,checkedAt:Date.now()};
 }
-export async function sendRewardClaims(args:{client:BaseClient;distributor:Address;user:Address;rows:readonly RewardLeg[];boot?:Bootstrap;send:(address:Address,abi:readonly unknown[],name:string,args:readonly unknown[])=>Promise<Hash>;onProgress?:(text:string)=>void;onConfirmed?:(activity:Activity)=>void}){
+export async function sendRewardClaims(args:{client:BaseClient;distributor:Address;user:Address;rows:readonly RewardLeg[];boot?:Bootstrap;send:(address:Address,abi:readonly unknown[],name:string,args:readonly unknown[])=>Promise<Hash>;onBatch?:(number:number,total:number)=>void;onProgress?:(text:string)=>void;onConfirmed?:(activity:Activity)=>void}){
   const rows=checkedLegs(args.rows),hashes:Hash[]=[],activities:Activity[]=[];
   args.onProgress?.('Rechecking selected reward payouts…');
   const initial=await previewRewardClaims(args.client,args.distributor,args.user,rows,args.boot);
   if(initial.blocked.length)throw Error('Some selected rewards cannot currently be paid. Recheck availability and review the payable rewards before claiming.');
   for(let start=0;start<rows.length;start+=CLAIM_LIMIT){
     const selected=rows.slice(start,start+CLAIM_LIMIT),number=Math.floor(start/CLAIM_LIMIT)+1,total=Math.ceil(rows.length/CLAIM_LIMIT);
+    args.onBatch?.(number,total);
     args.onProgress?.(`Checking claim batch ${number} of ${total}…`);
     // Re-read the exact selection. Failures are not treated as zero and never
     // silently drop a token. claimMany itself is idempotent for a settled leg.
@@ -95,7 +96,7 @@ export async function sendRewardClaims(args:{client:BaseClient;distributor:Addre
     if(plan.blocked.length)throw Error('Some selected rewards cannot currently be paid. Recheck availability and review the payable rewards before claiming.');
     if(!plan.eligible.length)continue;
     const batch=plan.eligible;
-    args.onProgress?.(`Confirm claim batch ${number} of ${total} in your wallet`);
+    args.onProgress?.(`Preparing claim batch ${number} of ${total}…`);
     const hash=await args.send(args.distributor,CLAIM_MANY_ABI,'claimMany',[batch.map(r=>r.token),batch.map(r=>r.epoch)]);
     hashes.push(hash);
     const groups=groupRewards(batch),activity:Activity={id:hash,hash,title:`Claim legacy rewards${total>1?' · batch '+number:''}`,token:groups.length===1?groups[0].symbol:'tokens',amount:groups.length===1?(groups[0].decimals===null?groups[0].amount.toString()+' raw units':formatUnits(groups[0].amount,groups[0].decimals)):String(groups.length),direction:'in',time:Date.now()};
