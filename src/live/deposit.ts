@@ -11,7 +11,7 @@ export const DEPOSIT_ESCROW_ABI=parseAbi(['function balanceOf(address) view retu
 export type DepositMode='aero'|'stake';
 export type DepositReview={user:Address;mode:DepositMode;amount:bigint;tokenId?:bigint;permanent?:boolean;end?:bigint;quote:DepositQuote;previewAvailable:boolean;issues:DepositIssue[];block:bigint;readAt:number;reasonsVersion:number};
 export type DepositResult={hash:Hash;approvalHashes:Hash[];tokenId?:bigint;amount?:bigint;iaero?:bigint;fee?:bigint;liq?:bigint;treasuryLiq?:bigint;upgraded?:boolean;receiptUnavailable?:boolean};
-export type DepositHooks={shouldStop?:()=>boolean;onProgress?:(text:string)=>void;onRefusal?:(failure:{name:string;code?:number;issues?:DepositIssue[];refreshedQuote?:DepositQuote})=>void};
+export type DepositHooks={shouldStop?:()=>boolean;onProgress?:(text:string)=>void;onRefusal?:(failure:{name:string;code?:number;issues?:DepositIssue[];refreshedQuote?:DepositQuote;review?:DepositReview})=>void};
 const same=(a:string,b:string)=>a.toLowerCase()===b.toLowerCase();
 export function depositConnection(boot:Bootstrap){const c=boot.deposit;if(!c?.verified||!c.address||!c.aero||!c.escrow||!c.iaero||!c.liq||!c.vault||c.reasonsVersion!==manifest.reasonsVersion||!same(c.address,manifest.address)||c.runtimeHash!==manifest.runtimeHash||boot.registry.chainId!==8453||!same(c.aero,boot.registry.aero.token)||!same(c.escrow,boot.registry.aero.votingEscrow)||!same(c.iaero,boot.registry.legacy.iAERO)||!same(c.liq,boot.registry.legacy.LIQ)||!same(c.vault,manifest.vault))throw Error(c?.reason??'The deposit contract is not verified yet.');return c as typeof c&{address:Address;aero:Address;escrow:Address;iaero:Address;liq:Address;vault:Address};}
 async function snapshot(client:BaseClient){
@@ -48,6 +48,14 @@ export async function listDepositStakes(client:BaseClient,boot:Bootstrap,user:Ad
 // Deposit controls show only while verified, fresh on-chain checks report no closing code (1, 2, 3, 4 or 21).
 // Batch B's vault.setDepositor(v2) clears code 2; nothing in this app opens deposits.
 export function depositControlsOpen(verified:boolean,status:{open:boolean}|undefined,statusError:string,issues:readonly DepositIssue[]=[]){return verified&&!!status?.open&&!statusError&&depositsOpen(issues);}
+// The fresh check keeps the terms the user accepted: same deposit, same iAERO and fee, no less LIQ.
+export function depositTermsHold(q:DepositReview,review:DepositReview){return same(q.user,review.user)&&q.mode===review.mode&&q.amount===review.amount&&q.tokenId===review.tokenId&&q.permanent===review.permanent&&q.quote.iaero===review.quote.iaero&&q.quote.fee===review.quote.fee&&q.quote.liq>=review.quote.liq;}
+// Review L1: an approval that disappeared before Confirm is offered again in place, on the same terms.
+export function depositReopensApproval(fresh:DepositReview|undefined,current:DepositReview){return !!fresh&&depositNeedsApproval(fresh.issues,current.mode)&&depositTermsHold(fresh,current);}
+// Review I2: a wallet rejection is the user's choice, not a refused deposit.
+export const DEPOSIT_CANCELLED='You cancelled in your wallet; nothing was sent.',DEPOSIT_CANCELLED_AFTER_RESET='You cancelled in your wallet; only the confirmed allowance reset was sent.';
+export const depositCancelled=(message:string)=>message===DEPOSIT_CANCELLED||message===DEPOSIT_CANCELLED_AFTER_RESET;
+function walletRejected(error:unknown){for(let e:any=error,n=0;e&&n<12;e=e.cause,n++)if(e.code===4001||e.name==='UserRejectedRequestError')return true;return false;}
 function requireFresh(review:DepositReview,user:Address){if(!same(review.user,user)||!Number.isSafeInteger(review.readAt)||review.readAt>Date.now()+5000||Date.now()-review.readAt>DEPOSIT_MAX_AGE_MS||review.reasonsVersion!==manifest.reasonsVersion)throw Error('The deposit review expired or your wallet changed. Review a fresh preview.');if(!review.previewAvailable||review.quote.liq<=0n)throw Error('This preview gives no LIQ. Depositing through the app is unavailable until this is reviewed.');}
 export function receiptDeposit(receipt:any,c:ReturnType<typeof depositConnection>,review:DepositReview,hash:Hash){
  if(receipt.status!=='success'||!same(receipt.transactionHash,hash)||!same(receipt.from,review.user)||!receipt.to||!same(receipt.to,c.address))throw Error('The deposit receipt could not be verified.');
@@ -70,7 +78,7 @@ async function depositWorkflow(context:ExecutionContext,review:DepositReview,hoo
  // After any refusal, read the checks again and show the fix from that fresh result (table howToUse item 8).
  const refused=async(error:unknown)=>{
   const decoded=decodedDepositFailure(error)??(error as any)?.depositFailure;
-  if(!hooks.shouldStop?.()&&context.canContinue?.()!==false){try{const fresh=await reread();hooks.onRefusal?.({name:decoded?.name??'Deposit check failed',code:decoded?.code,issues:fresh.issues,refreshedQuote:fresh.quote});}catch{hooks.onRefusal?.({name:decoded?.name??'Deposit check unavailable',code:decoded?.code});}}
+  if(!hooks.shouldStop?.()&&context.canContinue?.()!==false){try{const fresh=await reread();hooks.onRefusal?.({name:decoded?.name??'Deposit check failed',code:decoded?.code,issues:fresh.issues,refreshedQuote:fresh.quote,review:fresh});}catch{hooks.onRefusal?.({name:decoded?.name??'Deposit check unavailable',code:decoded?.code});}}
  };
  return {client,user,c,active,progress,record,checkedSend,reread,accept,refused};
 }
@@ -90,7 +98,7 @@ export async function runDepositApproval(context:ExecutionContext,review:Deposit
   w.progress('Checking the deposit again…');fresh=await w.reread();w.accept(fresh);
   if(fresh.issues.length)throw Object.assign(Error('The approval is not visible on Base yet, or the deposit checks changed. Return to a fresh preview before depositing.'),{depositFailure:{name:'DepositRefused',issues:fresh.issues}});
   return {approvalHashes,review:fresh};
- }catch(error){await w.refused(error);throw error;}
+ }catch(error){if(walletRejected(error))throw Error(approvalHashes.length?DEPOSIT_CANCELLED_AFTER_RESET:DEPOSIT_CANCELLED);await w.refused(error);throw error;}
 }
 // Step 2: deposit only when a fresh check returns no issues. It never approves.
 export async function runDeposit(context:ExecutionContext,review:DepositReview,hooks:DepositHooks={}):Promise<DepositResult>{
@@ -103,6 +111,7 @@ export async function runDeposit(context:ExecutionContext,review:DepositReview,h
   try{const receipt=await w.client.getTransactionReceipt({hash}),received=receiptDeposit(receipt,c,fresh,hash);context.onConfirmed?.({id:hash,hash,title,token:'',amount:formatUnits(received.iaero,18)+' iAERO + '+formatUnits(received.liq,18)+' LIQ',direction:'in',time:Date.now()});return {hash,approvalHashes:[],...received};}catch{return {hash,approvalHashes:[],receiptUnavailable:true};}
  }catch(error){
   if(confirmedDeposit)return {hash:confirmedDeposit,approvalHashes:[],receiptUnavailable:true};
+  if(walletRejected(error))throw Error(DEPOSIT_CANCELLED);
   await w.refused(error);throw error;
  }
 }

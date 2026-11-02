@@ -15,6 +15,15 @@ Code 28 refuses a stake under the minimum before any signature. Approval and
 deposit are now separate steps (review P2-L1). Deposits stay closed until
 batch B sets the vault's `depositor()` to v2. The record below describes v1.
 
+Review follow-ups:
+- The dialog re-offers Approve if the approval disappears before Confirm.
+- It disables both steps, and says why, if a poll finds deposits closed.
+- A wallet cancel reads "You cancelled in your wallet; nothing was sent."
+- Guidance deliberately narrows the note's "show each one" (review I5): while
+  any blocking code is present, only blocking codes are shown, because
+  approving cannot help yet. Code 8 or 20's text appears once it is the sole
+  issue.
+
 The Deposit page connects the separately deployed `AeroStakeDeposit` at
 `0xD5E4a7869D1189caa617749d483aaD95Af370c70`. It also replaces the previous
 closed intake panels under Get iAERO. Existing claims, LIQ staking, sweeps,

@@ -23,7 +23,7 @@ export async function depositFixture(options={},origin){
    if(name==='getCurrentEmissionRate'||name==='halvings'||name==='totalLIQMinted')return encodeFunctionResult({abi:depositAbi,functionName:name,result:name==='getCurrentEmissionRate'?state.depositRate:name==='halvings'?1n:5n*10n**24n});
    if(name==='checkAeroDeposit'||name==='checkStake'){
     const rows=[];if(!state.depositOpen)rows.push(issue(2));if(state.depositPaused)rows.push(issue(1));
-    if(name==='checkAeroDeposit'){if((state.balances.get(registry.aero.token.toLowerCase())??0n)<amount)rows.push(issue(7,{amount,limit:state.balances.get(registry.aero.token.toLowerCase())??0n}));if(allowance()<amount)rows.push(issue(8,{amount,limit:allowance()}));}
+    if(name==='checkAeroDeposit'){if((state.balances.get(registry.aero.token.toLowerCase())??0n)<amount)rows.push(issue(7,{amount,limit:state.balances.get(registry.aero.token.toLowerCase())??0n}));if(allowance()<amount)rows.push(issue(8,{amount,limit:allowance(),account:manifest.address}));}
     else{const stake=state.depositStakes.find(s=>s.id===args[0]);if(!stake)rows.push(issue(9,{tokenId:args[0]}));else{if(stake.amount<state.depositMinStake)rows.push(issue(28,{tokenId:args[0],amount:stake.amount,limit:state.depositMinStake}));if(!state.stakeApprovals.has(args[0].toString()))rows.push(issue(20,{tokenId:args[0],account:manifest.address}));}rows.push(...state.depositIssues.map(i=>issue(i.reason,{tokenId:args[0],...i})));}
     return encodeFunctionResult({abi:depositAbi,functionName:name,result:rows});
    }

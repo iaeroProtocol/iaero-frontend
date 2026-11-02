@@ -25,6 +25,9 @@ export function depositsOpen(issues:readonly DepositIssue[]){return !issues.some
 export function depositBlockingIssues(issues:readonly DepositIssue[],mode:'aero'|'stake'){return issues.filter(i=>i.reason!==DEPOSIT_APPROVAL_CODE[mode]);}
 // Approve is offered only when the approval code is the sole issue; Deposit only when there is none.
 export function depositNeedsApproval(issues:readonly DepositIssue[],mode:'aero'|'stake'){return issues.length>0&&!depositBlockingIssues(issues,mode).length;}
+// Guidance shown to the user: the blocking codes only while any exist (approving cannot help yet);
+// the approval code's own text once it is the sole issue. Narrows the note's "show each one" (review I5).
+export function depositGuidanceIssues(issues:readonly DepositIssue[],mode:'aero'|'stake'){const blocking=depositBlockingIssues(issues,mode);return blocking.length?blocking:[...issues];}
 export function decodedDepositFailure(error:unknown):{name:string;code?:number;args?:readonly unknown[]}|undefined{
  for(let e:any=error,n=0;e&&n<12;e=e.cause,n++){
   const raw=[e.data,e.error?.data,e.cause?.data].find(v=>typeof v==='string'&&/^0x[0-9a-f]{8,}$/i.test(v));
