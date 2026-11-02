@@ -2,25 +2,25 @@ import {describe,it,expect} from 'vitest';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import {Context,type Store} from '../src/store';
-import {LiveEarn} from '../src/live/views';
+import {LiveEarn,LiveLegacyStakeDialog,LiveStatus} from '../src/live/views';
 import {legacyEarnActive} from '../src/live/legacy-earn-view';
 import {emptyWallet,initialLiveState,liveReason,type Bootstrap,type LiveState} from '../src/live/types';
 
 const user='0x1111111111111111111111111111111111111111',E=10n**18n,copy='New staking is coming. Until it launches, staking uses the current iAERO staking pool (stiAERO).';
 const boot=(patch:Partial<Bootstrap>={})=>({snapshot:{block:'1',timestamp:1,independentProviders:2},legacyReady:true,legacyPaused:false,oldAutoReady:true,newStackReady:false,newStackReason:'New contracts not deployed.',metrics:{},...patch}) as unknown as Bootstrap;
 const live=(patch:Partial<LiveState>={}):LiveState=>({...initialLiveState(),boot:boot(),address:user,chainId:8453,known:{iaero:true,legacyStake:true},legacyReceipts:20n*E,legacyPaused:false,...patch});
-function render(state:LiveState){
+function render(state:LiveState,view:any=createElement(LiveEarn,{openPanel:()=>{}})){
  const connected=!!state.address,store={mode:'live',live:state,disabledReason:kind=>liveReason(kind,state,connected),page:'earn',go:()=>{},connected,connect:()=>{},disconnect:()=>{},wallet:{...emptyWallet(),iaero:100n*E,legacyStake:20n*E},activities:[],flags:{paused:false,rewardsUnavailable:false,nftEnabled:false},setFlags:()=>{},walletDialog:false,setWalletDialog:()=>{},action:null,setAction:()=>{},execute:async()=>{},notify:()=>{},toast:'',dismissToast:()=>{},reset:()=>{},theme:'light',toggleTheme:()=>{}} as Store;
- return renderToStaticMarkup(createElement(Context.Provider,{value:store},createElement(LiveEarn,{openPanel:()=>{}})));
+ return renderToStaticMarkup(createElement(Context.Provider,{value:store},view));
 }
 const button=(markup:string,label:string)=>markup.match(new RegExp('<button[^>]*>(?:(?!</button>).)*<span>'+label+'</span></button>'))?.[0];
 
 describe('Earn routing while the new staking pool is not deployed',()=>{
- it('uses previous staking only when a verified bootstrap shows no ready or configured new pool',()=>{
+ it('uses previous staking unless the new pool is verified ready',()=>{
   expect(legacyEarnActive(boot())).toBe(true);
-  expect(legacyEarnActive(undefined)).toBe(false);
+  expect(legacyEarnActive(undefined)).toBe(true);
+  expect(legacyEarnActive(boot({newStack:{configured:true} as Bootstrap['newStack']}))).toBe(true);
   expect(legacyEarnActive(boot({newStackReady:true}))).toBe(false);
-  expect(legacyEarnActive(boot({newStack:{configured:true} as Bootstrap['newStack']}))).toBe(false);
  });
  it('shows a usable previous-staking stake route with withdraw and claim routes',()=>{
   const markup=render(live()),stake=button(markup,'Stake iAERO');
@@ -38,13 +38,20 @@ describe('Earn routing while the new staking pool is not deployed',()=>{
   const markup=render(live({boot:boot({newStackReady:true,newStackReason:'Verified.'})}));
   expect(markup).toContain('Direct staking');expect(button(markup,'Review stake')).toBeDefined();expect(markup).not.toContain(copy);
  });
- it('returns to the new-pool page when the new pool is configured but unverified',()=>{
+ it('keeps previous staking while a configured new pool is unverified',()=>{
   const markup=render(live({boot:boot({newStack:{configured:true,optionalErrors:[]} as unknown as Bootstrap['newStack'],newStackReason:'Runtime unavailable.'})}));
-  expect(button(markup,'Contract verification unavailable')).toContain('disabled');expect(markup).not.toContain(copy);
+  expect(markup).toContain(copy);expect(button(markup,'Stake iAERO')).not.toContain('disabled');expect(markup).not.toContain('Contract verification unavailable');
  });
- it('keeps today\'s page while the bootstrap is unread',()=>{
-  const markup=render(live({boot:undefined}));
-  expect(markup).toContain('Direct staking');expect(markup).not.toContain(copy);
+ it('shows a neutral checking state while the bootstrap loads',()=>{
+  for(const state of [live({boot:undefined,loading:true}),live({boot:undefined,address:undefined,known:{}})]){
+   const markup=render(state);
+   expect(markup).toContain(copy);expect(markup).toContain('Checking the staking pool on Base…');expect(button(markup,'Checking the staking pool…')).toContain('disabled');
+   expect(markup).not.toContain('could not be verified on Base');expect(markup).not.toContain('could not be read');expect(markup).not.toContain('info-amber');expect(markup).not.toContain('Direct staking');
+  }
+ });
+ it('disables staking with the reason when the bootstrap fails',()=>{
+  const markup=render(live({boot:undefined,error:'Verified Base contract data is unavailable. Refresh to retry.'}));
+  expect(markup).toContain(copy);expect(button(markup,'Staking unavailable')).toContain('disabled');expect(markup).toContain('Base contract data could not be read, so staking is unavailable. Refresh to retry.');expect(markup).not.toContain('Checking the staking pool');
  });
  it('disables staking with the reason when previous staking is paused',()=>{
   const markup=render(live({legacyPaused:true}));
@@ -63,6 +70,13 @@ describe('Earn routing while the new staking pool is not deployed',()=>{
   expect(button(unknown,'Stake iAERO')).toContain('disabled');expect(unknown).toContain('The previous staking route or liquid iAERO balance is unavailable.');
   const unread=render(live({legacyPaused:undefined}));
   expect(button(unread,'Stake iAERO')).toContain('disabled');
+ });
+ it('labels the connection caption and the Earn stake dialog for the current pool',()=>{
+  const caption=render(live(),createElement(LiveStatus));
+  expect(caption).toContain('Staking: current pool (stiAERO) · new pool coming');expect(caption).not.toContain('legacy claims &amp; withdrawals available');
+  expect(render(live({boot:boot({newStackReady:true})}),createElement(LiveStatus))).not.toContain('deployment-caption');
+  expect(render(live(),createElement(LiveLegacyStakeDialog,{onClose:()=>{}}))).toContain('Stake iAERO in the current staking pool and receive stiAERO.');
+  expect(render(live(),createElement(LiveLegacyStakeDialog,{onClose:()=>{},maximum:E}))).toContain('Add to previous staking without repeating a swap.');
  });
  it('leaves the new-pool actions blocked behind their own guard',()=>{
   for(const kind of ['stake','autoStake','unstake','claim'] as const)expect(liveReason(kind,live(),true)).toBe('New contracts not deployed.');
