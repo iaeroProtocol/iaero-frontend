@@ -15,9 +15,9 @@ for(const width of [1440,390,320]){
   checks.push({width,name:'Single Alchemy readback enables actual-shaped market data with truthful provider label'});
   await f.connect();await page.getByRole('article',{name:'LIQ staking yield',exact:true}).getByText('12.48%',{exact:true}).waitFor();
   await f.openLegacy();assert.equal(await page.getByRole('button',{name:'Claim all',exact:true}).isEnabled(),true);assert.equal(await page.getByRole('button',{name:'Withdraw old iAERO',exact:true}).isEnabled(),true);await f.close();
-  await f.go('Earn');assert.equal(await page.getByRole('button',{name:'New staking stream not deployed',exact:true}).isDisabled(),true);
+  await f.go('Earn');assert.equal(await page.getByRole('button',{name:'Stake iAERO',exact:true}).isEnabled(),true);assert.equal(await page.getByRole('button',{name:'New staking stream not deployed',exact:true}).count(),0);
   assert.equal(f.writes.length,0);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);assert.deepEqual(f.errors,[]);
-  checks.push({width,name:'Legacy claims, withdrawals and LIQ yield remain available; undeployed stream remains blocked; no writes or overflow'});
+  checks.push({width,name:'Legacy claims, withdrawals and LIQ yield remain available; Earn stakes through previous staking while the stream is undeployed; no writes or overflow'});
   if(width===1440){delete boot.readCoverage;await page.reload();await page.getByText('Verified Base contract data is unavailable. Refresh to retry.',{exact:true}).waitFor();checks.push({width,name:'An unapproved single-provider response is refused'});}
  }finally{await f.browser.close();}
 }

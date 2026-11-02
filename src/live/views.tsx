@@ -13,6 +13,7 @@ import {publicError} from './client';
 import {RewardList,RewardSummary} from './reward-list';
 import {newActionTarget} from './new-stack';
 import {NewEarn,CollateralDialog} from './new-stack-view';
+import {LegacyEarn,legacyEarnActive} from './legacy-earn-view';
 import {PartialAmount,chosenAmount} from './partial-amount';
 import {ProtocolYieldCard} from './protocol-yield-view';
 import {AsyncSection} from '../async-section';
@@ -166,7 +167,7 @@ export function LiveRewardCard(){
  return <article className="reward-card reward-card-compact"><div className="reward-card-top"><span className="reward-label"><TokenIcon token="USDC" size={30}/>YOUR FUNDED USDC REWARDS</span><span className="streaming-tag">Stream connected</span></div><p className="reward-overline">Available across new positions</p><div className="reward-value">{s.connected&&total!==undefined?tokenText(total,6,6):'—'}<span>USDC</span></div><p className="reward-subtitle">Direct staking and AutoVault rewards. Your principal stays separate.</p><Button className="claim-button" variant="secondary" icon="arrow" onClick={()=>s.connected?s.go('earn'):s.setWalletDialog(true)}>{s.connected?'Manage USDC rewards':'Connect your wallet'}</Button></article>;
 }
 
-export function LiveEarn({openPanel}:{openPanel:OpenPanel}){return <NewEarn openPanel={openPanel}/>;}
+export function LiveEarn({openPanel}:{openPanel:OpenPanel}){return legacyEarnActive(usePreview().live?.boot)?<LegacyEarn openPanel={openPanel}/>:<NewEarn openPanel={openPanel}/>;}
 const loadNativeGet=()=>import('./rift-view');
 export function LiveGet({openPanel}:{openPanel:OpenPanel}){return <AsyncSection name="Get iAERO routes" loader={loadNativeGet} componentProps={{openPanel}} loading={<div className="card live-launch-panel" role="status">Loading your cross-chain routes…</div>}/>;}
 
