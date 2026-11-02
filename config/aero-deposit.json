@@ -1,17 +1,17 @@
 {
   "version": 1,
   "chainId": 8453,
-  "address": "0xD5E4a7869D1189caa617749d483aaD95Af370c70",
-  "runtimeHash": "0x4001833f58f0a7e0d73aa84c43e960508b207bd88f6387c21cdccaa424ba178e",
-  "sourceCommit": "a5c96e2",
-  "sourceSha256": "49596ea30591c83651714285a90f6257df299141731e79cfa606bcf2169d2fdf",
-  "reasonsVersion": 3,
-  "reasonsTableRevision": 5,
-  "reasonsSha256": "adef8af81541ed5c366749dfd5437e752626d7e85b73eded1a06c621c27c90f6",
+  "address": "0xc9B2D05873a3c49a4142a04a2DCBda81aCC2570D",
+  "runtimeHash": "0xedba369e512955c8993a261a16eedfca368f97aceba566fb1a0bf3a773334738",
+  "sourceCommit": "ce6469d",
+  "sourceSha256": "f29217100edde340817fe03fe954d0d454e15067cab38cfa0c58716bb9af2488",
+  "reasonsVersion": 4,
+  "reasonsTableRevision": 7,
+  "reasonsSha256": "3b8f7a71d9e0090067a3216130c9971e8c72a46b139e1a1d090b9ba6054e12a0",
   "vault": "0xA21cA21973681bB68A42B8387E86cA7c144D2de2",
   "predecessor": "0x180DAB53968e599Dd43CF431E27CB01AA5C37909",
   "treasury": "0x1039CB48254a3150fC604d4B9ea08F66f4739D37",
   "oldAero": "0x940181a94A35A4569E4529A3CDfB74e38FD98631",
   "upgradeUrl": "https://aerodrome.finance/upgrade",
-  "attestedBlock": "53235826"
+  "attestedBlock": "53408317"
 }

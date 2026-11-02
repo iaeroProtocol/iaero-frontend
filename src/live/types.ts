@@ -26,6 +26,7 @@ export type LiveControls={
   approve:(kind:ActionKind,amount:bigint)=>Promise<void>;
   sweep:(preview:SweepPreview,hooks?:SweepHooks)=>Promise<SweepResult>;
   refreshRewardValues:()=>void;
+  approveDeposit:(review:import('./deposit').DepositReview,hooks?:import('./deposit').DepositHooks)=>Promise<import('./deposit').DepositApproval>;
   deposit:(review:import('./deposit').DepositReview,hooks?:import('./deposit').DepositHooks)=>Promise<import('./deposit').DepositResult>;
   retryBaseReads?:()=>Promise<void>;
 };

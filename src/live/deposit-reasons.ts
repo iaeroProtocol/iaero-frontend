@@ -1,5 +1,5 @@
 import {formatUnits,getAddress,type Address} from 'viem';
-import table from '../../config/aero-deposit.reasons.v3.json';
+import table from '../../config/aero-deposit.reasons.v4.json';
 import type {DepositIssue} from './deposit-contract';
 export {table as depositReasonTable};
 export type DepositGuidance={code:number;name:string;instruction:string;steps:string[];fee:string;wait:string;technical:string[]};

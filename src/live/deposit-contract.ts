@@ -1,13 +1,15 @@
 import {decodeErrorResult,getAddress,isAddress,type Abi,type Address,type Hash} from 'viem';
 import abi from '../../config/aero-deposit.abi.json' with {type:'json'};
 
-// [VERIFIED: handoff/deposit-page/AeroStakeDeposit.sol, a5c96e2;
-// Sourcify exact creation/runtime match, 2026-10-29. Addresses live in config.]
+// [VERIFIED: aero-stake-deposit contracts/src/AeroStakeDeposit.sol, v2 ce6469d;
+// Sourcify exact creation/runtime match, 2026-11-02. Addresses live in config.]
 export const DEPOSIT_ABI=abi as Abi;
 export const DEPOSIT_MIN=10n**18n,DEPOSIT_MAX=10_000_000n*DEPOSIT_MIN;
 export const DEPOSIT_MAX_AGE_MS=120_000;
 export const DEPOSIT_GLOBAL_CODES=new Set([1,2,3,4,21]);
-export const DEPOSIT_REFUSALS=['None','DepositsPaused','DepositsClosed','DepositContractReplaced','MintingNotEnabled','AmountTooSmall','AmountTooLarge','AeroBalanceTooLow','AeroAllowanceTooLow','StakeNotFound','StakeAlreadyInVault','NotStakeOwner','PrimaryStake','AlreadyCredited','StakeTooSmall','StakeHasExpired','ExpiredStakeHasVotes','VoterRecordMismatch','VotesOnUnreachableChain','BaseOperatorSet','StakeNotApproved','LiqCapReached','LiqBelowMinimum','StakeInVaultNotCredited','StakeSentToDepositContract','SafeCannotDeposit','ProtocolStakeBlocked','StakeIsEmpty'] as const;
+export const DEPOSIT_REFUSALS=['None','DepositsPaused','DepositsClosed','DepositContractReplaced','MintingNotEnabled','AmountTooSmall','AmountTooLarge','AeroBalanceTooLow','AeroAllowanceTooLow','StakeNotFound','StakeAlreadyInVault','NotStakeOwner','PrimaryStake','AlreadyCredited','StakeTooSmall','StakeHasExpired','ExpiredStakeHasVotes','VoterRecordMismatch','VotesOnUnreachableChain','BaseOperatorSet','StakeNotApproved','LiqCapReached','LiqBelowMinimum','StakeInVaultNotCredited','StakeSentToDepositContract','SafeCannotDeposit','ProtocolStakeBlocked','StakeIsEmpty','StakeBelowStakeMinimum'] as const;
+// The only issue a user clears by approving (REASONS_VERSION 4 howToUse item 10, review P2-L1).
+export const DEPOSIT_APPROVAL_CODE={aero:8,stake:20} as const;
 export type DepositIssue={reason:number;tokenId:bigint;chainId:bigint;amount:bigint;limit:bigint;time:bigint;readyAt:bigint;account:Address;chainStatus:number};
 export type DepositConnection={verified:boolean;reason:string;address?:Address;vault?:Address;escrow?:Address;aero?:Address;iaero?:Address;liq?:Address;predecessor?:Address;treasury?:Address;reasonsVersion?:number;runtimeHash?:Hash;open?:boolean;issues?:DepositIssue[]};
 export type DepositQuote={iaero:bigint;fee:bigint;liq:bigint;treasuryLiq:bigint};
@@ -20,7 +22,9 @@ export function depositIssues(rows:unknown):DepositIssue[]{
 }
 export function depositQuote(value:unknown):DepositQuote{if(!Array.isArray(value)||value.length!==4)throw Error('Deposit preview is unavailable.');const [iaero,fee,liq,treasuryLiq]=value.map(uint256);return {iaero,fee,liq,treasuryLiq};}
 export function depositsOpen(issues:readonly DepositIssue[]){return !issues.some(i=>DEPOSIT_GLOBAL_CODES.has(i.reason));}
-export function depositBlockingIssues(issues:readonly DepositIssue[],mode:'aero'|'stake'){return issues.filter(i=>i.reason!==(mode==='aero'?8:20));}
+export function depositBlockingIssues(issues:readonly DepositIssue[],mode:'aero'|'stake'){return issues.filter(i=>i.reason!==DEPOSIT_APPROVAL_CODE[mode]);}
+// Approve is offered only when the approval code is the sole issue; Deposit only when there is none.
+export function depositNeedsApproval(issues:readonly DepositIssue[],mode:'aero'|'stake'){return issues.length>0&&!depositBlockingIssues(issues,mode).length;}
 export function decodedDepositFailure(error:unknown):{name:string;code?:number;args?:readonly unknown[]}|undefined{
  for(let e:any=error,n=0;e&&n<12;e=e.cause,n++){
   const raw=[e.data,e.error?.data,e.cause?.data].find(v=>typeof v==='string'&&/^0x[0-9a-f]{8,}$/i.test(v));

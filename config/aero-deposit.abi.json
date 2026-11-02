@@ -384,6 +384,27 @@
     ]
   },
   {
+    "name": "StakeBelowStakeMinimum",
+    "type": "error",
+    "inputs": [
+      {
+        "name": "tokenId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minimum",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
     "name": "StakeHasExpired",
     "type": "error",
     "inputs": [
@@ -917,6 +938,19 @@
   },
   {
     "name": "MIN_DEPOSIT",
+    "type": "function",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "name": "MIN_STAKE_DEPOSIT",
     "type": "function",
     "inputs": [],
     "outputs": [

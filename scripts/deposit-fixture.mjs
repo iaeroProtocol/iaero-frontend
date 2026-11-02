@@ -9,8 +9,8 @@ export async function depositFixture(options={},origin){
  const manifest=JSON.parse(await readFile('config/aero-deposit.json','utf8')),depositAbi=JSON.parse(await readFile('config/aero-deposit.abi.json','utf8')),runtime=JSON.parse(await readFile('test/fixtures/aero-deposit-runtime.json','utf8'));
  const escrowAbi=parseAbi(['function balanceOf(address) view returns(uint256)','function tokenOfOwnerByIndex(address,uint256) view returns(uint256)','function staked(uint256) view returns((uint128 amount,uint48 end,bool isPermanent))','function ownerOf(uint256) view returns(address)','function approve(address,uint256)']);
  state.blockTimestamp=BigInt(Math.floor(Date.now()/1000));state.depositOpen=true;state.depositPaused=false;state.depositRate=unit/2n;state.oldAero=0n;state.stakeApprovals=new Set();state.depositIssues=[];
- state.depositStakes=[{id:700n,amount:2n*unit,end:0,isPermanent:true},{id:701n,amount:3n*unit,end:Number(state.blockTimestamp+604800n),isPermanent:false}];
- f.boot.deposit={verified:true,reason:'Deterministic UI fixture',address:manifest.address,vault:manifest.vault,escrow:registry.aero.votingEscrow,aero:registry.aero.token,iaero:registry.legacy.iAERO,liq:registry.legacy.LIQ,predecessor:manifest.predecessor,treasury:manifest.treasury,reasonsVersion:3,runtimeHash:manifest.runtimeHash,open:true};
+ state.depositMinStake=5000n*unit;state.depositStakes=[{id:700n,amount:6000n*unit,end:0,isPermanent:true},{id:701n,amount:7000n*unit,end:Number(state.blockTimestamp+604800n),isPermanent:false},{id:702n,amount:4999n*unit,end:0,isPermanent:true}];
+ f.boot.deposit={verified:true,reason:'Deterministic UI fixture',address:manifest.address,vault:manifest.vault,escrow:registry.aero.votingEscrow,aero:registry.aero.token,iaero:registry.legacy.iAERO,liq:registry.legacy.LIQ,predecessor:manifest.predecessor,treasury:manifest.treasury,reasonsVersion:manifest.reasonsVersion,runtimeHash:manifest.runtimeHash,open:true};
  const same=(a,b)=>a.toLowerCase()===b.toLowerCase(),allowance=()=>state.allowances.get(registry.aero.token.toLowerCase()+':'+manifest.address.toLowerCase())??0n;
  const issue=(reason,extra={})=>({reason,tokenId:0n,chainId:8453n,amount:0n,limit:0n,time:state.blockTimestamp,readyAt:0n,account:zeroAddress,chainStatus:1,...extra});
  const quote=amount=>{const fee=amount*500n/10000n,iaero=amount-fee,liq=iaero*state.depositRate/unit;return [iaero,fee,liq,liq/5n];};
@@ -19,12 +19,12 @@ export async function depositFixture(options={},origin){
   if(same(to,manifest.oldAero))return encodeFunctionResult({abi:escrowAbi,functionName:'balanceOf',result:state.oldAero});
   if(same(to,manifest.address)){
    const {functionName:name,args=[]}=decodeFunctionData({abi:depositAbi,data}),amount=name==='checkAeroDeposit'?args[1]:state.depositStakes.find(s=>s.id===args[0])?.amount??0n;
-   if(name==='REASONS_VERSION')return encodeFunctionResult({abi:depositAbi,functionName:name,result:3n});
+   if(name==='REASONS_VERSION')return encodeFunctionResult({abi:depositAbi,functionName:name,result:BigInt(manifest.reasonsVersion)});if(name==='MIN_STAKE_DEPOSIT')return encodeFunctionResult({abi:depositAbi,functionName:name,result:state.depositMinStake});
    if(name==='getCurrentEmissionRate'||name==='halvings'||name==='totalLIQMinted')return encodeFunctionResult({abi:depositAbi,functionName:name,result:name==='getCurrentEmissionRate'?state.depositRate:name==='halvings'?1n:5n*10n**24n});
    if(name==='checkAeroDeposit'||name==='checkStake'){
     const rows=[];if(!state.depositOpen)rows.push(issue(2));if(state.depositPaused)rows.push(issue(1));
     if(name==='checkAeroDeposit'){if((state.balances.get(registry.aero.token.toLowerCase())??0n)<amount)rows.push(issue(7,{amount,limit:state.balances.get(registry.aero.token.toLowerCase())??0n}));if(allowance()<amount)rows.push(issue(8,{amount,limit:allowance()}));}
-    else{const stake=state.depositStakes.find(s=>s.id===args[0]);if(!stake)rows.push(issue(9,{tokenId:args[0]}));else if(!state.stakeApprovals.has(args[0].toString()))rows.push(issue(20,{tokenId:args[0]}));rows.push(...state.depositIssues.map(i=>issue(i.reason,{tokenId:args[0],...i})));}
+    else{const stake=state.depositStakes.find(s=>s.id===args[0]);if(!stake)rows.push(issue(9,{tokenId:args[0]}));else{if(stake.amount<state.depositMinStake)rows.push(issue(28,{tokenId:args[0],amount:stake.amount,limit:state.depositMinStake}));if(!state.stakeApprovals.has(args[0].toString()))rows.push(issue(20,{tokenId:args[0],account:manifest.address}));}rows.push(...state.depositIssues.map(i=>issue(i.reason,{tokenId:args[0],...i})));}
     return encodeFunctionResult({abi:depositAbi,functionName:name,result:rows});
    }
    if(name==='previewDeposit')return encodeFunctionResult({abi:depositAbi,functionName:name,result:quote(args[0])});

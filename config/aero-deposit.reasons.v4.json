@@ -1,12 +1,12 @@
 {
   "schema": "iaero.aero-stake-deposit.reasons",
-  "reasonsVersion": 3,
-  "tableRevision": 5,
+  "reasonsVersion": 4,
+  "tableRevision": 7,
   "contract": "AeroStakeDeposit",
-  "updated": "2026-10-27",
+  "updated": "2026-10-31",
   "howToUse": [
     "Call checkStake(tokenId, user) or checkAeroDeposit(user, amount). Each returned Issue has a reason code and fields; the first one is what the deposit would revert with.",
-    "Look the code up in `reasons` (codes are stable; this table must have the same reasonsVersion as the contract's REASONS_VERSION). `tableRevision` counts wording corrections within a version; codes and fields do not change between revisions.",
+    "Look the code up in `reasons` (codes are stable; this table must have the same reasonsVersion as the contract's REASONS_VERSION). `tableRevision` counts wording corrections within a version; codes and fields do not change between revisions. The count never restarts: version 4 starts at revision 6.",
     "Cache this file keyed on `tableRevision` (or on the file's hash), not on `REASONS_VERSION` alone: wording corrections raise `tableRevision` while `REASONS_VERSION` stays the same, so a cache keyed only on `REASONS_VERSION` would keep showing old text.",
     "If the entry has `variants`, use the first one whose `when` matches the Issue (every key in `when` equal to the Issue's field: `chainStatus` or `chainId`); its `instruction`, `steps`, `fee`, `wait` and `technical` replace the entry's.",
     "Fill the placeholders in `instruction`, `steps`, `wait` and `technical` from the Issue (see `placeholders`) and show `instruction`, then `steps`.",
@@ -14,7 +14,7 @@
     "A reverted deposit identifies the refusal, not always how to fix it: match the 4-byte selector against `reasons[].selector` or `otherErrors[].selector` and decode only the parameters the error actually encodes (`errorParams`). The errors do not carry `chainStatus` (codes 16, 18 and 19) or the Base `readyAt` (code 18): never infer them from the revert.",
     "After a stake-deposit revert, the front end MUST call checkStake(tokenId, user) again and choose the entry and its variant from that fresh result. If that read fails, show a generic refusal (the decoded code's name only, with no variant, no chain status and no wait time).",
     "After a `LiqBelowMinimum` revert (code 22), call previewDeposit(amount) again and ask for a new minLiqToUser from that fresh preview.",
-    "Before calling, check the amount against the deposit bounds: at least 1 AERO, and at most 10,000,000 AERO for depositAero. An amount far beyond the maximum (near 2^256) makes checkAeroDeposit and depositAero revert with an arithmetic panic instead of AmountTooLarge."
+    "Before calling, check the deposit bounds: depositAero takes at least 1 AERO and at most 10,000,000 AERO; depositStake takes only a stake that holds at least 5,000 AERO (MIN_STAKE_DEPOSIT). For a stake, call checkStake(tokenId, user) before the user signs anything and show the entry for each code it returns: a small stake can be code 28, code 14 if it holds under 1 AERO, or 15, 16 or 27 if it has expired, so never pick the code from the amount. If the only issue is code 20 (StakeNotApproved), enable Approve and keep Deposit disabled until a fresh checkStake returns no issues; for any other issue, disable both (for depositAero, code 8 AeroAllowanceTooLow plays the part of code 20, with checkAeroDeposit). An amount far beyond the maximum (near 2^256) makes checkAeroDeposit and depositAero revert with an arithmetic panic instead of AmountTooLarge."
   ],
   "placeholders": {
     "{tokenId}": "Issue.tokenId, decimal",
@@ -124,6 +124,24 @@
       "date": "2026-10-27",
       "notes": [
         "Outside review ADS-L01 and ADS-I01 (guide only; codes, fields and texts unchanged): a revert identifies the refusal but does not carry chainStatus (16, 18, 19) or Base readyAt (18), so after a stake-deposit revert the front end calls checkStake again and picks the variant from that; a fresh previewDeposit after LiqBelowMinimum; the front end checks the deposit bounds before calling."
+      ]
+    },
+    {
+      "version": 4,
+      "revision": 6,
+      "date": "2026-10-31",
+      "notes": [
+        "Owner ruling 31 Oct (contract v2): code 28 StakeBelowStakeMinimum appended. A live stake that holds at least 1 AERO but less than MIN_STAKE_DEPOSIT (5,000 AERO) is refused, with limit = 5,000 AERO. Codes 1-27 keep their meaning and the Issue struct is unchanged. depositAero keeps its 1 AERO minimum.",
+        "Code 14 (a stake under 1 AERO; unchanged on chain) and code 27 now say a stake must hold at least 5,000 AERO to be deposited.",
+        "howToUse: the stake bound is checked before the user signs; tableRevision keeps counting across versions."
+      ]
+    },
+    {
+      "version": 4,
+      "revision": 7,
+      "date": "2026-10-31",
+      "notes": [
+        "Pass 2 P2-L1 (guide only; codes, fields and texts unchanged): howToUse item 10. A good stake that is not approved yet returns only code 20, so Approve stays enabled for it and Deposit waits for a fresh empty checkStake; every other issue disables both. The page shows the code checkStake returns (14, 15, 16, 27 or 28), never code 28 from the amount alone."
       ]
     }
   ],
@@ -555,17 +573,18 @@
       "whoFixes": "you",
       "fee": "No fee beyond normal gas.",
       "wait": "None.",
-      "instruction": "Stake #{tokenId} holds {amount} AERO; the minimum is {limit} AERO. Add AERO to the stake in Aero, then deposit again.",
+      "instruction": "Stake #{tokenId} holds {amount} AERO, under the {limit} AERO minimum, and only stakes of at least 5,000 AERO can be deposited. Add AERO to the stake in Aero until it holds at least 5,000 AERO, then deposit again, or deposit AERO directly instead.",
       "steps": [
-        "In Aero, increase stake #{tokenId}'s amount so it holds at least {limit} AERO (no fee beyond gas, no waiting).",
-        "Deposit the stake again."
+        "Either: in Aero, increase stake #{tokenId}'s amount so it holds at least 5,000 AERO (no fee beyond gas, no waiting), then deposit the stake again.",
+        "Or: deposit AERO directly with Deposit AERO (at least 1 AERO)."
       ],
       "technical": [
         "AERO.approve(VotingEscrow, value), then VotingEscrow.increaseStakeAmount({tokenId}, value)"
       ],
       "sources": [
         "core/VotingEscrow.sol:236-258 (increaseStakeAmount: owner or approved; not on an expired decaying stake)",
-        "V5:266 (minimum)"
+        "V5:266 (minimum)",
+        "owner ruling 31 Oct 2026 (MIN_STAKE_DEPOSIT 5,000 AERO, code 28; DESIGN.md section 20)"
       ]
     },
     {
@@ -1133,20 +1152,59 @@
       "whoFixes": "you",
       "fee": "No fee beyond normal gas.",
       "wait": "None.",
-      "instruction": "Stake #{tokenId} holds no AERO and its staking period has ended, so there is nothing to deposit. Put at least 1 AERO back into it as a permanent stake in Aero and deposit it again, or deposit AERO directly instead.",
+      "instruction": "Stake #{tokenId} holds no AERO and its staking period has ended, so there is nothing to deposit. Put at least 5,000 AERO back into it as a permanent stake in Aero and deposit it again, or deposit AERO directly instead (at least 1 AERO).",
       "steps": [
-        "Either: in Aero, revive stake #{tokenId} as a permanent stake with at least 1 AERO (approve the AERO to Aero first), then deposit the stake here.",
+        "Either: in Aero, revive stake #{tokenId} as a permanent stake with at least 5,000 AERO (approve the AERO to Aero first), then deposit the stake here.",
         "Or: deposit AERO directly with Deposit AERO (at least 1 AERO)."
       ],
       "technical": [
-        "AERO.approve(VotingEscrow, value), then VotingEscrow.reviveStake({tokenId}, value, 0, true) with value of at least 1000000000000000000"
+        "AERO.approve(VotingEscrow, value), then VotingEscrow.reviveStake({tokenId}, value, 0, true) with value of at least 5000000000000000000000"
       ],
       "sources": [
         "core/VotingEscrow.sol:209-234, 914-917 (reviveStake: an empty stake whose period is over; permanent takes 0 weeks)",
         "core/VotingEscrow.sol:283-311 (withdraw empties a stake)",
         "core/VotingEscrow.sol:355-436 (the VPM can drain one too)",
         "review 2 R2-I1",
-        "review 3 R3-I2"
+        "review 3 R3-I2",
+        "owner ruling 31 Oct 2026 (MIN_STAKE_DEPOSIT 5,000 AERO)"
+      ]
+    },
+    {
+      "code": 28,
+      "name": "StakeBelowStakeMinimum",
+      "error": "StakeBelowStakeMinimum(uint256,uint256,uint256)",
+      "selector": "0x15fda217",
+      "errorParams": [
+        "tokenId",
+        "amount",
+        "minimum"
+      ],
+      "issueFields": [
+        "tokenId",
+        "amount",
+        "limit"
+      ],
+      "appliesTo": [
+        "depositStake"
+      ],
+      "whoFixes": "you",
+      "fee": "No fee beyond normal gas.",
+      "wait": "None.",
+      "instruction": "Stake #{tokenId} holds {amount} AERO; stakes of at least {limit} AERO can be deposited. Add AERO to it in Aero, or merge it with another of your stakes, until it holds at least {limit} AERO, then deposit again. Or deposit AERO directly instead.",
+      "steps": [
+        "Either: in Aero, increase stake #{tokenId}'s amount so it holds at least {limit} AERO (no fee beyond gas, no waiting), then deposit the stake again.",
+        "Or: if the Aero app offers merging, merge this stake with another of your stakes, so the stake you deposit holds at least {limit} AERO, then deposit that one.",
+        "Or: deposit AERO directly with Deposit AERO (at least 1 AERO). The AERO already in this stake can be withdrawn only after the stake has ended; a permanent stake must first be changed back to a decaying one, which runs for 4 years."
+      ],
+      "technical": [
+        "AERO.approve(VotingEscrow, value), then VotingEscrow.increaseStakeAmount({tokenId}, value) so that the stake holds at least {limit} AERO",
+        "Merging is VoterPaymentsModule.depositIntoNFT(sources, destinationId, recipient). On Base it is restricted (restricted(0x8bb9272c) is true, read 31 Oct 2026), so it works only through an app Aero has registered"
+      ],
+      "sources": [
+        "owner ruling 31 Oct 2026 (MIN_STAKE_DEPOSIT 5,000 AERO: each deposited stake must be worth the keeper's leaf-operator clears; DESIGN.md section 20)",
+        "core/VotingEscrow.sol:236-258 (increaseStakeAmount: owner or approved; not on an expired decaying stake)",
+        "vpm/VoterPaymentsModule.sol:128-173, 288-302 (depositIntoNFT; an unregistered caller is refused while it is restricted)",
+        "core/VotingEscrow.sol:283-311, 331-352 (withdraw only once the stake has ended; a downgrade starts a 4-year decay)"
       ]
     }
   ],

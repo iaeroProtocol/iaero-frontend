@@ -1,5 +1,20 @@
 # AeroStakeDeposit frontend — 29 October 2026
 
+## v2 update — 2 November 2026
+
+The page now targets v2 `0xc9B2D05873a3c49a4142a04a2DCBda81aCC2570D` (Base block
+53,407,300; source `ce6469d`, SHA-256
+`f29217100edde340817fe03fe954d0d454e15067cab38cfa0c58716bb9af2488`; Sourcify
+exact creation and runtime match). `config/aero-deposit.json` pins its runtime
+hash and the version 4, revision 7 table
+(`config/aero-deposit.reasons.v4.json`, SHA-256
+`3b8f7a71d9e0090067a3216130c9971e8c72a46b139e1a1d090b9ba6054e12a0`). The ABI
+is Sourcify's, identical to a fresh `forge build`. Verification also requires
+`MIN_STAKE_DEPOSIT()`, which the page reads live and never configures.
+Code 28 refuses a stake under the minimum before any signature. Approval and
+deposit are now separate steps (review P2-L1). Deposits stay closed until
+batch B sets the vault's `depositor()` to v2. The record below describes v1.
+
 The Deposit page connects the separately deployed `AeroStakeDeposit` at
 `0xD5E4a7869D1189caa617749d483aaD95Af370c70`. It also replaces the previous
 closed intake panels under Get iAERO. Existing claims, LIQ staking, sweeps,
